@@ -1,6 +1,7 @@
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, Scrollbar, TextView, InputState, Input } from "gpui-base";
-import { spaces, panes, focused, exec, theme, notify, playSound, props, openOverlay, closeOverlay, shared, setShared } from "herdr";
+import { v_flex, h_flex, Scrollbar, TextView, InputState, Input, TextareaState, Textarea } from "gpui-base";
+import { spaces, panes, focused, exec, readTextFile, theme, notify, playSound, props, openOverlay, closeOverlay, shared, setShared } from "herdr";
+import { modelFor, runModel, describe } from "./ai.js";
 
 // My open pull requests in the repo of the focused folder, via the `gh` CLI. Click opens the PR in a popup
 // (description, who approved, comments and reviews); the popup has Open (browser) and Copy link.
@@ -73,6 +74,8 @@ export default class Prs extends View {
   init(_props, cx) {
     // Opened as a popup for one PR (click on a row): its description, approvals, comments and reviews.
     if (props()?.pr) { this.detailPr = props().pr; this.loadDetail(cx); return; }
+    // Opened as a dialog from the header's + : a new pull request for the branch of that folder.
+    if (props()?.create) { this.initCreate(cx); return; }
     this.started = Date.now();
     // Search: by title, description, branch or number; the list is cut as you type.
     this.query = "";
@@ -199,6 +202,151 @@ export default class Prs extends View {
     });
   }
 
+  // ── the "new pull request" dialog ──
+  initCreate(cx) {
+    const c = props().create; // { cwd, on }
+    this.cr = { loading: true, error: null, root: null, branch: null, base: "main", commits: [], ahead: 0, pushed: false, existing: null, draft: false, generating: false, creating: false, note: null, preview: false, rev: 0 };
+    this.crTitle = InputState.new({ placeholder: "Title" });
+    this.crBase = InputState.new({ placeholder: "Base branch" });
+    this.crBody = TextareaState.new({ placeholder: "Description (write it, or let the AI draft it)" });
+    this.crBody.set_rows(14);
+    for (const s of [this.crTitle, this.crBase]) s.on("change", (_e, cx) => cx.notify());
+    cx.spawn(async (cx) => {
+      const cr = this.cr;
+      try {
+        const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd: c.cwd, on: c.on }).catch(() => null);
+        if (!top || top.code !== 0) throw new Error("This folder is not in a git repository");
+        const root = top.stdout.trim(), git = (args) => exec("git", args, { cwd: root, on: c.on });
+        // The base is the repository's default branch: GitHub's own answer first, then origin/HEAD, then main.
+        const [br, def, sym, up] = await Promise.all([git(["rev-parse", "--abbrev-ref", "HEAD"]),
+          exec("gh", ["repo", "view", "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"], { cwd: root, on: c.on }).catch(() => null),
+          git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]), git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])]);
+        const branch = br.stdout.trim();
+        const base = (def?.code === 0 && def.stdout.trim()) || (sym.code === 0 ? sym.stdout.trim().replace(/^origin\//, "") : "main");
+        Object.assign(cr, { root, branch, base, on: c.on });
+        if (branch === "HEAD") throw new Error("HEAD is detached: switch to a branch first");
+        if (branch === base) throw new Error(`You are on ${base}: switch to a feature branch to open a pull request`);
+        const log = await git(["log", "--format=%s", "-n", "30", `origin/${base}..HEAD`]);
+        cr.commits = log.code === 0 ? log.stdout.split("\n").filter(Boolean) : [];
+        if (up.code === 0) { const n = await git(["rev-list", "--count", "@{u}..HEAD"]); cr.ahead = Number(n.stdout) || 0; cr.pushed = cr.ahead === 0; }
+        else cr.ahead = cr.commits.length;
+        const ex = await exec("gh", ["pr", "view", "--json", "url,number,state"], { cwd: root, on: c.on }).catch(() => null);
+        if (ex?.code === 0) { const pr = JSON.parse(ex.stdout); if (pr.state === "OPEN") cr.existing = pr; } // a closed or merged one doesn't block a new one
+        this.crTitle.set_value(branch); // the branch name as it is; the AI can write a real title
+        this.crBase.set_value(base);
+      } catch (e) { cr.error = String(e.message ?? e); }
+      cr.loading = false; cx.notify();
+    });
+  }
+
+  // The description, drafted by the model picked for commits (wb-ai), from the branch's commits and diff against its base.
+  crGenerate(cx) {
+    const cr = this.cr;
+    if (!cr.root || cr.generating || cr.creating) return;
+    const base = this.crBase.value().trim() || cr.base, model = modelFor("commit");
+    cr.generating = true; cr.note = null; cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const git = (args) => exec("git", args, { cwd: cr.root, on: cr.on });
+        const [log, diff] = await Promise.all([git(["log", "--format=- %s", "-n", "30", `origin/${base}..HEAD`]), git(["diff", "--no-color", `origin/${base}...HEAD`])]);
+        if (diff.code !== 0) throw new Error((diff.stderr || "git diff failed").trim().split("\n").pop());
+        const rules = (await readTextFile(`${cr.root}/CLAUDE.md`, { on: cr.on }).catch(() => null))?.trim().slice(0, 8000);
+        const prompt = "Write a pull request for these changes. Line 1: the title, up to 72 characters, imperative mood, plain text (no quotes, no markdown, no trailing period). "
+          + "Then one blank line, then the description in GitHub-flavored markdown: a short summary of what the branch does and why, "
+          + "the notable changes as a short list, and anything a reviewer should check. Plain and concrete; no praise, no filler. "
+          + `${rules ? `The project's rules (CLAUDE.md); follow what they say about pull requests and their titles:\n${rules}\n\n` : ""}Reply with the title and the description only, nothing else.`;
+        const text = `Branch ${cr.branch} into ${base}.\n\nCommits:\n${log.stdout}\n\nDiff:\n${(diff.stdout || "").slice(0, 60000)}`;
+        const out = await runModel(model, `${prompt}\n\n${text}`, { cwd: cr.root, on: cr.on });
+        if (!out) throw new Error("the model returned nothing");
+        // First line: the title (stray markdown or quotes dropped); the rest: the description.
+        const lines = out.split("\n"), title = lines.shift().replace(/^[#>\s*"'`]+|["'`\s*]+$/g, "").replace(/^title:\s*/i, "").trim();
+        this.crTitle.set_value(title.slice(0, 120));
+        this.crBody.set_value(lines.join("\n").trim());
+        cr.preview = true; cr.rev++; // show what the AI wrote as rendered markdown; Write edits it
+      } catch (e) { cr.note = `Generate failed: ${e.message ?? e}`; }
+      cr.generating = false; cx.notify();
+    });
+  }
+
+  // Pushes the branch when it isn't on the remote yet, then opens the pull request.
+  crCreate(cx) {
+    const cr = this.cr, title = this.crTitle.value().trim(), base = this.crBase.value().trim() || cr.base, body = this.crBody.value().trim();
+    if (!title || !cr.root || cr.creating || cr.generating || cr.existing || cr.error) return;
+    cr.creating = true; cr.note = null; cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        if (!cr.pushed) {
+          const push = await exec("git", ["push", "-u", "origin", "HEAD"], { cwd: cr.root, on: cr.on, timeout: 180000 });
+          if (push.code !== 0) throw new Error(`push failed: ${(push.stderr || push.stdout).trim().split("\n").slice(-3).join(" ")}`);
+        }
+        const args = ["pr", "create", "--base", base, "--head", cr.branch, "--title", title, "--body", body, ...(cr.draft ? ["--draft"] : [])];
+        const r = await exec("gh", args, { cwd: cr.root, on: cr.on, timeout: 120000 });
+        if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().split("\n").slice(-3).join(" "));
+        const url = r.stdout.trim().split("\n").pop();
+        notify({ title: "Pull request created", body: url, level: "info" });
+        setShared("prs.changed", { ts: Date.now() }); // the panel's list re-asks
+        closeOverlay(props()?.overlay);
+      } catch (e) { cr.note = `Create failed: ${e.message ?? e}`; }
+      cr.creating = false; cx.notify();
+    });
+  }
+
+  createView(t) {
+    const cr = this.cr, title = this.crTitle.value().trim();
+    const ready = Boolean(title && cr.root && !cr.loading && !cr.error && !cr.existing && !cr.creating && !cr.generating);
+    const btn = (id, label, act, { primary = false, enabled = true } = {}) => div().id(id).h(28).px(12).flex().items_center().justify_center().rounded(6).border_1().text_size(12)
+      .border_color(primary && enabled ? t.accent : t.border).text_color(!enabled ? t.dim : primary ? t.accent : t.foreground)
+      .when(enabled, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover))).on_click((_e, cx) => { if (enabled) act(cx); }).child(label);
+    const field = (label, child) => v_flex().gap(4).child(div().text_size(11).text_color(t.dim).child(label)).child(child);
+    const box = (state, h) => div().h(h).flex_none().px(10).flex().items_center().rounded(7).border_1().border_color(t.border).bg(t.background).cursor_text()
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(state).h_full().w_full().text_size(12).text_color(t.foreground));
+    const model = modelFor("commit");
+    return v_flex().id("pr-create").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
+      .child(h_flex().h(44).flex_none().px(16).gap(8).items_center().border_b(1).border_color(t.border)
+        .child(div().font_semibold().child("New pull request"))
+        .when(Boolean(cr.branch), (e) => e.child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child(`${cr.branch} → ${this.crBase.value().trim() || cr.base}`)))
+        .child(div().flex_1())
+        .child(div().id("cr-close").size(26).flex().items_center().justify_center().rounded(6).text_color(t.dim).cursor_pointer()
+          .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click(() => closeOverlay(props()?.overlay)).child("✕")))
+      .child(v_flex().id("cr-body").flex_1().min_h(0).overflow_y_scrollbar().px(16).py(14).gap(12)
+        .when(cr.loading, (e) => e.child(div().text_color(t.dim).child("Loading…")))
+        .when(Boolean(cr.error), (e) => e.child(div().text_color(t.ansi1).child(cr.error)))
+        .when(Boolean(cr.existing), (e) => e.child(h_flex().gap(8).items_center().p(10).rounded(8).bg(t.raised)
+          .child(div().flex_1().child(`A pull request for this branch already exists: #${cr.existing.number}`))
+          .child(btn("cr-open", "Open", () => exec("open", [cr.existing.url])))))
+        .when(Boolean(cr.root && !cr.error), (e) => e
+          .child(field("Title", box(this.crTitle, 32)))
+          .child(field("Base branch", box(this.crBase, 32)))
+          .when(cr.commits.length > 0, (e2) => e2.child(field(`Commits (${cr.commits.length})`, v_flex().gap(2).text_size(11.5).text_color(t.muted)
+            .children(cr.commits.slice(0, 6).map((s) => div().truncate().child(`· ${s}`)))
+            .when(cr.commits.length > 6, (e3) => e3.child(div().text_color(t.dim).child(`… and ${cr.commits.length - 6} more`))))))
+          .child(field("Description (the AI writes the title above too)", v_flex().gap(6)
+            .child(h_flex().gap(8).items_center()
+              .child(btn("cr-gen", cr.generating ? "Generating…" : "✦ Generate title and description", (cx) => this.crGenerate(cx), { primary: true, enabled: !cr.generating && !cr.creating }))
+              .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(describe(model)))
+              .child(h_flex().flex_none().rounded(6).border_1().border_color(t.border).overflow_hidden()
+                .children([["write", "Write", false], ["preview", "Preview", true]].map(([id, label, v]) => div().id(`cr-${id}`).h(26).px(10).flex().items_center().cursor_pointer().text_size(12)
+                  .bg(cr.preview === v ? t.selected : t.background).text_color(cr.preview === v ? t.foreground : t.muted)
+                  .when(cr.preview !== v, (e) => e.hover((s) => s.bg(t.hover)))
+                  .on_click((_e, cx) => { if (cr.preview !== v) { cr.preview = v; cr.rev++; cx.notify(); } }).child(label))))
+              .child(btn("cr-models", "AI models…", () => openOverlay({ mod: "wb-ai", kind: "window", key: "wb-ai", width: 580 }))))
+            .child(cr.preview
+              ? v_flex().id("cr-preview").h(240).flex_none().px(12).py(8).rounded(7).border_1().border_color(t.border).bg(t.background).overflow_y_scrollbar()
+                .child(this.crBody.value().trim() ? TextView.markdown(`cr-md-${cr.rev}`, this.crBody.value()) : div().text_color(t.dim).child("Nothing to preview yet"))
+              : div().id("cr-desc").h(240).flex_none().px(10).py(8).rounded(7).border_1().border_color(t.border).bg(t.background).cursor_text()
+                .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Textarea.new(this.crBody).w_full().h(224).text_size(12).text_color(t.foreground)))))
+          .child(h_flex().id("cr-draft").gap(8).items_center().cursor_pointer().on_click((_e, cx) => { cr.draft = !cr.draft; cx.notify(); })
+            .child(div().size(14).flex().items_center().justify_center().rounded(3).border_1().text_size(10).font_semibold()
+              .border_color(cr.draft ? t.accent : t.border).bg(cr.draft ? t.accent : t.background).text_color(t.accent_foreground).child(cr.draft ? "✓" : ""))
+            .child(div().text_size(12).child("Create as draft")))
+          .when(!cr.pushed, (e2) => e2.child(div().p(10).rounded(8).bg(t.raised).text_size(11.5).text_color(t.muted)
+            .child(`${cr.branch} is not on the remote yet: creating the pull request first runs git push -u origin HEAD (${cr.ahead} commit${cr.ahead === 1 ? "" : "s"}).`)))
+          .when(Boolean(cr.note), (e2) => e2.child(div().text_size(12).text_color(t.ansi1).child(cr.note)))))
+      .child(h_flex().h(52).flex_none().px(16).gap(8).items_center().justify_end().border_t(1).border_color(t.border)
+        .child(btn("cr-cancel", "Cancel", () => closeOverlay(props()?.overlay)))
+        .child(btn("cr-create", cr.creating ? (cr.pushed ? "Creating…" : "Pushing…") : cr.pushed ? "Create pull request" : "Push and create pull request", (cx) => this.crCreate(cx), { primary: true, enabled: ready })));
+  }
+
   detailView(t) {
     const pr = this.detailPr, d = this.detail;
     const btn = (id, label, act) => div().id(id).h(26).px(10).flex().items_center().rounded(6).border_1().border_color(t.border).text_size(12).cursor_pointer()
@@ -278,6 +426,7 @@ export default class Prs extends View {
 
   render(cx) {
     if (this.detailPr) return this.detailView(theme());
+    if (this.cr) return this.createView(theme());
     const changed = shared("prs.changed");
     if (changed && changed.ts !== this.changedTs) { this.changedTs = changed.ts; if (changed.ts > (this.started ?? 0)) cx.spawn(async (cx) => this.poll(cx)); }
     const t = theme();
@@ -297,6 +446,10 @@ export default class Prs extends View {
           .child(div().size(13).flex().items_center().justify_center().rounded(3).border_1().text_size(10).font_semibold()
             .border_color(this.auto ? t.accent : t.border).bg(this.auto ? t.accent : t.background).text_color(t.accent_foreground).child(this.auto ? "✓" : ""))
           .child(div().text_size(10).text_color(t.muted).child("Auto")))
+        .child(div().id("new-pr").size(24).flex().items_center().justify_center().rounded(6).cursor_pointer().text_color(t.muted)
+          .hover((s) => s.bg(t.hover)).tooltip("New pull request from this folder's branch")
+          .on_click((_e, cx) => { cx.stop_propagation(); const l = location(); if (l.cwd) openOverlay({ mod: "prs", kind: "dialog", width: 660, height: 720, props: { create: l } }); })
+          .child(svg("mods/prs/plus.svg").size(14)))
         .child(refresh))
       .when(Boolean(this.prs.length), (e) => e.child(div().flex_none().px(8).pt(8)
         .child(div().id("search").h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
