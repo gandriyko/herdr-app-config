@@ -13,6 +13,8 @@
 !mods/
 !mods/branch-picker/
 !mods/branch-picker/**
+!mods/wb-ai/
+!mods/wb-ai/**
 !mods/wb-diff/
 !mods/wb-diff/**
 !mods/changes-copy/
