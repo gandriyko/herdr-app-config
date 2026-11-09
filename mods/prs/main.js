@@ -21,10 +21,17 @@ function ci(rollup) {
   return "ok";
 }
 
-// Copilot: "done" once it left a review, "asked" while its request is pending, else "".
+// Copilot: "clean" if its latest review left no comments, "done" if it left some, "asked" while its request is pending, else "".
 // ponytail: matches the login by /copilot/i (its review login is copilot-pull-request-reviewer, the request's is Copilot).
+// ponytail: "no comments" is read from the review text: "No open issues" (ccr-overview-v2), or the older
+// "...generated no (new) comments."; gh gives no comment count. A new Copilot wording needs a new pattern here.
 const isCopilot = (x) => /copilot/i.test(x?.login ?? x?.name ?? "");
-const copilot = (pr) => pr.reviews?.some((r) => isCopilot(r.author)) ? "done" : pr.reviewRequests?.some(isCopilot) ? "asked" : "";
+const copilot = (pr) => {
+  const last = pr.reviews?.filter((r) => isCopilot(r.author)).pop();
+  if (last) return /no open issues|generated no (new )?comments/i.test(last.body ?? "") ? "clean" : "done";
+  return pr.reviewRequests?.some(isCopilot) ? "asked" : "";
+};
+const reviewed = (state) => state === "done" || state === "clean";
 
 // "approved" if a human's latest review approves, "changes" if it requests changes, else "".
 // By reviews, not only reviewDecision: that one stays empty in repos that don't require reviews.
@@ -125,11 +132,11 @@ export default class Prs extends View {
             if (e.setup && !this.warned) { this.warned = true; notify({ title: "Pull requests", body: e.message, level: "warning" }); }
           }
         }));
-        for (const [url, { state, pr }] of next) if (this.seen?.get(url) !== undefined && this.seen.get(url) !== "done" && state === "done") done.push(pr);
+        for (const [url, { state, pr }] of next) if (this.seen?.get(url) !== undefined && !reviewed(this.seen.get(url)) && reviewed(state)) done.push(pr);
         // A failed repo drops out of `next`; keep its old states so a later success isn't mistaken for news.
         this.seen = new Map([...(this.seen ?? []), ...[...next].map(([url, { state }]) => [url, state])]);
         this.focusRepo = (await this.repoOf(focus)).key; this.show();
-        for (const pr of done) notify({ title: "Copilot reviewed", body: `#${pr.number} ${pr.title}`, level: "info" });
+        for (const pr of done) notify({ title: copilot(pr) === "clean" ? "Copilot reviewed: no comments" : "Copilot reviewed", body: `#${pr.number} ${pr.title}`, level: "info" });
         if (done.length) playSound("done");
       } catch (e) { this.error = String(e.message ?? e); }
       finally {
@@ -154,12 +161,13 @@ export default class Prs extends View {
       .child(h_flex().gap(6).items_center()
         .child(div().id(`ci-${pr.number}`).flex_none().size(9).flex().items_center().justify_center().tooltip(dotTip)
           .child(div().size(7).rounded(4).bg(dot ?? t.border)))
-        // Copilot badge "C": filled green = reviewed, yellow outline = requested, faint = not asked.
+        // Copilot badge "C": filled cyan = reviewed, no comments; filled green = reviewed with comments;
+        // yellow outline = requested; faint = not asked. Cyan (theme's ansi6) is used by no other mark here.
         .child(div().id(`cp-${pr.number}`).flex_none().size(15).flex().items_center().justify_center().rounded(4).border_1().text_size(10).font_semibold()
-          .border_color(cp === "done" ? t.done : cp === "asked" ? t.working : t.border)
-          .bg(cp === "done" ? t.done : t.background)
-          .text_color(cp === "done" ? t.background : cp === "asked" ? t.working : t.dim)
-          .tooltip(cp === "done" ? "Copilot reviewed" : cp === "asked" ? "Copilot review requested, no answer yet" : "Copilot not requested").child("C"))
+          .border_color(cp === "clean" ? t.ansi6 : cp === "done" ? t.done : cp === "asked" ? t.working : t.border)
+          .bg(cp === "clean" ? t.ansi6 : cp === "done" ? t.done : t.background)
+          .text_color(reviewed(cp) ? t.background : cp === "asked" ? t.working : t.dim)
+          .tooltip(cp === "clean" ? "Copilot reviewed: no comments" : cp === "done" ? "Copilot reviewed: left comments" : cp === "asked" ? "Copilot review requested, no answer yet" : "Copilot not requested").child("C"))
         .child(div().id(`ap-${pr.number}`).flex_none().size(15).flex().items_center().justify_center().tooltip(apTip)
           .child(svg(`mods/prs/${apIcon}.svg`).size(14).text_color(apColor)))
         .child(div().flex_none().text_size(11).text_color(t.dim).child(`#${pr.number}`))
