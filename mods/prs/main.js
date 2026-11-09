@@ -28,8 +28,15 @@ const copilot = (pr) => pr.reviews?.some((r) => isCopilot(r.author)) ? "done" : 
 
 const FIELDS = "number,title,headRefName,isDraft,reviewDecision,url,statusCheckRollup,reviewRequests,reviews";
 async function list(cwd, on) {
-  const r = await exec("gh", ["pr", "list", "--author", "@me", "--state", "open", "--limit", "100", "--json", FIELDS], { cwd, on });
-  if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().split("\n").pop() || "gh failed");
+  // exec rejects when the program can't start (gh not installed); gh itself says "gh auth login" when not logged in.
+  const setup = (message) => Object.assign(new Error(message), { setup: true });
+  const r = await exec("gh", ["pr", "list", "--author", "@me", "--state", "open", "--limit", "100", "--json", FIELDS], { cwd, on })
+    .catch(() => { throw setup("GitHub CLI (gh) is not installed · install it (brew install gh), then run gh auth login"); });
+  if (r.code !== 0) {
+    const text = (r.stderr || r.stdout).trim();
+    if (/gh auth login|not logged in/i.test(text)) throw setup("GitHub CLI is not logged in · run gh auth login");
+    throw new Error(text.split("\n").pop() || "gh failed");
+  }
   return JSON.parse(r.stdout);
 }
 
@@ -102,7 +109,11 @@ export default class Prs extends View {
             const prs = await list(r.cwd, r.on);
             this.byRepo.set(k, { name: r.name, prs, error: null });
             for (const pr of prs) next.set(pr.url, { state: copilot(pr), pr });
-          } catch (e) { this.byRepo.set(k, { name: r.name, prs: old?.prs ?? [], error: String(e.message ?? e) }); }
+          } catch (e) {
+            this.byRepo.set(k, { name: r.name, prs: old?.prs ?? [], error: String(e.message ?? e) });
+            // One toast per session: the panel is often closed, and a minute-by-minute toast would nag.
+            if (e.setup && !this.warned) { this.warned = true; notify({ title: "Pull requests", body: e.message, level: "warning" }); }
+          }
         }));
         for (const [url, { state, pr }] of next) if (this.seen?.get(url) !== undefined && this.seen.get(url) !== "done" && state === "done") done.push(pr);
         // A failed repo drops out of `next`; keep its old states so a later success isn't mistaken for news.
