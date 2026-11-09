@@ -26,7 +26,17 @@ function ci(rollup) {
 const isCopilot = (x) => /copilot/i.test(x?.login ?? x?.name ?? "");
 const copilot = (pr) => pr.reviews?.some((r) => isCopilot(r.author)) ? "done" : pr.reviewRequests?.some(isCopilot) ? "asked" : "";
 
-const FIELDS = "number,title,headRefName,isDraft,reviewDecision,url,statusCheckRollup,reviewRequests,reviews";
+// "approved" if a human's latest review approves, "changes" if it requests changes, else "".
+// By reviews, not only reviewDecision: that one stays empty in repos that don't require reviews.
+function approval(pr) {
+  const last = new Map();
+  for (const r of pr.reviews ?? []) if (["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(r.state)) last.set(r.author?.login, r.state);
+  const states = [...last.values()];
+  return pr.reviewDecision === "CHANGES_REQUESTED" || states.includes("CHANGES_REQUESTED") ? "changes"
+    : pr.reviewDecision === "APPROVED" || states.includes("APPROVED") ? "approved" : "";
+}
+
+const FIELDS ="number,title,headRefName,isDraft,reviewDecision,url,statusCheckRollup,reviewRequests,reviews";
 async function list(cwd, on) {
   // exec rejects when the program can't start (gh not installed); gh itself says "gh auth login" when not logged in.
   const setup = (message) => Object.assign(new Error(message), { setup: true });
@@ -132,23 +142,31 @@ export default class Prs extends View {
   row(pr, t) {
     const state = ci(pr.statusCheckRollup);
     const dot = { ok: t.done, fail: t.ansi1, wait: t.working }[state];
-    const review = { APPROVED: ["approved", t.done], CHANGES_REQUESTED: ["changes", t.ansi1], REVIEW_REQUIRED: ["review", t.muted] }[pr.reviewDecision];
+    const dotTip = { ok: "CI: all checks passed", fail: "CI: a check failed", wait: "CI: checks are running" }[state] ?? "CI: no checks";
+    // Review icon: green check = someone approved, red cross = changes requested, grey check = not approved yet.
+    const ap = approval(pr);
+    const [apIcon, apColor, apTip] = ap === "approved" ? ["approved", t.done, "Approved by a reviewer"]
+      : ap === "changes" ? ["changes", t.ansi1, "Changes requested"] : ["approved", t.border, "Not approved yet"];
     const cp = copilot(pr);
     return v_flex().id(`pr-${pr.number}`).flex_none().px(8).py(4).gap(2).rounded(5).cursor_pointer()
       .hover((s) => s.bg(t.hover)).tooltip(`#${pr.number} ${pr.title}\n${pr.headRefName}`)
       .on_click(() => exec("open", [pr.url]))
       .child(h_flex().gap(6).items_center()
-        .child(div().flex_none().size(7).rounded(4).bg(dot ?? t.border))
+        .child(div().id(`ci-${pr.number}`).flex_none().size(9).flex().items_center().justify_center().tooltip(dotTip)
+          .child(div().size(7).rounded(4).bg(dot ?? t.border)))
         // Copilot badge "C": filled green = reviewed, yellow outline = requested, faint = not asked.
-        .child(div().flex_none().size(15).flex().items_center().justify_center().rounded(4).border_1().text_size(10).font_semibold()
+        .child(div().id(`cp-${pr.number}`).flex_none().size(15).flex().items_center().justify_center().rounded(4).border_1().text_size(10).font_semibold()
           .border_color(cp === "done" ? t.done : cp === "asked" ? t.working : t.border)
           .bg(cp === "done" ? t.done : t.background)
           .text_color(cp === "done" ? t.background : cp === "asked" ? t.working : t.dim)
           .tooltip(cp === "done" ? "Copilot reviewed" : cp === "asked" ? "Copilot review requested, no answer yet" : "Copilot not requested").child("C"))
+        .child(div().id(`ap-${pr.number}`).flex_none().size(15).flex().items_center().justify_center().tooltip(apTip)
+          .child(svg(`mods/prs/${apIcon}.svg`).size(14).text_color(apColor)))
         .child(div().flex_none().text_size(11).text_color(t.dim).child(`#${pr.number}`))
         .child(div().flex_1().min_w(0).truncate().child(pr.title))
-        .when(pr.isDraft,(e) => e.child(div().flex_none().text_size(10).text_color(t.dim).child("draft")))
-        .when(Boolean(review), (e) => e.child(div().flex_none().text_size(10).text_color(review[1]).child(review[0]))))
+        // Draft: a purple "draft pull request" icon (theme's ansi5, a colour no other mark here uses).
+        .when(pr.isDraft, (e) => e.child(div().id(`draft-${pr.number}`).flex_none().size(15).flex().items_center().justify_center().tooltip("Draft: not ready for review")
+          .child(svg("mods/prs/draft.svg").size(14).text_color(t.ansi5)))))
       .child(div().pl(13).truncate().text_size(10).text_color(t.dim).child(pr.headRefName));
   }
 
