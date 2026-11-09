@@ -13,6 +13,10 @@
 !mods/
 !mods/changes-copy/
 !mods/changes-copy/**
+!mods/jira/
+!mods/jira/**
+!mods/my-tabs/
+!mods/my-tabs/**
 mods/*/gpui-kit.d.ts
 mods/*/jsconfig.json
 themes/atom-one-dark.json
