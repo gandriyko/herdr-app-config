@@ -1,8 +1,9 @@
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, Scrollbar } from "gpui-base";
-import { spaces, panes, focused, exec, theme, notify, playSound } from "herdr";
+import { v_flex, h_flex, Scrollbar, TextView } from "gpui-base";
+import { spaces, panes, focused, exec, theme, notify, playSound, props, openOverlay, closeOverlay, shared, setShared } from "herdr";
 
-// My open pull requests in the repo of the focused folder, via the `gh` CLI. Click opens the PR in the browser.
+// My open pull requests in the repo of the focused folder, via the `gh` CLI. Click opens the PR in a popup
+// (description, who approved, comments and reviews); the popup has Open (browser) and Copy link.
 // ponytail: only open PRs I authored (first 100); add `--search "review-requested:@me"` as a second list if wanted.
 function location() {
   const space = spaces().find((s) => s.active), f = focused();
@@ -57,11 +58,22 @@ async function list(cwd, on) {
   return JSON.parse(r.stdout);
 }
 
+// Who approved: each reviewer's latest review that counts, those that are APPROVED.
+function approvedBy(reviews) {
+  const last = new Map();
+  for (const r of reviews ?? []) if (["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(r.state)) last.set(r.author?.login, r.state);
+  return [...last].filter(([, st]) => st === "APPROVED").map(([login]) => login).filter(Boolean);
+}
+const when = (iso) => iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "";
+
 // "owner/name" from a git remote URL (https or ssh), or null.
 const repoName = (url) => /[:/]([^/:]+\/[^/]+?)(?:\.git)?\/?$/.exec(url)?.[1] ?? null;
 
 export default class Prs extends View {
   init(_props, cx) {
+    // Opened as a popup for one PR (click on a row): its description, approvals, comments and reviews.
+    if (props()?.pr) { this.detailPr = props().pr; this.loadDetail(cx); return; }
+    this.started = Date.now();
     this.prs = []; this.error = null; this.loading = false; this.key = key(); this.repo = "";
     this.byRepo = new Map(); // repo key -> { name, prs, error }: one gh call per repo, whatever folders point at it
     this.remotes = new Map(); // folder -> its repo, from the local git remote (no API call)
@@ -124,7 +136,7 @@ export default class Prs extends View {
           const old = this.byRepo.get(k);
           try {
             const prs = await list(r.cwd, r.on);
-            this.byRepo.set(k, { name: r.name, prs, error: null });
+            this.byRepo.set(k, { name: r.name, prs: prs.map((pr) => ({ ...pr, repo: { cwd: r.cwd, on: r.on } })), error: null });
             for (const pr of prs) next.set(pr.url, { state: copilot(pr), pr });
           } catch (e) {
             this.byRepo.set(k, { name: r.name, prs: old?.prs ?? [], error: String(e.message ?? e) });
@@ -146,6 +158,86 @@ export default class Prs extends View {
     });
   }
 
+  // ── the PR popup ──
+  loadDetail(cx) {
+    const pr = this.detailPr, r = pr.repo ?? {};
+    cx.spawn(async (cx) => {
+      try {
+        const x = await exec("gh", ["pr", "view", String(pr.number), "--json", "title,body,author,url,headRefName,baseRefName,createdAt,comments,reviews"], { cwd: r.cwd, on: r.on })
+          .catch(() => { throw new Error("GitHub CLI (gh) is not installed"); });
+        if (x.code !== 0) throw new Error((x.stderr || x.stdout).trim().split("\n").pop() || "gh failed");
+        const v = JSON.parse(x.stdout);
+        const items = [...(v.comments ?? []).map((c) => ({ author: c.author?.login, at: c.createdAt, body: c.body })),
+          ...(v.reviews ?? []).filter((rv) => rv.body || rv.state !== "COMMENTED").map((rv) => ({ author: rv.author?.login, at: rv.submittedAt, body: rv.body, extra: rv.state.toLowerCase().replace("_", " ") }))]
+          .sort((p, q) => String(p.at).localeCompare(String(q.at))).map((c, i) => ({ ...c, id: i }));
+        const me = await exec("gh", ["api", "user", "--jq", ".login"], { cwd: r.cwd, on: r.on }).then((m) => m.code === 0 ? m.stdout.trim() : null).catch(() => null);
+        const by = approvedBy(v.reviews);
+        this.detail = { me, mineApproved: Boolean(me && by.includes(me)), title: v.title, body: v.body ?? "", author: v.author?.login, from: v.headRefName, to: v.baseRefName, created: v.createdAt,
+          approvedBy: by, comments: items };
+        this.detailError = null;
+      } catch (e) { this.detailError = String(e.message ?? e); }
+      cx.notify();
+    });
+  }
+
+  approve(cx) {
+    if (this.approving) return;
+    const pr = this.detailPr, r = pr.repo ?? {};
+    this.approving = true; this.approveError = null; cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const x = await exec("gh", ["pr", "review", String(pr.number), "--approve"], { cwd: r.cwd, on: r.on });
+        if (x.code !== 0) throw new Error((x.stderr || x.stdout).trim().split("\n").pop() || "gh failed");
+        setShared("prs.changed", { ts: Date.now() }); // the panel's list re-asks
+        this.loadDetail(cx);
+      } catch (e) { this.approveError = String(e.message ?? e); }
+      this.approving = false; cx.notify();
+    });
+  }
+
+  detailView(t) {
+    const pr = this.detailPr, d = this.detail;
+    const btn = (id, label, act) => div().id(id).h(26).px(10).flex().items_center().rounded(6).border_1().border_color(t.border).text_size(12).cursor_pointer()
+      .text_color(t.foreground).hover((s) => s.bg(t.hover)).on_click(act).child(label);
+    const meta = (label, value) => !value ? null : h_flex().gap(8).items_center().text_size(12)
+      .child(div().w(80).flex_none().text_color(t.dim).child(label)).child(div().flex_1().min_w(0).truncate().child(value));
+    return v_flex().id("pr-detail").size_full().min_h(0).relative().bg(t.background).text_color(t.foreground).text_size(13)
+      .child(h_flex().h(44).flex_none().px(16).gap(8).items_center().border_b(1).border_color(t.border)
+        .child(div().text_size(12).text_color(t.dim).child(`#${pr.number}`))
+        .when(Boolean(d?.approvedBy?.length), (e) => e.child(div().px(6).py(1).rounded(4).border_1().border_color(t.done).text_size(11).text_color(t.done).child(`✓ approved · ${d.approvedBy.length}`)))
+        .when(pr.isDraft, (e) => e.child(div().px(6).py(1).rounded(4).border_1().border_color(t.border).text_size(11).text_color(t.dim).child("draft")))
+        .child(div().flex_1())
+        // Approve: grey and inert on my own PR (GitHub refuses it), green otherwise.
+        .when(Boolean(d && !d.mineApproved), (e) => {
+          const own = Boolean(d.me && d.author === d.me);
+          return e.child(div().id("approve").h(26).px(10).flex().items_center().rounded(6).border_1().text_size(12)
+            .border_color(own ? t.border : t.done).text_color(own ? t.dim : t.done)
+            .tooltip(own ? "You can't approve your own pull request" : "Approve this pull request")
+            .when(!own, (s) => s.cursor_pointer().hover((h) => h.bg(t.hover)).on_click((_e, cx) => this.approve(cx)))
+            .child(this.approving ? "Approving…" : "Approve"));
+        })
+        .child(btn("open", "Open", () => exec("open", [pr.url])))
+        .child(btn("copy", "Copy link", (_e, cx) => cx.write_to_clipboard(pr.url)))
+        .child(div().id("close").size(26).flex().items_center().justify_center().rounded(6).text_color(t.dim).cursor_pointer()
+          .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click(() => closeOverlay(props()?.overlay)).child("✕")))
+      .child(v_flex().id("pr-body").flex_1().min_h(0).overflow_y_scrollbar().px(16).py(14).gap(14)
+        .when(Boolean(this.approveError), (e) => e.child(div().text_size(12).text_color(t.ansi1).child(this.approveError)))
+        .when(!d, (e) => e.child(div().text_color(this.detailError ? t.ansi1 : t.dim).child(this.detailError ?? "Loading…")))
+        .when(Boolean(d), (e) => e
+          .child(div().text_size(17).font_semibold().child(d.title))
+          .child(v_flex().gap(5).children([meta("Author", d.author), meta("Branches", `${d.from} → ${d.to}`), meta("Opened", when(d.created)),
+            meta("Approved by", d.approvedBy.length ? d.approvedBy.join(", ") : "nobody yet")].filter(Boolean)))
+          .child(div().h(1).bg(t.border))
+          .child(d.body.trim() ? TextView.markdown(`pr-desc-${pr.number}`, d.body) : div().text_color(t.dim).child("No description"))
+          .when(d.comments.length > 0, (e) => e
+            .child(div().h(1).bg(t.border))
+            .child(div().text_size(11).font_semibold().text_color(t.dim).child(`COMMENTS · ${d.comments.length}`))
+            .children(d.comments.map((c) => v_flex().gap(4).p(10).rounded(8).bg(t.raised)
+              .child(h_flex().gap(8).text_size(11).child(div().font_semibold().child(c.author ?? "")).child(div().text_color(t.dim).child(when(c.at)))
+                .when(Boolean(c.extra), (e) => e.child(div().text_color(t.muted).child(c.extra))))
+              .when(Boolean(c.body), (e) => e.child(TextView.markdown(`pr-c-${c.id}`, c.body))))))));
+  }
+
   row(pr, t) {
     const state = ci(pr.statusCheckRollup);
     const dot = { ok: t.done, fail: t.ansi1, wait: t.working }[state];
@@ -157,7 +249,7 @@ export default class Prs extends View {
     const cp = copilot(pr);
     return v_flex().id(`pr-${pr.number}`).flex_none().px(8).py(4).gap(2).rounded(5).cursor_pointer()
       .hover((s) => s.bg(t.hover)).tooltip(`#${pr.number} ${pr.title}\n${pr.headRefName}`)
-      .on_click(() => exec("open", [pr.url]))
+      .on_click(() => openOverlay({ mod: "prs", kind: "dialog", width: 780, height: 0.85, props: { pr } }))
       .child(h_flex().gap(6).items_center()
         .child(div().id(`ci-${pr.number}`).flex_none().size(9).flex().items_center().justify_center().tooltip(dotTip)
           .child(div().size(7).rounded(4).bg(dot ?? t.border)))
@@ -179,6 +271,9 @@ export default class Prs extends View {
   }
 
   render(cx) {
+    if (this.detailPr) return this.detailView(theme());
+    const changed = shared("prs.changed");
+    if (changed && changed.ts !== this.changedTs) { this.changedTs = changed.ts; if (changed.ts > (this.started ?? 0)) cx.spawn(async (cx) => this.poll(cx)); }
     const t = theme();
     const empty = this.error || (this.loading && !this.prs.length ? "Loading…" : !this.prs.length ? "No open pull requests" : null);
     const refresh = div().id("refresh").size(24).flex().items_center().justify_center().rounded(6).cursor_pointer()
