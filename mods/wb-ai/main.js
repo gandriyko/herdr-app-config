@@ -8,7 +8,7 @@ import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui
 import { props, closeOverlay, theme, shared, setShared } from "herdr";
 import { migrateAi, models, modelFor, setUse, saveModel, deleteModel, describe, localModels, USES, PROVIDERS, SUGGEST, DEFAULT_URL } from "./ai.js";
 
-const DEFAULT_TEMPLATE = "A first line of up to 72 characters in imperative mood. Then, only when they add something, short bullet details (\"- ...\"), one per line, right under it. No blank lines anywhere.";
+const DEFAULT_TEMPLATE = "A first line of up to 72 characters in imperative mood. Then, only when they add something, one blank line and short bullet details (\"- ...\"), one per line. No other blank lines.";
 // Same default as in wb-changes/main.js (which builds the prompt).
 const cfg = () => ({ template: "", noBlank: true, ...(shared("wb.commit.gen") ?? {}) });
 const setCfg = (patch) => setShared("wb.commit.gen", { ...(shared("wb.commit.gen") ?? {}), ...patch });
@@ -164,7 +164,7 @@ export default class AiModels extends View {
               .child(div().size(13).flex().items_center().justify_center().rounded(3).border_1().text_size(10)
                 .border_color(c.noBlank !== false ? t.accent : t.border).bg(c.noBlank !== false ? t.accent : t.background)
                 .text_color(t.accent_foreground).child(c.noBlank !== false ? "✓" : ""))
-              .child(div().text_color(t.muted).child("No blank lines")))
+              .child(div().text_color(t.muted).child("Compact body (no blank lines after the first one)")))
             .child(div().flex_1())
             .child(div().id("cg-tpl-reset").text_color(t.dim).cursor_pointer().hover((s) => s.text_color(t.foreground)).on_mouse_down("left", stop)
               .on_click((_e, cx) => { this.template.set_value(DEFAULT_TEMPLATE); setCfg({ template: "" }); cx.notify(); }).child("Reset")))));
