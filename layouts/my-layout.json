@@ -79,7 +79,7 @@
           "id": "tabs",
           "type": "block",
           "content": {
-            "mod": "my-tabs"
+            "mod": "tabs-copy"
           },
           "size": {
             "px": 42
