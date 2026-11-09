@@ -21,3 +21,5 @@ My [Herdr](https://herdr.dev/app) layout (`my-layout`), the `changes-copy` mod a
    ```
 
 Nothing is needed in `settings.json`: mods are connected by the layout, not by settings.
+
+<!-- PR popup test: throwaway line -->
