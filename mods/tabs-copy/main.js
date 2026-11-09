@@ -1,6 +1,6 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, panes, run, openOverlay, theme, window, shared, layout, settings, nextCommand } from "herdr";
+import { spaces, panes, run, openOverlay, theme, window, shared, layout, settings, nextCommand, exec } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -24,10 +24,27 @@ function togglePanel(id) {
   else { run("layout.select", { stack: "panel-body", child: id }); run("layout.show", { id: "panel" }); }
 }
 
+// Where a space works now: its focused terminal's folder, else the first known one,
+// else where the space was made (the same rule the spaces list uses).
+function place(sp, ps) {
+  const tabs = new Set((sp?.tabs ?? []).map(c => c.id));
+  return ps.find(p => p.focused && tabs.has(p.tab))?.cwd
+    ?? ps.find(p => tabs.has(p.tab) && p.cwd)?.cwd ?? sp?.folder ?? null;
+}
+const keyOf = (sp, ps) => JSON.stringify([sp?.machine ?? null, place(sp, ps)]);
+
 export default class Tabs extends View {
   init(_props, cx) {
     this.pressed = null;
     this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}");
+    this.git = {}; // keyOf -> { branch, ahead, behind }, null: not a repo
+    this.checked = {}; // keyOf -> when it was last asked
+    this.whereAt = {}; // space id -> its keyOf at the last look
+    cx.timer.every(60000, (cx) => {
+      const sp = spaces().find(p => p.active);
+      const key = keyOf(sp, panes());
+      if (sp && key && Date.now() - (this.checked[key] ?? 0) > 30000) this.ask(key, cx);
+    });
     // keys.json: "cmd-shift-j": "tabs-copy.jira" (any panel id works: tabs-copy.files, tabs-copy.changes).
     cx.spawn(async () => { for (;;) { const id = await nextCommand(); if (panelsOf(layout()).some(([p]) => p === id)) togglePanel(id); } });
   }
@@ -60,11 +77,51 @@ export default class Tabs extends View {
     localStorage.setItem("panels", JSON.stringify(this.panels));
   }
 
-  render() {
+
+  // One place's branch and ahead/behind, read-only (no index writes, no locks:
+  // the same shape the spaces list uses). A machine away keeps the last answer.
+  ask(key, cx) {
+    this.checked[key] = Date.now();
+    cx.spawn(async (cx) => {
+      const [on, cwd] = JSON.parse(key);
+      try {
+        const r = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v2", "--branch"], { cwd, on });
+        if (r.code !== 0) this.git[key] = null;
+        else {
+          const info = { branch: null, ahead: 0, behind: 0 };
+          for (const line of r.stdout.split("\n")) {
+            if (line.startsWith("# branch.head ")) info.branch = line.slice(14);
+            else if (line.startsWith("# branch.ab ")) {
+              const [a, b] = line.slice(12).split(" ");
+              info.ahead = Math.abs(parseInt(a, 10)) || 0;
+              info.behind = Math.abs(parseInt(b, 10)) || 0;
+            }
+          }
+          this.git[key] = info;
+        }
+      } catch { /* couldn't ask: keep what it showed, the timer asks again */ }
+      cx.notify();
+    });
+  }
+
+  render(cx) {
     const t = theme();
     const space = spaces().find(p => p.active);
     const shown = space?.tabs ?? [];
     const stop = (_e, cx) => cx.stop_propagation();
+    // The branch of the place the active space works in: asked when the space
+    // or its folder moves, and on the slow watch in init.
+    const key = keyOf(space, panes());
+    const sid = space?.id;
+    if (sid && JSON.parse(key)[1]) {
+      if (this.whereAt[sid] !== key) { this.whereAt[sid] = key; this.ask(key, cx); }
+      else if (Date.now() - (this.checked[key] ?? 0) > 30000) this.ask(key, cx);
+    }
+    const g = this.git[key];
+    const branch = g?.branch ?? "";
+    // A checkout done in the branch picker (or anywhere else) re-asks at once.
+    const switched = Number(shared("branch.switched") ?? 0);
+    if (sid && JSON.parse(key)[1] && switched > (this.checked[key] ?? 0)) this.ask(key, cx);
     const button = (id, label, action) => div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
       .on_mouse_down("left", stop).on_click(action).child(label);
     const item = (c, i) => {
@@ -109,6 +166,18 @@ export default class Tabs extends View {
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .on_mouse_up("left", () => { this.pressed = null; })
       .on_scroll_wheel(e => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? "tab.prev" : "tab.next"); })
+      .when(Boolean(branch), el => el.child(
+        h_flex().id("tab-branch").h(26).px(8).gap(6).flex_none().items_center().rounded(7)
+          .border(1).border_color(t.border).bg(t.raised).text_size(12).text_color(t.muted)
+          .hover(s => s.bg(t.hover).text_color(t.foreground))
+          .on_mouse_down("left", stop)
+          .tooltip(`Branch ${branch}${g.ahead || g.behind ? ` · ↑${g.ahead} ↓${g.behind}` : ""} — click to switch`)
+          .on_click(() => openOverlay({ mod: "branch-picker", kind: "popup", width: 460, height: 560, props: { space: sid } }))
+          .child(svg("mods/workspace-chrome/git-branch.svg").size(13).text_color(t.muted))
+          .child(div().max_w(180).truncate().text_color(t.foreground).child(branch))
+          .when(Boolean(g.ahead || g.behind), el => el.child(
+            div().text_size(11).text_color(t.dim).child(`${g.ahead ? `↑${g.ahead}` : ""}${g.behind ? ` ↓${g.behind}` : ""}`))),
+      ))
       .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().children(shown.map(item)))
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
       .children(panels.map(([id, label]) => panelButton(id, label)))

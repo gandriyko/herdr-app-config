@@ -11,6 +11,8 @@
 !layouts/
 !layouts/my-layout.*
 !mods/
+!mods/branch-picker/
+!mods/branch-picker/**
 !mods/changes-copy/
 !mods/changes-copy/**
 !mods/jira/
