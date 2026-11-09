@@ -11,9 +11,12 @@ function find(node, id) {
   return null;
 }
 
-// The side panel's stack children with a button in the bar. Jira is always on; the rest follow
-// the welcome's shared "workspace.panels" choice, as in the shipped tabs mod.
-const PANELS = [["files", "Files", "mods/files/file.svg"], ["changes", "Changes", "mods/changes/changes.svg"], ["jira", "Jira", "mods/jira/jira.svg"], ["prs", "PR","mods/prs/pr.svg"]];
+// Contract with the layout: a node "sidebar", and the side panel as "panel" holding a stack "panel-body";
+// every child of that stack gets a button. Label: LABELS[id] or the capitalised id. Icon: panel-<id>.svg
+// in this folder when it ships (ICONS), else text only. Everything else lives in this folder.
+const LABELS = { prs: "PR" };
+const ICONS = new Set(["files", "changes", "jira", "prs"]);
+const panelsOf = (root) => (find(root, "panel-body")?.children ?? []).map((c) => [c.id, LABELS[c.id] ?? c.id[0].toUpperCase() + c.id.slice(1)]);
 
 function togglePanel(id) {
   const root = layout(), panel = find(root, "panel"), body = find(root, "panel-body");
@@ -26,7 +29,7 @@ export default class Tabs extends View {
     this.pressed = null;
     this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}");
     // keys.json: "cmd-shift-j": "tabs-copy.jira" (any panel id works: tabs-copy.files, tabs-copy.changes).
-    cx.spawn(async () => { for (;;) { const id = await nextCommand(); if (PANELS.some(([p]) => p === id)) togglePanel(id); } });
+    cx.spawn(async () => { for (;;) { const id = await nextCommand(); if (panelsOf(layout()).some(([p]) => p === id)) togglePanel(id); } });
   }
 
   // The side panel is remembered per space: switching shows that space's choice
@@ -84,9 +87,9 @@ export default class Tabs extends View {
         .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); openOverlay({ mod: "menu", kind: "popup", width: 200, props: { tab: "tab", target: { id: c.id, space: space.id } } }); })
         .when(Boolean(program?.icon), el => el.child(program.tint ? svg(program.icon).size(14).text_color(t.muted) : image(program.icon).size(14)))
         .child(div().max_w(170).truncate().child(c.zoomed ? `${name} Z` : name))
-        .when(c.status === "working", el => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
+        .when(c.status === "working", el => el.child(svg("mods/tabs-copy/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
         .when(c.status === "blocked" || c.status === "done", el => el.child(div().size(6).rounded(3).bg(t[c.status])))
-        .when(c.active, el => el.child(div().id(`close-${c.id}`).text_color(t.dim).on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); run("tab.close", { id: c.id }); }).child(svg("mods/pane/close.svg").size(12))));
+        .when(c.active, el => el.child(div().id(`close-${c.id}`).text_color(t.dim).on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); run("tab.close", { id: c.id }); }).child(svg("mods/tabs-copy/close.svg").size(12))));
     };
     const root = layout(), sidebar = find(root, "sidebar"), w = window();
     // Old saved rails and a dragged-narrow sidebar can be smaller than the window buttons.
@@ -94,21 +97,21 @@ export default class Tabs extends View {
       ? Math.max(10, (root.traffic_lights[0] + 64) / settings().zoom - (sidebar?.hidden ? 0 : sidebar?.size?.px ?? 0))
       : 10;
     const panel = find(root, "panel"), body = find(root, "panel-body");
-    const enabled = [...new Set([...(shared("workspace.panels") ?? ["files", "changes"]), "jira", "prs"])];
+    const panels = panelsOf(root), enabled = panels.map(([id]) => id);
     this.syncPanel(space, panel, body, enabled);
-    const panelButton = (id, label, icon) => {
+    const panelButton = (id, label) => {
       const on = panel && !panel.hidden && body?.active === id;
       return h_flex().id(`panel-${id}`).h(26).px(8).gap(5).flex_none().items_center().rounded(6)
         .text_size(12).bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
         .hover(s => s.bg(t.hover)).on_mouse_down("left", stop)
-        .on_click(() => togglePanel(id)).child(svg(icon).size(14)).child(label);
+        .on_click(() => togglePanel(id)).when(ICONS.has(id), el => el.child(svg(`mods/tabs-copy/panel-${id}.svg`).size(14))).child(label);
     };
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .on_mouse_up("left", () => { this.pressed = null; })
       .on_scroll_wheel(e => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? "tab.prev" : "tab.next"); })
       .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().children(shown.map(item)))
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
-      .children(PANELS.filter(([id]) => enabled.includes(id)).map(([id, label, icon]) => panelButton(id, label, icon)))
+      .children(panels.map(([id, label]) => panelButton(id, label)))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs-copy/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs-copy/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/tabs-copy/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));
