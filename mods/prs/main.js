@@ -1,5 +1,5 @@
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, Scrollbar, TextView } from "gpui-base";
+import { v_flex, h_flex, Scrollbar, TextView, InputState, Input } from "gpui-base";
 import { spaces, panes, focused, exec, theme, notify, playSound, props, openOverlay, closeOverlay, shared, setShared } from "herdr";
 
 // My open pull requests in the repo of the focused folder, via the `gh` CLI. Click opens the PR in a popup
@@ -44,7 +44,7 @@ function approval(pr) {
     : pr.reviewDecision === "APPROVED" || states.includes("APPROVED") ? "approved" : "";
 }
 
-const FIELDS ="number,title,headRefName,isDraft,reviewDecision,url,statusCheckRollup,reviewRequests,reviews";
+const FIELDS ="number,title,headRefName,isDraft,reviewDecision,url,statusCheckRollup,reviewRequests,reviews,body,author";
 async function list(cwd, on) {
   // exec rejects when the program can't start (gh not installed); gh itself says "gh auth login" when not logged in.
   const setup = (message) => Object.assign(new Error(message), { setup: true });
@@ -74,6 +74,10 @@ export default class Prs extends View {
     // Opened as a popup for one PR (click on a row): its description, approvals, comments and reviews.
     if (props()?.pr) { this.detailPr = props().pr; this.loadDetail(cx); return; }
     this.started = Date.now();
+    // Search: by title, description, branch or number; the list is cut as you type.
+    this.query = "";
+    this.search = InputState.new({ placeholder: "Search pull requests: title, description" });
+    this.search.on("change", (_e, cx) => { this.query = this.search.value().trim().toLowerCase(); cx.notify(); });
     this.prs = []; this.error = null; this.loading = false; this.key = key(); this.repo = "";
     this.byRepo = new Map(); // repo key -> { name, prs, error }: one gh call per repo, whatever folders point at it
     this.remotes = new Map(); // folder -> its repo, from the local git remote (no API call)
@@ -267,7 +271,9 @@ export default class Prs extends View {
         // Draft: a purple "draft pull request" icon (theme's ansi5, a colour no other mark here uses).
         .when(pr.isDraft, (e) => e.child(div().id(`draft-${pr.number}`).flex_none().size(15).flex().items_center().justify_center().tooltip("Draft: not ready for review")
           .child(svg("mods/prs/draft.svg").size(14).text_color(t.ansi5)))))
-      .child(div().pl(13).truncate().text_size(10).text_color(t.dim).child(pr.headRefName));
+      .child(h_flex().pl(13).gap(6).text_size(10).text_color(t.dim)
+        .child(div().flex_1().min_w(0).truncate().child(pr.headRefName))
+        .when(Boolean(pr.author?.login), (e) => e.child(div().flex_none().max_w(120).truncate().text_color(t.muted).child(pr.author.login))));
   }
 
   render(cx) {
@@ -275,14 +281,16 @@ export default class Prs extends View {
     const changed = shared("prs.changed");
     if (changed && changed.ts !== this.changedTs) { this.changedTs = changed.ts; if (changed.ts > (this.started ?? 0)) cx.spawn(async (cx) => this.poll(cx)); }
     const t = theme();
-    const empty = this.error || (this.loading && !this.prs.length ? "Loading…" : !this.prs.length ? "No open pull requests" : null);
+    const q = this.query;
+    const shown = !q ? this.prs : this.prs.filter((pr) => [pr.title, pr.body, pr.headRefName, pr.author?.login, `#${pr.number}`].some((s) => (s ?? "").toLowerCase().includes(q)));
+    const empty = this.error || (this.loading && !this.prs.length ? "Loading…" : !this.prs.length ? "No open pull requests" : !shown.length ? "No matches" : null);
     const refresh = div().id("refresh").size(24).flex().items_center().justify_center().rounded(6).cursor_pointer()
       .text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip("Refresh").on_click((_e, cx) => this.poll(cx))
       .child(svg("mods/prs/refresh.svg").size(14).when(this.loading, (s) => s.spin(900)));
     return v_flex().id("prs").size_full().min_h(0).relative().rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(12)
       .child(h_flex().h(42).flex_none().px(14).gap(6).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().text_size(13).child("Pull requests"))
-        .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(String(this.prs.length)))
+        .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(q ? `${shown.length}/${this.prs.length}` : String(this.prs.length)))
         .child(div().flex_1().min_w(0).truncate().text_size(10).text_color(t.dim).child(this.repo))
         .child(h_flex().id("auto").h(24).px(5).gap(4).items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
           .tooltip(this.auto ? "Auto-sync every minute (with Copilot sound): on" : "Auto-sync: off · refresh by hand").on_click((_e, cx) => this.toggleAuto(cx))
@@ -290,10 +298,13 @@ export default class Prs extends View {
             .border_color(this.auto ? t.accent : t.border).bg(this.auto ? t.accent : t.background).text_color(t.accent_foreground).child(this.auto ? "✓" : ""))
           .child(div().text_size(10).text_color(t.muted).child("Auto")))
         .child(refresh))
+      .when(Boolean(this.prs.length), (e) => e.child(div().flex_none().px(8).pt(8)
+        .child(div().id("search").h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
+          .child(Input.new(this.search).h_full().w_full().text_size(12).text_color(t.foreground)))))
       .child(div().flex_1().min_h(0).relative()
         .child(v_flex().id("prs-list").absolute().inset_0().overflow_y_scroll().p(6).gap(1)
           .when(Boolean(empty), (e) => e.child(div().p(8).text_color(this.error ? t.ansi1 : t.dim).child(empty)))
-          .children(this.prs.map((pr) => this.row(pr, t))))
+          .children(shown.map((pr) => this.row(pr, t))))
         .child(Scrollbar.vertical("prs-list").absolute().inset_0()));
   }
 }
