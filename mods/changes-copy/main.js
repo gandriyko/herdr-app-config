@@ -82,6 +82,12 @@ export default class Changes extends View {
         const status = await git(["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"]);
         if (status.code !== 0) throw new Error(status.stderr);
         const head = await git(["rev-parse", "--verify", "HEAD"]);
+        // Commits not pushed yet (↑), and whether the branch has an upstream at all.
+        let upstream = null, ahead = 0;
+        if (head.code === 0) {
+          const up = await git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
+          if (up.code === 0) { upstream = up.stdout.trim(); ahead = Number((await git(["rev-list", "--count", "@{u}..HEAD"])).stdout) || 0; }
+        }
         let against = head.code === 0 ? "HEAD" : null, base = null;
         // Branch scope: everything since the branch left its base (like a PR), including uncommitted work.
         if (scope === "base" && against) {
@@ -121,7 +127,7 @@ export default class Changes extends View {
           files.push({ path, status: s, fresh, ...stat });
         }
         if (stale()) return;
-        this.root = root; this.on = on; this.hasHead = head.code === 0; this.against = against; this.base = base; this.files = files; this.limited = entries.length > 1000; this.error = null;
+        this.root = root; this.on = on; this.upstream = upstream; this.ahead = ahead; this.hasHead = head.code === 0; this.against = against; this.base = base; this.files = files; this.limited = entries.length > 1000; this.error = null;
         this.watch(root, gitDir, cx);
         if (this.open && !files.some((f) => f.path === this.open)) this.open = null;
       } catch (e) { if (!stale()) this.error = String(e); }
@@ -273,6 +279,21 @@ export default class Changes extends View {
     try { localStorage.setItem("commitH", String(this.commitH)); } catch {}
   }
 
+  // Push the branch: plain `git push`, or `git push -u origin HEAD` when it has no upstream yet.
+  push(cx) {
+    if (!this.root || this.pushing || this.busy || this.loading || this.context !== key()) return;
+    const root = this.root, on = this.on, context = this.context, args = this.upstream ? ["push"] : ["push", "-u", "origin", "HEAD"];
+    this.pushing = true; this.note = null; cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const r = await exec("git", args, { cwd: root, on, timeout: 180000 });
+        if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().split("\n").slice(-3).join(" "));
+        setShared("branch.switched", Date.now()); // the header chip and the other panels ask again
+      } catch (e) { if (key() === context) this.note = `Push failed: ${e.message ?? e}`; }
+      finally { this.pushing = false; this.refresh(cx); cx.notify(); }
+    });
+  }
+
   commit(cx) {
     if (!this.message.trim() || !this.root || this.busy || this.loading || this.context !== key()) return;
     const root = this.root, on = this.on, context = this.context, message = this.message.trim();
@@ -296,6 +317,7 @@ export default class Changes extends View {
     const t = theme(), add = this.files.reduce((n, f) => n + f.add, 0), del = this.files.reduce((n, f) => n + f.del, 0);
     const rows = this.listRows(), tree = this.view === "tree";
     const enabled = Boolean(this.message.trim() && this.root && !this.busy && !this.loading);
+    const pushEnabled = Boolean(this.root && this.hasHead && !this.pushing && !this.busy && !this.loading && (this.ahead > 0 || !this.upstream));
     const genEnabled = Boolean(this.root && !this.generating && !this.busy && !this.loading && this.context === key());
     const noBase = this.scope === "base" && Boolean(this.root) && !this.base && !this.loading;
     return v_flex().id("changes").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
@@ -348,6 +370,12 @@ export default class Changes extends View {
               .child(this.generating ? "Generating…" : "Generate"))
             .child(div().id("generate-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("More").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "changes-copy", kind: "popup", width: 180, props: { menu: true } })).child(svg("mods/changes-copy/icons/chevron-down.svg").size(12))))
           .child(div().flex_1())
+          .child(h_flex().id("push").h(30).px(12).gap(4).items_center().rounded(8).border_1().border_color(pushEnabled && this.ahead > 0 ? t.accent : t.border).text_size(12)
+            .text_color(pushEnabled ? (this.ahead > 0 ? t.accent : t.foreground) : t.dim).when(pushEnabled, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover)))
+            .tooltip(!this.root ? "No repository" : this.upstream ? (this.ahead ? `git push: ${this.ahead} commit${this.ahead === 1 ? "" : "s"} to ${this.upstream}` : `Nothing to push: ${this.upstream} is up to date`) : "No upstream yet: git push -u origin HEAD")
+            .on_click((_e, cx) => { if (pushEnabled) this.push(cx); })
+            .child(this.pushing ? svg("mods/workspace-chrome/spinner.svg").size(12).spin(900) : div())
+            .child(`Push${this.ahead > 0 ? ` ↑${this.ahead}` : ""}`))
           .child(div().id("commit").h(30).px(14).flex().items_center().rounded(8).bg(enabled ? t.solid : t.raised).text_color(enabled ? t.solid_foreground : t.dim).text_size(12).when(enabled, (e) => e.cursor_pointer()).on_click((_e, cx) => this.commit(cx)).child(this.busy ? "Committing…" : "Commit"))));
   }
 }
