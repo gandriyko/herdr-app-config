@@ -3,8 +3,8 @@ import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
 import { exec, theme, shared, setShared } from "herdr";
 import { Buffer } from "buffer";
 
-// My open Jira issues grouped by sprint, plus the project's backlog. Click selects an issue;
-// right-click: Go to Jira, Copy key.
+// My open Jira issues grouped by sprint, plus the project's backlog. Click opens the issue in Jira;
+// right-click: Copy task ID.
 // Settings (site, project) live in Herdr's shared state ("jira.settings"); the email and API token
 // in the macOS Keychain (service herdr-jira, account = email). Nothing personal is in this repo.
 // ponytail: an API token, not OAuth — OAuth needs a registered app with a secret and a local
@@ -209,8 +209,9 @@ export default class Jira extends View {
     return v_flex().id("issue-menu").absolute().top(y).left(Math.max(4, Math.min(x, (this.width ?? w) - w - 4))).w(w).p(4).gap(1)
       .rounded(8).border_1().border_color(t.border).bg(t.popover).shadow_lg()
       .on_mouse_down_out((_e, cx) => { this.menu = null; cx.notify(); })
-      .child(item("menu-open", "Go to Jira", () => exec("open", [this.url(key)])))
-      .child(item("menu-copy-key", `Copy ${key}`, (cx) => cx.write_to_clipboard(key)));
+      // The menu floats over issue rows: without this the press falls through to the row below and opens Jira.
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .child(item("menu-copy-key", "Copy task ID", (cx) => cx.write_to_clipboard(key)));
   }
 
   groupHeader(name, count, t) {
@@ -229,7 +230,8 @@ export default class Jira extends View {
       .when(hotfix, (e) => e.child(div().absolute().left(1).top(4).bottom(4).w(3).rounded(2).bg(t.ansi1)))
       .when(this.selected === issue.key || this.menu?.key === issue.key, (s) => s.bg(t.selected))
       .hover((s) => s.bg(t.hover)).tooltip(`${issue.key} · ${f.issuetype?.name ?? ""}\n${f.summary}`)
-      .on_click((_e, cx) => { this.selected = issue.key; cx.notify(); })
+      // on_click fires for the right button too (ClickEvent has no button), so the left press is used.
+      .on_mouse_down("left", (_e, cx) => { this.selected = issue.key; exec("open", [this.url(issue.key)]); cx.notify(); })
       // The root's own right-press handler (it runs next) places the menu.
       .on_mouse_down("right", () => { this.menuKey = issue.key; })
       .child(div().flex_none().text_size(11).text_color(t.dim).child(issue.key))
