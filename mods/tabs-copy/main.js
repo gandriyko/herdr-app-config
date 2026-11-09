@@ -13,7 +13,7 @@ function find(node, id) {
 
 // The side panel's stack children with a button in the bar. Jira is always on; the rest follow
 // the welcome's shared "workspace.panels" choice, as in the shipped tabs mod.
-const PANELS = [["files", "Files", "mods/files/file.svg"], ["changes", "Changes", "mods/changes/changes.svg"], ["jira", "Jira", "mods/jira/jira.svg"]];
+const PANELS = [["files", "Files", "mods/files/file.svg"], ["changes", "Changes", "mods/changes/changes.svg"], ["jira", "Jira", "mods/jira/jira.svg"], ["prs", "PR","mods/prs/pr.svg"]];
 
 function togglePanel(id) {
   const root = layout(), panel = find(root, "panel"), body = find(root, "panel-body");
@@ -94,7 +94,7 @@ export default class Tabs extends View {
       ? Math.max(10, (root.traffic_lights[0] + 64) / settings().zoom - (sidebar?.hidden ? 0 : sidebar?.size?.px ?? 0))
       : 10;
     const panel = find(root, "panel"), body = find(root, "panel-body");
-    const enabled = [...new Set([...(shared("workspace.panels") ?? ["files", "changes"]), "jira"])];
+    const enabled = [...new Set([...(shared("workspace.panels") ?? ["files", "changes"]), "jira", "prs"])];
     this.syncPanel(space, panel, body, enabled);
     const panelButton = (id, label, icon) => {
       const on = panel && !panel.hidden && body?.active === id;

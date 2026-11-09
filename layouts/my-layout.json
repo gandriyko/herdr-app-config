@@ -147,6 +147,13 @@
                       "content": {
                         "mod": "jira"
                       }
+                    },
+                    {
+                      "id": "prs",
+                      "type": "block",
+                      "content": {
+                        "mod": "prs"
+                      }
                     }
                   ],
                   "active": "files"
