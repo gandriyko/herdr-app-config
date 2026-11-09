@@ -13,6 +13,8 @@
 !mods/
 !mods/branch-picker/
 !mods/branch-picker/**
+!mods/wb-diff/
+!mods/wb-diff/**
 !mods/changes-copy/
 !mods/changes-copy/**
 !mods/jira/
