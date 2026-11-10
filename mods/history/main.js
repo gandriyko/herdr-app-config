@@ -139,22 +139,52 @@ export default class History extends View {
     });
   }
 
+  // Favorite star, on every session: filled when it's a favorite (hh lists those first), an outline
+  // otherwise; a click toggles it. Its own mouse down stops there, so the row doesn't open.
+  star(s, t, id) {
+    return div().id(id).size(18).flex_none().flex().items_center().justify_center().rounded(4).cursor_pointer()
+      .text_color(s.favorite ? t.ansi3 : t.dim).hover((st) => st.bg(t.hover).text_color(t.ansi3))
+      .tooltip(s.favorite ? "Remove from favorites" : "Add to favorites")
+      .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.toggleFavorite(s, cx); })
+      .child(svg(`mods/history/icons/${s.favorite ? "star" : "star-outline"}.svg`).size(12));
+  }
+
+  // hh favorite / unfavorite (idempotent, exit 1 on no or an ambiguous match). The star flips at once;
+  // a failure flips it back. Then the list is asked again: favorites move to the top.
+  toggleFavorite(s, cx) {
+    const want = !s.favorite;
+    const set = (v) => { for (const x of [s, ...this.results, this.open?.session]) if (x?.key === s.key) x.favorite = v; };
+    set(want); cx.notify();
+    cx.spawn(async (cx) => {
+      const r = await exec(HH, [want ? "favorite" : "unfavorite", s.session_id]).catch((e) => ({ code: -1, stderr: String(e.message ?? e) }));
+      if (r.code !== 0) {
+        set(!want);
+        notify({ title: `Couldn't ${want ? "add to" : "remove from"} favorites`, body: (r.stderr || r.stdout || "").trim(), level: "error" });
+      }
+      this.find(cx);
+    });
+  }
+
   row(s, t) {
     const snippet = (s.snippet ?? "").replace(/\s+/g, " ").trim();
     const where = s.worktree ?? s.cwd ?? "";
-    return v_flex().id(`s-${s.key}`).flex_none().px(8).py(6).gap(2).rounded(6).cursor_pointer()
+    // Left: agent, title, snippet, details. Right: how long ago, the favorite star under it.
+    return h_flex().id(`s-${s.key}`).flex_none().px(8).py(6).gap(8).items_start().rounded(6).cursor_pointer()
       .hover((st) => st.bg(t.hover)).tooltip(`${s.agent} · ${where}${s.branch ? ` · ${s.branch}` : ""}`)
       .on_mouse_down("left", (_e, cx) => this.show(s, cx))
       .on_mouse_down("right", (_e, cx) => cx.write_to_clipboard(s.session_id))
-      .child(h_flex().gap(6).items_center()
-        .child(div().flex_none().px(4).rounded(3).bg(t.raised).text_size(10).text_color(t.muted).child(s.agent))
-        .child(div().flex_1().min_w(0).truncate().child(s.title || "(untitled)"))
-        .child(div().flex_none().text_size(10).text_color(t.dim).tooltip(day(s.updated_at, true)).child(ago(s.updated_at))))
-      // At most two lines of the snippet: gpui has no line_clamp, so cap the height.
-      .when(Boolean(snippet), (e) => e.child(div().text_size(11).text_color(t.muted).max_h(31).overflow_hidden().child(snippet)))
-      .child(div().text_size(10).text_color(t.dim).truncate()
-        // The project is the panel's own (shown above the list), so only what differs per session.
-        .child([s.branch, `${s.user_count}↔${s.assistant_count}`, s.hits ? `${s.hits} hits` : null].filter(Boolean).join(" · ")));
+      .child(v_flex().flex_1().min_w(0).gap(2)
+        .child(h_flex().gap(6).items_center()
+          .child(div().flex_none().px(4).rounded(3).bg(t.raised).text_size(10).text_color(t.muted).child(s.agent))
+          .child(div().flex_1().min_w(0).truncate().child(s.title || "(untitled)")))
+        // At most two lines of the snippet: gpui has no line_clamp, so cap the height.
+        .when(Boolean(snippet), (e) => e.child(div().text_size(11).text_color(t.muted).max_h(31).overflow_hidden().child(snippet)))
+        .child(div().text_size(10).text_color(t.dim).truncate()
+          // The project is the panel's own (shown above the list), so only what differs per session.
+          .child([s.branch, `${s.user_count}↔${s.assistant_count}`, s.hits ? `${s.hits} hits` : null].filter(Boolean).join(" · "))))
+      .child(v_flex().flex_none().gap(2).items_end()
+        .child(div().text_size(10).text_color(t.dim).tooltip(day(s.updated_at, true)).child(ago(s.updated_at)))
+        .child(this.star(s, t, `star-${s.key}`)));
   }
 
   detail(t) {
@@ -170,7 +200,9 @@ export default class History extends View {
     };
     return v_flex().gap(6)
       .child(v_flex().gap(2).px(2)
-        .child(div().font_semibold().text_size(13).child(s.title || "(untitled)"))
+        .child(h_flex().gap(4).items_center()
+          .child(this.star(s, t, "star-open"))
+          .child(div().flex_1().min_w(0).font_semibold().text_size(13).child(s.title || "(untitled)")))
         .child(div().text_size(10).text_color(t.dim).child(`${s.agent} · ${s.cwd ?? ""}${s.branch ? ` · ${s.branch}` : ""} · ${day(s.updated_at)}`)))
       .when(this.open.loading, (e) => e.child(div().p(8).text_color(t.dim).child("Loading…")))
       .when(Boolean(this.open.error), (e) => e.child(div().p(8).text_color(t.ansi1).child(this.open.error)))
