@@ -1,6 +1,7 @@
 *
 !.gitignore
 !README.md
+!CLAUDE.md
 !programs.json
 !themes/
 !themes/**
