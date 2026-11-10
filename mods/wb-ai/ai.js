@@ -79,10 +79,10 @@ function migrateProject() {
 }
 const stored = (use, key) => { const all = shared(PROJECT) ?? {}; return [all[key]?.[use] ?? {}, all["*"]?.[use] ?? {}]; };
 
-// The model for a use: the project's pick, else the global one, else the first model.
+// The model for a use: the project's pick, else the all-projects one ("*"), else the global one, else the first model.
 export function modelFor(use, key) {
-  const list = models(), id = (key && stored(use, key)[0].model) || (shared(USE) ?? {})[use];
-  return list.find((m) => m.id === id) ?? list.find((m) => m.id === (shared(USE) ?? {})[use]) ?? list[0] ?? null;
+  const list = models(), [p, g] = stored(use, key), global = (shared(USE) ?? {})[use], id = p.model || g.model || global;
+  return list.find((m) => m.id === id) ?? list.find((m) => m.id === global) ?? list[0] ?? null;
 }
 // Effective settings of a use in a project; missing fields fall back project -> "*" -> built-in.
 export function settingsFor(use, key) {

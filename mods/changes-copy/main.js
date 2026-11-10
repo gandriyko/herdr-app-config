@@ -1,7 +1,7 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, TextareaState, Textarea, Scrollbar } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, run, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
-import { migrate, modelFor, settingsFor, projectKey, projectName, languageLine, runModel, describe } from "./ai.js";
+import { migrate, models, modelFor, settingsFor, setUse, projectKey, projectName, languageLine, runModel, describe } from "./ai.js";
 
 // A pane without a folder (the wb-diff tab, any mod pane) has the keyboard after a click on a file: then the
 // panel stays on the last place it knew in this space, instead of falling back to the space's own folder.
@@ -290,8 +290,16 @@ export default class Changes extends View {
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click(() => { closeOverlay(props()?.overlay); action(); })
       .child(svg("mods/changes-copy/icons/settings.svg").size(13).text_color(t.muted)).child(label);
-    const pk = props()?.project;
+    // The model that writes this project's commit messages (one click), then the settings.
+    const pk = props()?.project, cur = modelFor("commit", pk);
     return v_flex().p(6).gap(2).w_full().bg(t.raised).text_color(t.foreground)
+      .child(div().px(8).py(4).text_size(10).font_semibold().text_color(t.dim).child("COMMIT WITH"))
+      .children(models().map((m) => h_flex().id(`cm-${m.id}`).h(26).px(8).gap(6).items_center().rounded(5).cursor_pointer()
+        .when(m.id === cur?.id, (s) => s.bg(t.selected)).hover((s) => s.bg(t.hover))
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click(() => { setUse("commit", m.id, pk); closeOverlay(props()?.overlay); })
+        .child(div().flex_1().truncate().text_size(12).child(m.name)).child(div().text_size(11).text_color(t.dim).child(describe(m)))))
+      .child(div().h(1).my(2).bg(t.border))
       .when(Boolean(pk), (e) => e.child(item("gen-project", "Commit message settings…", () => openCommitSettings(pk))))
       .child(item("gen-settings", "AI models…", openGenSettings));
   }
@@ -412,7 +420,7 @@ export default class Changes extends View {
             .child(h_flex().id("generate-run").px(12).h_full().items_center().gap(6).text_size(12).text_color(this.generating ? t.accent : genEnabled ? t.accent : t.dim).when(genEnabled, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover))).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.generate(cx)).tooltip(`Write the commit message from the diff with ${modelFor("commit", this.pk)?.name ?? "no model"} (${describe(modelFor("commit", this.pk))})`)
               .child(this.generating ? svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.accent).spin(900) : svg("mods/changes-copy/icons/layers.svg").size(12))
               .child(this.generating ? "Generating…" : "Generate"))
-            .child(div().id("generate-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("More").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "changes-copy", kind: "popup", width: 230, props: { menu: true, project: this.pk } })).child(svg("mods/changes-copy/icons/chevron-down.svg").size(12))))
+            .child(div().id("generate-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("More").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "changes-copy", kind: "popup", width: 300, height: 28 * models().length + 110, props: { menu: true, project: this.pk } })).child(svg("mods/changes-copy/icons/chevron-down.svg").size(12))))
           .child(div().flex_1())
           // Pull and Push as one joined group (like the header's icon groups and Generate): a box, two cells, a divider.
           .child(h_flex().id("sync").h(30).flex_none().rounded(8).overflow_hidden().border_1().border_color(t.border)

@@ -9,6 +9,8 @@ import { migrate, models, settingsFor, setSetting, setUse, saveModel, deleteMode
 
 const USE_TITLE = { commit: "Commit message", review: "AI review", mr: "MR description" };
 const openModels = () => openOverlay({ mod: "wb-ai", kind: "window", key: "wb-ai", width: 580 });
+// The "*" settings: what every project uses where it has none of its own.
+const openDefaults = (use) => openOverlay({ mod: "wb-ai", kind: "dialog", width: 560, props: { use, project: "*", projectName: "All projects" } });
 
 // What the template is without this project's own text: the all-projects one, else the built-in.
 const inherited = (use, project) => { if (project === "*") return DEFAULTS[use]; const t = settingsFor(use, "*").template; return t || DEFAULTS[use]; };
@@ -191,6 +193,15 @@ export default class AiModels extends View {
       .when(!e, (el) => el.child(h_flex().id("add-model").h(28).px(8).gap(8).items_center().rounded(6).cursor_pointer().text_size(12)
         .text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground)).on_mouse_down("left", stop)
         .on_click((_e, cx) => this.open(null, "claude", cx)).child("+").child("Add model")))
-      .when(Boolean(form), (el) => el.child(form));
+      .when(Boolean(form), (el) => el.child(form))
+      .child(head("DEFAULTS FOR ALL PROJECTS"))
+      .child(v_flex().gap(1).children(Object.entries(USE_TITLE).map(([use, title]) => {
+        const s = settingsFor(use, "*");
+        return h_flex().id(`all-${use}`).h(30).px(8).gap(8).items_center().rounded(6).cursor_pointer().hover((x) => x.bg(t.hover))
+          .on_mouse_down("left", stop).on_click(() => openDefaults(use))
+          .child(div().flex_1().min_w(0).truncate().text_size(12).child(title))
+          .child(div().flex_none().text_size(11).text_color(t.dim).child(`${s.model?.name ?? "no model"} · ${s.language}`))          .child(div().flex_none().text_size(12).text_color(t.dim).child("›"));
+      })))
+      .child(div().text_size(11).text_color(t.dim).child("A project's own settings (Generate ▾, MR settings…) win over these."));
   }
 }
