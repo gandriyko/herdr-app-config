@@ -87,7 +87,7 @@ export default class Prs extends View {
     this.focusRepo = null;
     this.seen = null; // PR url -> copilot state at the last poll; null until the first one (no sound for what already was)
     // Auto-sync (the minute poll and its sound) can be switched off; remembered. Refresh still works by hand.
-    this.auto = (() => { try { return localStorage.getItem("auto") !== "0"; } catch { return true; } })();
+    this.auto = (() => { try { return (localStorage.getItem("prs.auto") ?? localStorage.getItem("auto")) !== "0"; } catch { return true; } })();
     this.poll(cx);
     // The folder follows focus: check it often (cheap); a repo already polled is shown from memory.
     cx.timer.every(2000, (cx) => { const k = key(); if (k !== this.key) { this.key = k; this.focus(cx); } });
@@ -102,7 +102,7 @@ export default class Prs extends View {
 
   toggleAuto(cx) {
     this.auto = !this.auto;
-    try { localStorage.setItem("auto", this.auto ? "1" : "0"); } catch {}
+    try { localStorage.setItem("prs.auto", this.auto ? "1" : "0"); } catch {}
     if (this.auto) this.poll(cx); else cx.notify();
   }
 

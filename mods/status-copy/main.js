@@ -27,6 +27,7 @@ export default class WorkspaceStatus extends View {
       const key = keyOf(spaces().find(p => p.active), panes());
       if (!JSON.parse(key)[1]) return;
       const at = this.checked[key];
+      // contract: branch.switched is written by branch-picker, changes-copy; optional, falls back to 0 (no forced refresh) when missing
       if (at === undefined || Date.now() - at > 30000 || Number(shared("branch.switched") ?? 0) > at) this.ask(key, cx);
     };
     tick(cx);

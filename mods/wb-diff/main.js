@@ -55,11 +55,12 @@ export default class DiffView extends View {
   }
 
   init(_props, cx) {
+    // contract: wb.diff.request is written by changes-copy; optional, falls back to null (nothing shown) when missing
     this.req = props()?.path ? props() : shared("wb.diff.request") ?? null;
     this.mode = "diff"; // "diff": hunks with context; "file": the whole file, changes highlighted
     this.rows = []; this.hunks = []; this.cur = -1; this.scrollY = 0; this.viewH = 400;
     // Wrap long lines (remembered): rows get as tall as their longer side needs; `cols` characters fit a column.
-    this.wrap = false; try { this.wrap = localStorage.getItem("wrap") === "1"; } catch {}
+    this.wrap = false; try { this.wrap = (localStorage.getItem("wb-diff.wrap") ?? localStorage.getItem("wrap")) === "1"; } catch {}
     this.viewW = 1200; this.cols = 100; this.geoCache = null;
     this.leftW = 300; this.rightW = 300; this.error = null; this.loading = false;
     // A tab opened with its own file must not be overwritten by an older request still sitting in shared state.
@@ -71,13 +72,17 @@ export default class DiffView extends View {
     const sp = spaces().find((s) => s.active);
     this.space = props()?.space ?? sp?.id ?? null;
     if (this.req) this.load(this.req, cx);
-    // A newer request (another file clicked in Changes): load it. From a timer, not render():
-    // a task spawned with render's cx never runs, which left the tab on "Loading diff…".
-    cx.timer.every(500, (cx) => {
-      const req = shared("wb.diff.request");
-      // Requests are per space: another space's Changes panel doesn't swap this tab's file.
-      if (req && req.ts !== this.applied && (!req.space || req.space === this.space)) { this.applied = req.ts; this.req = req; this.load(req, cx); }
-    });
+  }
+
+  // A newer request (another file clicked in Changes): render() reruns when shared state changes, so no
+  // poll. It only schedules; the load runs from a timer callback because a task spawned with render's cx never runs.
+  pickRequest(cx) {
+    // contract: wb.diff.request is written by changes-copy; optional, ignored when missing
+    const req = shared("wb.diff.request");
+    // Requests are per space: another space's Changes panel doesn't swap this tab's file.
+    if (!req || req.ts === this.applied || (req.space && req.space !== this.space)) return;
+    this.applied = req.ts; this.req = req;
+    cx.timer.after(0, (acx) => this.load(req, acx));
   }
 
   load(req, cx) {
@@ -199,6 +204,7 @@ export default class DiffView extends View {
   }
 
   render(cx) {
+    this.pickRequest(cx);
     const t = theme();
     const r = this.req;
     const z = settings().zoom || 1, H = this.viewH || 400;
@@ -225,7 +231,7 @@ export default class DiffView extends View {
     const toggleWrap = (cx) => {
       const top = this.indexAt(this.scrollY);
       this.wrap = !this.wrap;
-      try { localStorage.setItem("wrap", this.wrap ? "1" : "0"); } catch {}
+      try { localStorage.setItem("wb-diff.wrap", this.wrap ? "1" : "0"); } catch {}
       this.scrollY = this.yOf(top);
       cx.notify();
     };

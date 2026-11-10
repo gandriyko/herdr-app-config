@@ -36,7 +36,7 @@ export default class BranchPicker extends View {
     this.dirty = null; // { b, files }: asking what to do with uncommitted changes
     this.text = "";
     this.at = 0;
-    this.collapsed = new Set(JSON.parse(localStorage.getItem("collapsed") ?? "[]"));
+    this.collapsed = new Set(JSON.parse((localStorage.getItem("branch-picker.collapsed") ?? localStorage.getItem("collapsed")) ?? "[]"));
     this.input = InputState.new({ placeholder: "filter branches" });
     this.input.on("change", (_e, cx) => { this.text = this.input.value(); this.at = 0; cx.notify(); });
     this.input.on("submit", (_e, cx) => this.pick(this.pickable()[this.at], cx));
@@ -75,12 +75,12 @@ export default class BranchPicker extends View {
       // Recents live per repo; a branch deleted after its merge leaves the list with it.
       const key = JSON.stringify([this.on, rootRaw]);
       const known = new Set(list.map(b => b.name));
-      const stored = JSON.parse(localStorage.getItem("recents") ?? "{}");
+      const stored = JSON.parse((localStorage.getItem("branch-picker.recents") ?? localStorage.getItem("recents")) ?? "{}");
       this.recentKey = key;
       this.recents = (stored[key] ?? []).filter(n => known.has(n));
       if ((stored[key] ?? []).join("\n") !== this.recents.join("\n")) {
         stored[key] = this.recents;
-        localStorage.setItem("recents", JSON.stringify(stored));
+        localStorage.setItem("branch-picker.recents", JSON.stringify(stored));
       }
     } catch (e) {
       this.branches = [];
@@ -124,7 +124,7 @@ export default class BranchPicker extends View {
 
   toggle(g, cx) {
     if (this.collapsed.has(g)) this.collapsed.delete(g); else this.collapsed.add(g);
-    localStorage.setItem("collapsed", JSON.stringify([...this.collapsed]));
+    localStorage.setItem("branch-picker.collapsed", JSON.stringify([...this.collapsed]));
     cx.notify();
   }
 
@@ -202,10 +202,10 @@ export default class BranchPicker extends View {
     }
     if (stash) notify({ title: `Switched to ${b.name}`, body: "Your changes are stashed. Restore them with: git stash pop", level: "info" });
     this.recents = [b.name, ...this.recents.filter(n => n !== b.name)].slice(0, 10);
-    const stored = JSON.parse(localStorage.getItem("recents") ?? "{}");
+    const stored = JSON.parse((localStorage.getItem("branch-picker.recents") ?? localStorage.getItem("recents")) ?? "{}");
     stored[this.recentKey] = this.recents;
-    localStorage.setItem("recents", JSON.stringify(stored));
-    setShared("branch.switched", Date.now()); // the header chip re-asks on this
+    localStorage.setItem("branch-picker.recents", JSON.stringify(stored));
+    setShared("branch.switched", Date.now()); // the header chip re-asks on this. contract: read by status-copy
     this.close();
   }
 
@@ -231,7 +231,7 @@ export default class BranchPicker extends View {
           .hover(s => s.bg(t.hover))
           .on_click((_e, cx) => this.toggle(r.g, cx))
           .child(div().w(16).text_size(11).text_color(t.dim).child(r.open ? "▾" : "▸"))
-          .child(svg("mods/workspace-chrome/folder.svg").size(13).text_color(t.dim))
+          .child(svg("mods/branch-picker/folder.svg").size(13).text_color(t.dim))
           .child(div().text_color(t.muted).child(r.g))
           .child(div().text_size(11).text_color(t.dim).child(String(r.count)));
       }
@@ -254,7 +254,7 @@ export default class BranchPicker extends View {
         .tooltip(r.b.name)
         .on_hover((h, cx) => { if (h) this.hovered = r.b.name; else if (this.hovered === r.b.name) this.hovered = null; cx.notify(); })
         .on_click((_e, cx) => this.pick(r.b, cx))
-        .child(svg(`mods/workspace-chrome/${r.depth ? "branch" : "git-branch"}.svg`).size(13).text_color(cur ? t.accent : t.dim))
+        .child(svg(`mods/branch-picker/${r.depth ? "branch" : "git-branch"}.svg`).size(13).text_color(cur ? t.accent : t.dim))
         .child(div().flex_1().min_w(0).truncate().text_color(cur ? t.foreground : t.muted).child(r.rest ?? r.b.name))
         // Copy the full name (tree rows show only the part after the folder); the click doesn't check out.
         .when(on || this.hovered === r.b.name || this.copied === r.b.name, el => el.child(div().id(`br-copy-${i}`).flex_none().size(20).flex().items_center().justify_center().rounded(4)
@@ -262,9 +262,9 @@ export default class BranchPicker extends View {
           .tooltip(this.copied === r.b.name ? "Copied" : `Copy “${r.b.name}”`)
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
           .on_click((_e, cx) => this.copy(r.b.name, cx))
-          .child(svg(`mods/${this.copied === r.b.name ? "workspace-chrome/check" : "branch-picker/copy"}.svg`).size(12))))
+          .child(svg(`mods/branch-picker/${this.copied === r.b.name ? "check" : "copy"}.svg`).size(12))))
         .when(cur, el => el.child(div().flex_none().text_size(11).text_color(t.accent).child("current")))
-        .when(busy, el => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
+        .when(busy, el => el.child(svg("mods/branch-picker/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
         .when(!cur && !busy && r.b.at > 0, el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(ago(r.b.at))));
     };
     return v_flex()

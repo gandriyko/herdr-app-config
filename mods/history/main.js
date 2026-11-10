@@ -1,15 +1,15 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, TextView, InputState, Input } from "gpui-base";
-import { exec, theme, spaces, panes, run, notify } from "herdr";
+import { exec, home, theme, spaces, panes, run, notify } from "herdr";
 
-// Past agent sessions (Claude, Codex, OpenCode, ...) from human-history (`hh`, github.com/gandriyko/human-history).
+// Past agent sessions (Claude, Codex, OpenCode, ...) from human-history (`human-history`, github.com/gandriyko/human-history).
 // Typing searches prompts and answers; an empty query lists the latest sessions. Results are limited to the
 // active space's project (git repo, all its worktrees). Click opens the conversation as Markdown, with
 // Resume (a new tab in the session's folder); right-click copies the session id.
 const LIMIT = 50;
 const PAGE = 30; // messages rendered per "Show more": long sessions have hundreds
 
-// How each agent reopens a session: hh's own table (src/resume.rs, resume_argv).
+// How each agent reopens a session: human-history's own table (src/resume.rs, resume_argv).
 // ponytail: a Hermes session from a profile database also needs `-p <profile>`; add it if one shows up.
 const RESUME = {
   claude: (id) => ["claude", "--resume", id],
@@ -19,10 +19,12 @@ const RESUME = {
   pi: (id) => ["pi", "--session", id],
   hermes: (id) => ["hermes", "--resume", id, "--no-restore-cwd"],
 };
-const HH = "hh";
+const BIN = "human-history"; // the human-history CLI binary (src/cli.rs: name = "human-history")
+// Herdr started from the Dock/Finder has a short PATH without ~/.cargo/bin, where `cargo install` puts it.
+const CARGO_BIN = "/.cargo/bin/" + BIN;
 const REPO ="https://github.com/gandriyko/human-history";
 const INSTALL = `cargo install --git ${REPO}`; // README: built from source, needs a Rust toolchain
-const SAFE_ID =/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/; // as hh: never an option-looking id in argv
+const SAFE_ID =/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/; // as human-history: never an option-looking id in argv
 
 function resume(s) {
   const argv = RESUME[s.agent]?.(s.session_id);
@@ -59,9 +61,10 @@ const day = (iso, time = false) => {
 
 export default class History extends View {
   init(_props, cx) {
+    this.bin = BIN; this.found = false;
     this.results = []; this.error = null; this.loading = false; this.seq = 0;
     this.open = null; // { session, messages, shown, error }
-    this.scope = localStorage.getItem("scope") === "title" ? "title" : "both"; // hh -s: titles only, or prompts + answers
+    this.scope = localStorage.getItem("scope") === "title" ? "title" : "both"; // human-history -s: titles only, or prompts + answers
     this.where = undefined; // the folder the results were asked for; render re-asks when the space moves
     this.search = InputState.new({ placeholder: "Search sessions" });
     this.search.on("change", (_e, cx) => {
@@ -78,17 +81,27 @@ export default class History extends View {
     cx.timer.every(2000, (cx) => { if (!this.missing && place() !== this.where) this.find(cx); });
   }
 
+  // PATH first, then ~/.cargo/bin; this.bin is what every call runs, this.found says one of them exists.
+  async locate() {
+    const test = async (sh) => (await exec("/bin/sh", ["-c", sh]).catch(() => ({ code: 1 }))).code === 0;
+    this.found = true;
+    if (await test(`command -v ${BIN}`)) { this.bin = BIN; return; }
+    const path = home() + CARGO_BIN;
+    if (await test(`test -x '${path}'`)) { this.bin = path; return; }
+    this.bin = BIN; this.found = false;
+  }
+
   reindex(cx) {
-    if (this.indexing) return; // one hh index at a time: clicks or the timer while one runs wait for it
+    if (this.indexing) return; // one human-history index at a time: clicks or the timer while one runs wait for it
     this.indexing = true; this.loading = true; cx.notify();
     cx.spawn(async (cx) => {
-      // exec rejects when hh can't start (or times out); `command -v` tells "not installed" apart.
-      const r = await exec(HH, ["index"], { timeout: 120000 }).catch((e) => ({ code: -1, stderr: String(e.message ?? e) }));
+      // exec rejects when human-history can't start (or times out); `command -v` tells "not installed" apart.
+      await this.locate();
+      const r = await exec(this.bin, ["index"], { timeout: 120000 }).catch((e) => ({ code: -1, stderr: String(e.message ?? e) }));
       this.indexing = false;
-      this.missing = r.code === -1
-        && (await exec("/bin/sh", ["-c", `command -v ${HH}`]).catch(() => ({ code: 1 }))).code !== 0;
+      this.missing = r.code === -1 && !this.found;
       if (this.missing || r.code !== 0) {
-        this.error = this.missing ? null : `hh index: ${(r.stderr || r.stdout).trim()}`;
+        this.error = this.missing ? null : `human-history index: ${(r.stderr || r.stdout).trim()}`;
         this.results = []; this.loading = false; cx.notify(); return;
       }
       this.find(cx);
@@ -97,21 +110,21 @@ export default class History extends View {
 
   find(cx) {
     const seq = ++this.seq, query = this.search.value().trim();
-    // Never global: hh -f repository takes the project (git repo, all its worktrees; else that folder)
+    // Never global: human-history -f repository takes the project (git repo, all its worktrees; else that folder)
     // from its working directory, the active space's folder. No folder: nothing to search.
     const where = place();
     // Another project: never leave the old one's sessions under the new folder while this one loads.
     if (where !== this.where) this.results = [];
     this.where = where;
-    if (this.missing) return; // the install hint stays until refresh finds hh
+    if (this.missing) return; // the install hint stays until refresh finds human-history
     if (!where) { this.results = []; this.error = null; this.loading = false; return; }
     this.loading = true;
     cx.spawn(async (cx) => {
       cx.notify();
       try {
-        // hh takes the project from HH_CWD before its working directory (cli.rs cwd()); the hh Herdr
+        // human-history takes the project from HH_CWD before its working directory (cli.rs cwd()); the human-history Herdr
         // plugin sets HH_CWD, so a stray one would pick another project. Set it to ours.
-        const r = await exec("/usr/bin/env", [`HH_CWD=${where}`, HH, "search", query, "--json", "-s", this.scope, "-f", "repository", "--limit", String(LIMIT)], { cwd: where });
+        const r = await exec("/usr/bin/env", [`HH_CWD=${where}`, this.bin, "search", query, "--json", "-s", this.scope, "-f", "repository", "--limit", String(LIMIT)], { cwd: where });
         if (seq !== this.seq) return; // a newer query is on its way
         if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
         this.results = JSON.parse(r.stdout); this.error = null;
@@ -130,11 +143,11 @@ export default class History extends View {
       const open = this.open;
       try {
         // {"session": {...}, "messages": [{role: "user" | "assistant", ts, text}]}, text as the agent wrote it.
-        const r = await exec(HH, ["show", session.session_id, "--json"]);
+        const r = await exec(this.bin, ["show", session.session_id, "--json"]);
         if (r.code !== 0) {
           const message = (r.stderr || r.stdout).trim();
-          // hh before `show --json` (human-history 33a0d84) rejects the flag.
-          throw new Error(/--json/.test(message) ? `This hh is too old for the panel: update it (${INSTALL})` : message);
+          // human-history before `show --json` (human-history 33a0d84) rejects the flag.
+          throw new Error(/--json/.test(message) ? `This human-history is too old for the panel: update it (${INSTALL})` : message);
         }
         open.messages = JSON.parse(r.stdout).messages.filter((m) => m.text?.trim());
       } catch (e) { open.error = String(e.message ?? e); }
@@ -142,7 +155,7 @@ export default class History extends View {
     });
   }
 
-  // Favorite star, on every session: filled when it's a favorite (hh lists those first), an outline
+  // Favorite star, on every session: filled when it's a favorite (human-history lists those first), an outline
   // otherwise; a click toggles it. Its own mouse down stops there, so the row doesn't open.
   star(s, t, id) {
     return div().id(id).size(18).flex_none().flex().items_center().justify_center().rounded(4).cursor_pointer()
@@ -152,14 +165,14 @@ export default class History extends View {
       .child(svg(`mods/history/icons/${s.favorite ? "star" : "star-outline"}.svg`).size(12));
   }
 
-  // hh favorite / unfavorite (idempotent, exit 1 on no or an ambiguous match). The star flips at once;
+  // human-history favorite / unfavorite (idempotent, exit 1 on no or an ambiguous match). The star flips at once;
   // a failure flips it back. Then the list is asked again: favorites move to the top.
   toggleFavorite(s, cx) {
     const want = !s.favorite;
     const set = (v) => { for (const x of [s, ...this.results, this.open?.session]) if (x?.key === s.key) x.favorite = v; };
     set(want); cx.notify();
     cx.spawn(async (cx) => {
-      const r = await exec(HH, [want ? "favorite" : "unfavorite", s.session_id]).catch((e) => ({ code: -1, stderr: String(e.message ?? e) }));
+      const r = await exec(this.bin, [want ? "favorite" : "unfavorite", s.session_id]).catch((e) => ({ code: -1, stderr: String(e.message ?? e) }));
       if (r.code !== 0) {
         set(!want);
         notify({ title: `Couldn't ${want ? "add to" : "remove from"} favorites`, body: (r.stderr || r.stdout || "").trim(), level: "error" });
@@ -216,19 +229,19 @@ export default class History extends View {
         .child(`Show more (${list.length - shown} left)`)));
   }
 
-  // hh isn't on PATH: where to get it. Refresh checks again after installing.
+  // human-history isn't on PATH: where to get it. Refresh checks again after installing.
   installHint(t) {
     const button = (id, label, primary, onClick) => div().id(id).h(28).px(12).flex().items_center().justify_center().rounded(7).cursor_pointer().text_size(12)
       .bg(primary ? t.solid : t.raised).text_color(primary ? t.solid_foreground : t.foreground).hover((s) => s.opacity(0.9)).on_click(onClick).child(label);
     return v_flex().p(8).gap(8).text_color(t.muted)
       .child(div().text_color(t.foreground).font_semibold().child("human-history is not installed"))
-      .child(div().child("This panel searches past agent sessions with the hh command. Install it (needs a Rust toolchain from rustup.rs):"))
+      .child(div().child("This panel searches past agent sessions with the human-history command. Install it (needs a Rust toolchain from rustup.rs):"))
       .child(div().p(8).rounded(7).bg(t.raised).border_1().border_color(t.border)
         .child(TextView.markdown("install-cmd", "`" + INSTALL + "`").selectable(true)))
       .child(h_flex().gap(6)
         .child(button("open-repo", "Open repository", true, () => exec("open", [REPO])))
         .child(button("copy-install", "Copy command", false, (_e, cx) => cx.write_to_clipboard(INSTALL))))
-      .child(div().text_size(11).text_color(t.dim).child("Then press the refresh button above to look for hh again."));
+      .child(div().text_size(11).text_color(t.dim).child("Then press the refresh button above to look for human-history again."));
   }
 
   render(cx) {

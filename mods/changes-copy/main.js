@@ -269,7 +269,7 @@ export default class Changes extends View {
     const ids = new Set((space?.tabs ?? []).map((t) => t.id));
     const existing = panes().find((p) => p.mod === "wb-diff" && ids.has(p.tab));
     const name = path.split("/").pop();
-    setShared("wb.diff.request", req);
+    setShared("wb.diff.request", req); // contract: read by wb-diff
     if (existing) { run("tab.select", { id: existing.tab }); run("tab.rename", { id: existing.tab, name }); }
     else run("tab.new", { name, mod: "wb-diff", props: req, space: space?.id ?? undefined });
   }
@@ -348,7 +348,7 @@ export default class Changes extends View {
           r = await git(["pull", "--rebase", "--autostash"]);
           if (r.code !== 0) { const m = msg(r); await git(["rebase", "--abort"]).catch(() => null); throw new Error(`rebase stopped: ${m} · rebase aborted, nothing changed`); }
         } else if (r.code !== 0) throw new Error(msg(r));
-        setShared("branch.switched", Date.now()); // the header chip and the other panels ask again
+        setShared("branch.switched", Date.now()); // the header chip and the other panels ask again. contract: read by status-copy
       } catch (e) { if (key() === context) this.note = `Pull failed: ${e.message ?? e}`; }
       finally { this.pulling = false; this.refresh(cx); cx.notify(); }
     });
@@ -363,7 +363,7 @@ export default class Changes extends View {
       try {
         const r = await exec("git", args, { cwd: root, on, timeout: 180000 });
         if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().split("\n").slice(-3).join(" "));
-        setShared("branch.switched", Date.now()); // the header chip and the other panels ask again
+        setShared("branch.switched", Date.now()); // the header chip and the other panels ask again. contract: read by status-copy
       } catch (e) { if (key() === context) this.note = `Push failed: ${e.message ?? e}`; }
       finally { this.pushing = false; this.refresh(cx); cx.notify(); }
     });

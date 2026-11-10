@@ -62,3 +62,16 @@ another mod is removed, cloned or updated.
   constants and pure helpers only (module code is shared by every copy and survives reloads).
 - **Clean up.** Long-lived work (watch loops, spawned processes, terminals) checks a generation or
   "live" flag so an old loop ends, and `close(cx)` stops anything that outlives the view.
+
+## Documentation: every mod has a MOD.md
+
+Anyone (or any AI agent) taking a mod must see where to clone it from and what it does without reading
+its code. Every mod folder has `mods/<name>/MOD.md`, and `mods/README.md` indexes them all.
+
+- **Frontmatter** (machine-readable): `name`, `summary`, `source` (GitHub tree URL of the mod),
+  `install`, `place`, `needs`, `shared_keys`, `reads_keys`, `commands`. Sections: What it does, Files,
+  Settings and data, Notes. Copy the layout of an existing `MOD.md`.
+- **Keep it true.** When a mod's behaviour, shared keys, external programs or files change, update its
+  `MOD.md` in the same commit. A new mod is not done without one.
+- **Update the index.** Add or change the mod's row in `mods/README.md` (name, one-line summary, link).
+- Write in English, short and factual: no marketing, no changelog.

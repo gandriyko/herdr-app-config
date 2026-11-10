@@ -9,6 +9,9 @@
 // claude / codex run their CLI (the person's subscription) inside the repo folder, on the repo's
 // machine; local calls an OpenAI-compatible server (Ollama, LM Studio, llama.cpp).
 
+// contract: wb.ai.models, wb.ai.use, wb.ai.project, wb.ai.localMigrated, wb.ai.projectMigrated are shared on purpose
+// by wb-ai, prs and changes-copy (each mod ships its own copy of this file, per the isolation rule). All are
+// optional: when missing, defaults are created (see ensure()). Never rename them.
 import { exec, readTextFile, shared, setShared } from "herdr";
 
 export const MODELS = "wb.ai.models", USE = "wb.ai.use";
@@ -39,6 +42,7 @@ export const DEFAULT_URL = "http://localhost:11434/v1";
 
 // One-time: the keys used to be unprefixed ("ai.models"); copy them to "wb.*" when the new one is empty.
 export function migrateAi() {
+  // contract: ai.* / commit.gen (unprefixed legacy) are written by an old build; optional, skipped when missing
   for (const k of ["ai.models", "ai.use", "ai.reviewDrafts", "ai.localMigrated", "commit.gen"]) {
     if (shared("wb." + k) == null && shared(k) != null) setShared("wb." + k, shared(k));
   }
@@ -47,24 +51,24 @@ export function migrateAi() {
 // The first build had one commit-message setting (shared "wb.commit.gen"): it becomes the first models.
 function ensure() {
   migrateAi();
-  const existing = shared(MODELS);
+  const existing = shared(MODELS); // contract: wb.ai.models is written by wb-ai (and these copies); optional, falls back to a default Claude model list when missing
   if (existing) {
     // Once: a local server set up in the old settings (while Claude was picked) joins the list too.
-    const c = shared("wb.commit.gen") ?? {};
+    const c = shared("wb.commit.gen") ?? {}; // contract: wb.commit.gen is written by an old build; optional, falls back to {} when missing
     if (!shared("wb.ai.localMigrated") && c.url && c.url !== DEFAULT_URL && !existing.some((m) => m.provider === "local")) {
       setShared(MODELS, [...existing, { id: "local", name: "Local", provider: "local", url: c.url, model: c.provider === "local" ? c.model || "" : "" }]);
     }
     if (!shared("wb.ai.localMigrated")) setShared("wb.ai.localMigrated", true);
     return;
   }
-  const c = shared("wb.commit.gen") ?? {}, local = c.provider === "local";
+  const c = shared("wb.commit.gen") ?? {}, local = c.provider === "local"; // contract: wb.commit.gen is written by an old build; optional, falls back to {} when missing
   const list = [{ id: "claude", name: "Claude", provider: "claude", command: (!local && c.command) || "claude", args: (!local && c.args) || "-p", model: (!local && c.model) || "" }];
   if (local && c.url) list.push({ id: "local", name: "Local", provider: "local", url: c.url, model: c.model || "" });
-  setShared(MODELS, list);
+  setShared(MODELS, list); // contract: read by wb-ai, prs, changes-copy
   setShared(USE, { commit: local && c.url ? "local" : "claude", review: "claude" });
 }
 
-export function models() { ensure(); return shared(MODELS) ?? []; }
+export function models() { ensure(); return shared(MODELS) ?? []; } // contract: wb.ai.models optional, falls back to []
 
 // One-time: the old global commit template / "No blank lines" (shared "wb.commit.gen") become the
 // commit defaults for every project (key "*").
@@ -72,12 +76,13 @@ export function models() { ensure(); return shared(MODELS) ?? []; }
 export function migrate() { migrateAi(); models(); migrateProject(); }
 function migrateProject() {
   if (shared("wb.ai.projectMigrated")) return;
-  setShared("wb.ai.projectMigrated", true);
+  setShared("wb.ai.projectMigrated", true); // contract: read by wb-ai, prs, changes-copy
   const c = shared("wb.commit.gen") ?? {}, tpl = String(c.template ?? "").trim();
   if (!tpl && c.noBlank !== false) return;
-  const all = shared(PROJECT) ?? {};
+  const all = shared(PROJECT) ?? {}; // contract: wb.ai.project is written by wb-ai; optional, falls back to {} when missing
   setShared(PROJECT, { ...all, "*": { ...all["*"], commit: { ...(tpl ? { template: tpl } : {}), ...(c.noBlank === false ? { noBlank: false } : {}), ...all["*"]?.commit } } });
 }
+// contract: wb.ai.project / wb.ai.use are written by wb-ai; optional, fall back to {} when missing
 const stored = (use, key) => { const all = shared(PROJECT) ?? {}; return [all[key]?.[use] ?? {}, all["*"]?.[use] ?? {}]; };
 
 // The model for a use: the project's pick, else the all-projects one ("*"), else the global one, else the first model.
@@ -95,7 +100,7 @@ export function settingsFor(use, key) {
     noBlank: use === "commit" ? (p.noBlank ?? g.noBlank ?? true) : undefined,
   };
 }
-export function setSetting(use, key, patch) {
+export function setSetting(use, key, patch) { // contract: wb.ai.project and wb.ai.use below are read by wb-ai, prs, changes-copy
   const all = shared(PROJECT) ?? {};
   setShared(PROJECT, { ...all, [key]: { ...all[key], [use]: { ...all[key]?.[use], ...patch } } });
 }
