@@ -72,13 +72,17 @@ export default class Jira extends View {
     this.site = input("https://your-company.atlassian.net");
     this.project = input("Project key for the backlog, e.g. DA");
     this.email = input("Atlassian email");
-    this.token = input("API token");
-    this.token.set_masked(true);
+    // ponytail: InputState has no placeholder setter, so one field per placeholder; `token` picks by savedEmail.
+    this.tokenNew = input("API token");
+    this.tokenKeep = input("Empty: the saved token will be used");
+    this.tokenNew.set_masked(true); this.tokenKeep.set_masked(true);
     this.search = InputState.new({ placeholder: "Search by key or title" });
     this.search.on("change", (_e, cx) => { this.query = this.search.value().trim().toLowerCase(); cx.notify(); });
     this.refresh(cx);
     cx.timer.every(5 * 60 * 1000, (cx) => this.refresh(cx));
   }
+
+  get token() { return this.savedEmail ? this.tokenKeep : this.tokenNew; }
 
   settings() { return shared(SETTINGS) ?? {}; }
 
@@ -165,7 +169,7 @@ export default class Jira extends View {
           // ponytail: -w puts the token in `security`'s argv for a moment (local ps only); its prompt can't be driven from a mod.
           const r = await exec("security", ["add-generic-password", "-s", SERVICE, "-a", email, "-w", token]);
           if (r.code !== 0) throw new Error(`Keychain: ${(r.stderr || r.stdout).trim()}`);
-          this.savedEmail = email; this.token.set_value("");
+          this.token.set_value(""); this.savedEmail = email;
         }
         setShared(SETTINGS, { site, project, base });
         this.sprintField = undefined; this.verified = true; this.setup = false; this.editing = false;
@@ -188,13 +192,12 @@ export default class Jira extends View {
   formView(t) {
     const button = (id, label, primary, onClick) => div().id(id).h(28).px(12).flex().flex_1().items_center().justify_center().rounded(7).cursor_pointer().text_size(12)
       .bg(primary ? t.solid : t.raised).text_color(primary ? t.solid_foreground : t.foreground).hover((s) => s.opacity(0.9)).on_click(onClick).child(label);
-    const keepToken = this.savedEmail ? "API token (empty: keep the saved one)" : "API token";
     return v_flex().p(8).gap(8).text_color(t.muted)
       .child(div().text_color(t.foreground).font_semibold().child(this.setup ? "Connect Jira" : "Jira settings"))
       .child(this.field("site", "Jira URL", this.site, t))
       .child(this.field("project", "Backlog project key (optional)", this.project, t))
       .child(this.field("email", "Atlassian email", this.email, t))
-      .child(this.field("token", keepToken, this.token, t))
+      .child(this.field("token", "API token", this.token, t))
       .child(h_flex().gap(6)
         .child(button("open-token-page", "Open token page", false, () => exec("open", [TOKEN_PAGE])))
         .child(button("save", this.saving ? "Checking…" : "Save", true, (_e, cx) => this.save(cx))))
