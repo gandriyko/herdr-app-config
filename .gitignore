@@ -12,6 +12,7 @@
 !layouts/
 !layouts/my-layout.*
 !mods/
+!mods/AGENTS.md
 !mods/branch-picker/
 !mods/branch-picker/**
 !mods/wb-ai/
