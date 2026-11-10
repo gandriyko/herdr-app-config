@@ -124,7 +124,7 @@ export default class History extends View {
       try {
         // human-history takes the project from HH_CWD before its working directory (cli.rs cwd()); the human-history Herdr
         // plugin sets HH_CWD, so a stray one would pick another project. Set it to ours.
-        const r = await exec("/usr/bin/env", [`HH_CWD=${where}`, this.bin, "search", query, "--json", "-s", this.scope, "-f", "repository", "--limit", String(LIMIT)], { cwd: where });
+        const r = await exec("/usr/bin/env", [`HH_CWD=${where}`, this.bin, "search", query, "--json", "-s", this.scope, "-f", "repository", "--limit", String(LIMIT)], { cwd: where, timeout: 120000 });
         if (seq !== this.seq) return; // a newer query is on its way
         if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
         this.results = JSON.parse(r.stdout); this.error = null;
@@ -143,7 +143,7 @@ export default class History extends View {
       const open = this.open;
       try {
         // {"session": {...}, "messages": [{role: "user" | "assistant", ts, text}]}, text as the agent wrote it.
-        const r = await exec(this.bin, ["show", session.session_id, "--json"]);
+        const r = await exec(this.bin, ["show", session.session_id, "--json"], { timeout: 120000 });
         if (r.code !== 0) {
           const message = (r.stderr || r.stdout).trim();
           // human-history before `show --json` (human-history 33a0d84) rejects the flag.

@@ -5,16 +5,20 @@ import { migrate, models, modelFor, settingsFor, setUse, projectKey, projectName
 
 // A pane without a folder (the wb-diff tab, any mod pane) has the keyboard after a click on a file: then the
 // panel stays on the last place it knew in this space, instead of falling back to the space's own folder.
-const lastPlace = new Map(); // space id -> { cwd, on }
-function location() {
+// `places` is the view's own map (space id -> { cwd, on }), capped by PLACES_MAX: module scope is shared by every copy.
+const PLACES_MAX = 50;
+function location(places) {
   const space = spaces().find((s) => s.active), f = focused();
   const pane = f?.pane ? panes().find(p => p.pane === f.pane) : null;
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
   const cwd = pane?.cwd || f?.cwd;
-  if (cwd) { lastPlace.set(space?.id, { cwd, on }); return { cwd, on }; }
-  return lastPlace.get(space?.id) ?? { cwd: space?.folder, on };
+  if (cwd) {
+    places.delete(space?.id); places.set(space?.id, { cwd, on });
+    if (places.size > PLACES_MAX) places.delete(places.keys().next().value);
+    return { cwd, on };
+  }
+  return places.get(space?.id) ?? { cwd: space?.folder, on };
 }
-const key = () => JSON.stringify(location());
 // Reads write nothing under .git (no index refresh or lock, no fsmonitor cookie):
 // the folder watch would see it, and every refresh would start the next one.
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
@@ -42,7 +46,9 @@ const COMMIT_MIN = 40, COMMIT_MAX = 420; // commit message box height, px
 const openGenSettings = () => openOverlay({ mod: "wb-ai", kind: "window", key: "wb-ai", width: 580 });
 const openCommitSettings = (project) => openOverlay({ mod: "wb-ai", kind: "dialog", width: 560, props: { use: "commit", project, projectName: projectName(project) } });
 export default class Changes extends View {
+  key() { return JSON.stringify(location(this.places)); }
   init(_props, cx) {
+    this.places = new Map();
     // The Generate button's menu (a popup copy of this mod) draws one item: no git, no timers.
     if (props()?.menu) return;
     this.files = []; this.view = "list"; this.scope = "head"; this.collapsed = new Set();
@@ -68,7 +74,7 @@ export default class Changes extends View {
     // Focus moved to another folder or repo: refresh for it. From a timer, not render(): a task spawned
     // with render's cx never runs, and refresh() had already set `loading`, freezing the panel for good.
     // Every tick copies spaces/panes from the host: 2 s, not 500 ms.
-    cx.timer.every(2000, (cx) => { if (key() !== this.context) this.refresh(cx); });
+    cx.timer.every(2000, (cx) => { if (this.key() !== this.context) this.refresh(cx); });
   }
 
   watch(root, gitDir, cx) {
@@ -93,7 +99,7 @@ export default class Changes extends View {
   refresh(cx) {
     // A change during a refresh runs one more after it (see finally), instead of one per change.
     if (this.loading || this.busy) { this.again = true; return; }
-    const { cwd, on } = location(), context = key();
+    const { cwd, on } = location(this.places), context = this.key();
     const shown = this.shownState();
     if (context !== this.context) {
       this.context = context; this.collapsed = new Set(); this.root = null; this.files = []; this.open = null;
@@ -101,7 +107,7 @@ export default class Changes extends View {
     }
     if (!cwd) return;
     this.loading = true;
-    const scope = this.scope, stale = () => key() !== context || this.scope !== scope;
+    const scope = this.scope, stale = () => this.key() !== context || this.scope !== scope;
     cx.spawn(async (cx) => {
       try {
         const top = await exec("git", ["rev-parse", "--show-toplevel", "--absolute-git-dir"], { cwd, on });
@@ -277,7 +283,7 @@ export default class Changes extends View {
   // Ask the configured model for a commit message from the current diff, and drop it into the textarea.
   // Claude rides the person's subscription and starts inside the repo folder; local goes to the endpoint.
   generate(cx) {
-    if (!this.root || this.generating || this.busy || this.loading || this.context !== key()) return;
+    if (!this.root || this.generating || this.busy || this.loading || this.context !== this.key()) return;
     const root = this.root, on = this.on, context = this.context, hasHead = this.hasHead, against = this.against;
     this.generating = true; this.note = null; cx.notify();
     cx.spawn(async (cx) => {
@@ -299,8 +305,8 @@ export default class Changes extends View {
         let msg = await runModel(model, `${prompt}\n\n${text}`, { cwd: root, on });
         msg = tidy(msg, cfg.noBlank !== false);
         if (!msg) throw new Error("the model returned nothing");
-        if (key() === context) { this.input.set_value(msg); this.message = msg; }
-      } catch (e) { if (key() === context) this.note = `Generate failed: ${e}`; }
+        if (this.key() === context) { this.input.set_value(msg); this.message = msg; }
+      } catch (e) { if (this.key() === context) this.note = `Generate failed: ${e}`; }
       finally { this.generating = false; cx.notify(); }
     });
   }
@@ -336,7 +342,7 @@ export default class Changes extends View {
   // Pull: fast-forward when it can; when the branches diverged, rebase the local commits on top (autostash);
   // if that stops on a conflict it is aborted and said so, so nothing is left half done.
   pull(cx) {
-    if (!this.root || !this.upstream || this.pulling || this.pushing || this.busy || this.loading || this.context !== key()) return;
+    if (!this.root || !this.upstream || this.pulling || this.pushing || this.busy || this.loading || this.context !== this.key()) return;
     const root = this.root, on = this.on, context = this.context;
     const git = (args) => exec("git", args, { cwd: root, on, timeout: 180000 });
     const msg = (r) => (r.stderr || r.stdout).trim().split("\n").slice(-3).join(" ");
@@ -349,14 +355,14 @@ export default class Changes extends View {
           if (r.code !== 0) { const m = msg(r); await git(["rebase", "--abort"]).catch(() => null); throw new Error(`rebase stopped: ${m} · rebase aborted, nothing changed`); }
         } else if (r.code !== 0) throw new Error(msg(r));
         setShared("branch.switched", Date.now()); // the header chip and the other panels ask again. contract: read by status-copy
-      } catch (e) { if (key() === context) this.note = `Pull failed: ${e.message ?? e}`; }
+      } catch (e) { if (this.key() === context) this.note = `Pull failed: ${e.message ?? e}`; }
       finally { this.pulling = false; this.refresh(cx); cx.notify(); }
     });
   }
 
   // Push the branch: plain `git push`, or `git push -u origin HEAD` when it has no upstream yet.
   push(cx) {
-    if (!this.root || this.pushing || this.pulling || this.busy || this.loading || this.context !== key()) return;
+    if (!this.root || this.pushing || this.pulling || this.busy || this.loading || this.context !== this.key()) return;
     const root = this.root, on = this.on, context = this.context, args = this.upstream ? ["push"] : ["push", "-u", "origin", "HEAD"];
     this.pushing = true; this.note = null; cx.notify();
     cx.spawn(async (cx) => {
@@ -364,13 +370,13 @@ export default class Changes extends View {
         const r = await exec("git", args, { cwd: root, on, timeout: 180000 });
         if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().split("\n").slice(-3).join(" "));
         setShared("branch.switched", Date.now()); // the header chip and the other panels ask again. contract: read by status-copy
-      } catch (e) { if (key() === context) this.note = `Push failed: ${e.message ?? e}`; }
+      } catch (e) { if (this.key() === context) this.note = `Push failed: ${e.message ?? e}`; }
       finally { this.pushing = false; this.refresh(cx); cx.notify(); }
     });
   }
 
   commit(cx) {
-    if (!this.message.trim() || !this.root || this.busy || this.loading || this.context !== key()) return;
+    if (!this.message.trim() || !this.root || this.busy || this.loading || this.context !== this.key()) return;
     const root = this.root, on = this.on, context = this.context, message = this.message.trim();
     this.busy = true; this.note = null;
     cx.spawn(async (cx) => {
@@ -379,8 +385,8 @@ export default class Changes extends View {
           const r = await exec("git", args, { cwd: root, on });
           if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
         }
-        if (key() === context) { this.message = ""; this.input.set_value(""); }
-      } catch (e) { if (key() === context) this.note = `Commit failed: ${e}`; }
+        if (this.key() === context) { this.message = ""; this.input.set_value(""); }
+      } catch (e) { if (this.key() === context) this.note = `Commit failed: ${e}`; }
       finally { this.busy = false; this.refresh(cx); cx.notify(); }
     });
     cx.notify();
@@ -394,7 +400,7 @@ export default class Changes extends View {
     const enabled = Boolean(this.message.trim() && this.root && !this.busy && !this.loading);
     const pushEnabled = Boolean(this.root && this.hasHead && !this.pushing && !this.pulling && !this.busy && !this.loading && (this.ahead > 0 || !this.upstream));
     const pullEnabled = Boolean(this.root && this.hasHead && this.upstream && !this.pulling && !this.pushing && !this.busy && !this.loading);
-    const genEnabled = Boolean(this.root && !this.generating && !this.busy && !this.loading && this.context === key());
+    const genEnabled = Boolean(this.root && !this.generating && !this.busy && !this.loading && this.context === this.key());
     const noBase = this.scope === "base" && Boolean(this.root) && !this.base && !this.loading;
     return v_flex().id("changes").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
       .on_key_down((e, cx) => {
