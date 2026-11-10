@@ -10,7 +10,8 @@ import { highlight, languageFor } from "./highlight.js";
 import { props, shared, spaces, panes, theme, settings, exec, readTextFile, run } from "herdr";
 
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
-const ROW = 20, CHAR_W = 11 * 0.6;
+// The code's text size matches the side panels' (Changes, Files: 13); ROW is a code line's height.
+const FONT = 13, ROW = 22, CHAR_W = FONT * 0.6;
 
 // Aligned rows from a unified diff: each row has left/right sides (null: that side is blank).
 // A run of removals pairs with the run of additions line by line, like PhpStorm does.
@@ -256,7 +257,7 @@ export default class DiffView extends View {
           .child(group([cell("diff-prev", "chevron-left", "Previous change (Alt+↑)", false, this.hunks.length > 0, (cx) => this.jump(-1, cx)),
             cell("diff-next", "chevron-right", "Next change (Alt+↓)", false, this.hunks.length > 0, (cx) => this.jump(1, cx))])))
         .child(div().id("diff-close").w(26).h(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Close").on_mouse_down("left", stop).on_click(() => { const tab = this.shownTab(); if (tab) run("tab.close", { id: tab, confirmed: true }); }).child(svg("mods/wb-diff/icons/close.svg").size(12))))
-      .child(div().id("diff-body").flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(11)
+      .child(div().id("diff-body").flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(FONT)
         .on_size_change((s, cx) => { const h = s.height / z, w = s.width / z; if (h !== this.viewH || w !== this.viewW) { this.viewH = h; this.viewW = w; cx.notify(); } })
         .on_hover((hovered) => { if (!hovered) this.thumbDrag = null; })
         .on_mouse_up("left", () => { this.thumbDrag = null; })
