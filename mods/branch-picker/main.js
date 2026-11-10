@@ -1,4 +1,4 @@
-// Branch picker behind the header's branch chip: all local branches in a tree
+// Branch picker behind the status bar's branch (status-copy): all local branches in a tree
 // (groups by their `prefix/`), recently checked-out ones pinned on top, a filter
 // box. A click runs `git checkout` and nothing else — spaces, tabs and terminals
 // never move. Branches that were deleted (after their merge) drop out of the
