@@ -1,7 +1,7 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, TextareaState, Textarea, Scrollbar } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, run, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
-import { migrateAi, modelFor, runModel, describe } from "./ai.js";
+import { migrate, modelFor, settingsFor, projectKey, projectName, languageLine, runModel, describe } from "./ai.js";
 
 // A pane without a folder (the wb-diff tab, any mod pane) has the keyboard after a click on a file: then the
 // panel stays on the last place it knew in this space, instead of falling back to the space's own folder.
@@ -19,8 +19,6 @@ const key = () => JSON.stringify(location());
 // the folder watch would see it, and every refresh would start the next one.
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
 const ITEM = 22, INDENT = 10; // ITEM: changed-file list row, INDENT: per tree level
-// Same default as the wb-ai window's Template field.
-const DEFAULT_TEMPLATE = "A first line of up to 72 characters in imperative mood. Then, only when they add something, one blank line and short bullet details (\"- ...\"), one per line. No other blank lines.";
 // A commit message in git's shape: a one-line title, one blank line, then the body. `compact` drops the body's own blank lines.
 const tidy = (msg, compact) => {
   const lines = String(msg).replace(/\r/g, "").split("\n");
@@ -32,15 +30,16 @@ const tidy = (msg, compact) => {
   return rest.length ? `${title}\n\n${rest.map((l) => l.trimEnd()).join("\n")}` : title;
 };
 const COMMIT_MIN = 40, COMMIT_MAX = 420; // commit message box height, px
-// Generation settings live in shared("wb.commit.gen"), edited in the wb-ai window.
+// Per-project generation settings (model, language, template) live in shared("wb.ai.project") (ai.js), edited in wb-ai.
 const openGenSettings = () => openOverlay({ mod: "wb-ai", kind: "window", key: "wb-ai", width: 580 });
+const openCommitSettings = (project) => openOverlay({ mod: "wb-ai", kind: "dialog", width: 560, props: { use: "commit", project, projectName: projectName(project) } });
 export default class Changes extends View {
   init(_props, cx) {
     // The Generate button's menu (a popup copy of this mod) draws one item: no git, no timers.
     if (props()?.menu) return;
     this.files = []; this.view = "list"; this.scope = "head"; this.collapsed = new Set();
     try { if (localStorage.getItem("view") === "tree") this.view = "tree"; if (localStorage.getItem("scope") === "base") this.scope = "base"; } catch {}
-    migrateAi();
+    migrate();
     this.message = ""; this.handle = cx.focus_handle(); this.generating = false;
     this.input = TextareaState.new({ placeholder: "Commit message" });
     // The box height (px) is a splitter choice: drag the handle above it up to grow it, remembered per person.
@@ -87,7 +86,7 @@ export default class Changes extends View {
     const { cwd, on } = location(), context = key();
     if (context !== this.context) {
       this.context = context; this.collapsed = new Set(); this.root = null; this.files = []; this.open = null;
-      this.message = ""; this.input.set_value(""); this.error = null; this.note = null; this.watched = null; this.limited = false;
+      this.pk = null; this.message = ""; this.input.set_value(""); this.error = null; this.note = null; this.watched = null; this.limited = false;
     }
     if (!cwd) return;
     this.loading = true;
@@ -148,6 +147,10 @@ export default class Changes extends View {
         if (stale()) return;
         this.root = root; this.on = on; this.upstream = upstream; this.ahead = ahead; this.behind = behind; this.hasHead = head.code === 0; this.against = against; this.base = base; this.files = files; this.limited = entries.length > 1000; this.error = null;
         this.watch(root, gitDir, cx);
+        // The project (repo) key for per-project AI settings; cached in ai.js after the first lookup.
+        const pk = await projectKey({ cwd: root, on });
+        if (stale()) return;
+        this.pk = pk;
         if (this.open && !files.some((f) => f.path === this.open)) this.open = null;
       } catch (e) { if (!stale()) this.error = String(e); }
       finally { this.loading = false; if (this.scope !== scope) this.refresh(cx); cx.notify(); }
@@ -248,17 +251,16 @@ export default class Changes extends View {
     else run("tab.new", { name, mod: "wb-diff", props: req, space: space?.id ?? undefined });
   }
 
-  // The commit template ({ template, noBlank }); the model is the one picked for commits (ai.js).
-  genConfig() { return { template: "", noBlank: true, ...(shared("wb.commit.gen") ?? {}) }; }
   // Ask the configured model for a commit message from the current diff, and drop it into the textarea.
   // Claude rides the person's subscription and starts inside the repo folder; local goes to the endpoint.
   generate(cx) {
     if (!this.root || this.generating || this.busy || this.loading || this.context !== key()) return;
     const root = this.root, on = this.on, context = this.context, hasHead = this.hasHead, against = this.against;
-    const cfg = this.genConfig(), model = modelFor("commit");
     this.generating = true; this.note = null; cx.notify();
     cx.spawn(async (cx) => {
       try {
+        // This project's settings (wb-ai): model, template, language, noBlank.
+        const cfg = settingsFor("commit", await projectKey({ cwd: root, on })), model = cfg.model;
         const git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
         const [st, df] = await Promise.all([
           git(["status", "--short"]),
@@ -267,10 +269,10 @@ export default class Changes extends View {
         const fresh = (st.stdout || "").split("\n").filter((l) => l.startsWith("?? ")).map((l) => l.slice(3)).slice(0, 20);
         let text = `Git status:\n${st.stdout}\n\nDiff:\n${(df.stdout || "").slice(0, 60000)}`;
         if (fresh.length) text += `\n\nNew untracked files (contents not shown): ${fresh.join(", ")}`;
-        // The template (wb-ai window) says how the message looks; blank lines are dropped unless allowed.
+        // The project's template (wb-ai settings) says how the message looks; the body's blank lines are dropped unless allowed.
         // The repo's own rules (its CLAUDE.md, read now, on the repo's machine) go in too, so any model follows them.
         const rules = (await readTextFile(`${root}/CLAUDE.md`, { on }).catch(() => null))?.trim().slice(0, 8000);
-        const prompt = `Write one git commit message for these changes in this repository. Format: ${cfg.template || DEFAULT_TEMPLATE}${rules ? `\n\nThe project's rules (CLAUDE.md); follow what they say about commit messages:\n${rules}\n\n` : " "}Reply with the message only — no quotes, no code fences, no explanations.`;
+        const prompt = `Write one git commit message for these changes in this repository. Format: ${cfg.template}${rules ? `\n\nThe project's rules (CLAUDE.md); follow what they say about commit messages:\n${rules}\n\n` : " "}Reply with the message only — no quotes, no code fences, no explanations. ${languageLine(cfg.language)}`;
         let msg = await runModel(model, `${prompt}\n\n${text}`, { cwd: root, on });
         msg = tidy(msg, cfg.noBlank !== false);
         if (!msg) throw new Error("the model returned nothing");
@@ -288,7 +290,9 @@ export default class Changes extends View {
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click(() => { closeOverlay(props()?.overlay); action(); })
       .child(svg("mods/changes-copy/icons/settings.svg").size(13).text_color(t.muted)).child(label);
+    const pk = props()?.project;
     return v_flex().p(6).gap(2).w_full().bg(t.raised).text_color(t.foreground)
+      .when(Boolean(pk), (e) => e.child(item("gen-project", "Commit message settings…", () => openCommitSettings(pk))))
       .child(item("gen-settings", "AI models…", openGenSettings));
   }
 
@@ -405,10 +409,10 @@ export default class Changes extends View {
         .child(div().id("commit-message").w_full().h(this.commitH).flex_none().overflow_hidden().px(10).py(6).rounded(8).border_1().border_color(this.typing ? t.accent : t.border).cursor_text().on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Textarea.new(this.input).w_full().h(this.commitH - 14).text_size(12).text_color(t.foreground)))
         .child(h_flex().gap(8).items_center()
           .child(h_flex().id("generate").h(30).flex_none().rounded(8).overflow_hidden().border_1().border_color(genEnabled ? t.accent : t.border)
-            .child(h_flex().id("generate-run").px(12).h_full().items_center().gap(6).text_size(12).text_color(this.generating ? t.accent : genEnabled ? t.accent : t.dim).when(genEnabled, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover))).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.generate(cx)).tooltip(`Write the commit message from the diff with ${modelFor("commit")?.name ?? "no model"} (${describe(modelFor("commit"))})`)
+            .child(h_flex().id("generate-run").px(12).h_full().items_center().gap(6).text_size(12).text_color(this.generating ? t.accent : genEnabled ? t.accent : t.dim).when(genEnabled, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover))).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.generate(cx)).tooltip(`Write the commit message from the diff with ${modelFor("commit", this.pk)?.name ?? "no model"} (${describe(modelFor("commit", this.pk))})`)
               .child(this.generating ? svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.accent).spin(900) : svg("mods/changes-copy/icons/layers.svg").size(12))
               .child(this.generating ? "Generating…" : "Generate"))
-            .child(div().id("generate-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("More").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "changes-copy", kind: "popup", width: 180, props: { menu: true } })).child(svg("mods/changes-copy/icons/chevron-down.svg").size(12))))
+            .child(div().id("generate-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("More").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "changes-copy", kind: "popup", width: 230, props: { menu: true, project: this.pk } })).child(svg("mods/changes-copy/icons/chevron-down.svg").size(12))))
           .child(div().flex_1())
           // Pull and Push as one joined group (like the header's icon groups and Generate): a box, two cells, a divider.
           .child(h_flex().id("sync").h(30).flex_none().rounded(8).overflow_hidden().border_1().border_color(t.border)

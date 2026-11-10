@@ -1,7 +1,7 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, TextView, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, theme, notify, playSound, props, openOverlay, closeOverlay, shared, setShared } from "herdr";
-import { modelFor, runModel, describe } from "./ai.js";
+import { migrate, modelFor, settingsFor, projectKey, projectName, languageLine, runModel, describe } from "./ai.js";
 
 // My open pull requests in the repo of the focused folder, via the `gh` CLI. Click opens the PR in a popup
 // (description, who approved, comments and reviews); the popup has Open (browser) and Copy link.
@@ -211,6 +211,7 @@ export default class Prs extends View {
   // ── the "new pull request" dialog ──
   initCreate(cx) {
     const c = props().create; // { cwd, on }
+    migrate();
     this.cr = { loading: true, error: null, root: null, branch: null, base: "main", commits: [], ahead: 0, pushed: false, existing: null, draft: false, generating: false, creating: false, note: null, preview: false, rev: 0 };
     this.crTitle = InputState.new({ placeholder: "Title" });
     this.crBase = InputState.new({ placeholder: "Base branch" });
@@ -230,6 +231,7 @@ export default class Prs extends View {
         const branch = br.stdout.trim();
         const base = (def?.code === 0 && def.stdout.trim()) || (sym.code === 0 ? sym.stdout.trim().replace(/^origin\//, "") : "main");
         Object.assign(cr, { root, branch, base, on: c.on });
+        cr.pk = await projectKey({ cwd: root, on: c.on }); // per-project AI settings (wb-ai)
         if (branch === "HEAD") throw new Error("HEAD is detached: switch to a branch first");
         if (branch === base) throw new Error(`You are on ${base}: switch to a feature branch to open a pull request`);
         const log = await git(["log", "--format=%s", "-n", "30", `origin/${base}..HEAD`]);
@@ -245,11 +247,12 @@ export default class Prs extends View {
     });
   }
 
-  // The description, drafted by the model picked for commits (wb-ai), from the branch's commits and diff against its base.
+  // The title and description, drafted with this project's "mr" settings (wb-ai), from the branch's commits and diff against its base.
+  // Line 1 must stay the title (parsed below), so only the description's shape comes from the template.
   crGenerate(cx) {
     const cr = this.cr;
     if (!cr.root || cr.generating || cr.creating) return;
-    const base = this.crBase.value().trim() || cr.base, model = modelFor("commit");
+    const base = this.crBase.value().trim() || cr.base, cfg = settingsFor("mr", cr.pk), model = cfg.model;
     cr.generating = true; cr.note = null; cx.notify();
     cx.spawn(async (cx) => {
       try {
@@ -258,9 +261,8 @@ export default class Prs extends View {
         if (diff.code !== 0) throw new Error((diff.stderr || "git diff failed").trim().split("\n").pop());
         const rules = (await readTextFile(`${cr.root}/CLAUDE.md`, { on: cr.on }).catch(() => null))?.trim().slice(0, 8000);
         const prompt = "Write a pull request for these changes. Line 1: the title, up to 72 characters, imperative mood, plain text (no quotes, no markdown, no trailing period). "
-          + "Then one blank line, then the description in GitHub-flavored markdown: a short summary of what the branch does and why, "
-          + "the notable changes as a short list, and anything a reviewer should check. Plain and concrete; no praise, no filler. "
-          + `${rules ? `The project's rules (CLAUDE.md); follow what they say about pull requests and their titles:\n${rules}\n\n` : ""}Reply with the title and the description only, nothing else.`;
+          + `Then one blank line, then the description. The description: ${cfg.template} `
+          + `${rules ? `The project's rules (CLAUDE.md); follow what they say about pull requests and their titles:\n${rules}\n\n` : ""}Reply with the title and the description only, nothing else. ${languageLine(cfg.language)}`;
         const text = `Branch ${cr.branch} into ${base}.\n\nCommits:\n${log.stdout}\n\nDiff:\n${(diff.stdout || "").slice(0, 60000)}`;
         const out = await runModel(model, `${prompt}\n\n${text}`, { cwd: cr.root, on: cr.on });
         if (!out) throw new Error("the model returned nothing");
@@ -306,7 +308,7 @@ export default class Prs extends View {
     const field = (label, child) => v_flex().gap(4).child(div().text_size(11).text_color(t.dim).child(label)).child(child);
     const box = (state, h) => div().h(h).flex_none().px(10).flex().items_center().rounded(7).border_1().border_color(t.border).bg(t.background).cursor_text()
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(state).h_full().w_full().text_size(12).text_color(t.foreground));
-    const model = modelFor("commit");
+    const model = modelFor("mr", cr.pk);
     return v_flex().id("pr-create").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
       .child(h_flex().h(44).flex_none().px(16).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child("New pull request"))
@@ -335,7 +337,9 @@ export default class Prs extends View {
                   .bg(cr.preview === v ? t.selected : t.background).text_color(cr.preview === v ? t.foreground : t.muted)
                   .when(cr.preview !== v, (e) => e.hover((s) => s.bg(t.hover)))
                   .on_click((_e, cx) => { if (cr.preview !== v) { cr.preview = v; cr.rev++; cx.notify(); } }).child(label))))
-              .child(btn("cr-models", "AI models…", () => openOverlay({ mod: "wb-ai", kind: "window", key: "wb-ai", width: 580 }))))
+              .child(btn("cr-models", "MR settings…", () => cr.pk
+                ? openOverlay({ mod: "wb-ai", kind: "dialog", width: 560, props: { use: "mr", project: cr.pk, projectName: projectName(cr.pk) } })
+                : openOverlay({ mod: "wb-ai", kind: "window", key: "wb-ai", width: 580 }))))
             .child(cr.preview
               ? v_flex().id("cr-preview").h(240).flex_none().px(12).py(8).rounded(7).border_1().border_color(t.border).bg(t.background).overflow_y_scrollbar()
                 .child(this.crBody.value().trim() ? TextView.markdown(`cr-md-${cr.rev}`, this.crBody.value()) : div().text_color(t.dim).child("Nothing to preview yet"))

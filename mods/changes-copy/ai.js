@@ -1,16 +1,29 @@
-// AI models shared by the whole app: one list of models, and each use (commit messages, PR review)
-// picks its own. SAME FILE in every mod that uses it. The canonical copy is mods/wb-ai/ai.js:
-// edit it there, then run `scripts/sync-helpers.sh --write` to copy it over the others.
+// AI models shared by the whole app: one list of models, and each use (commit messages, PR review,
+// MR descriptions) picks its own, per project (repo) when set there. SAME FILE in every mod that uses it
+// (wb-ai, changes-copy, prs). The canonical copy is mods/wb-ai/ai.js: edit it there, then copy it over the others.
 //
 // shared "wb.ai.models" = [{ id, name, provider: "claude" | "codex" | "local", command?, args?, model, url? }]
-// shared "wb.ai.use"    = { commit: <model id>, review: <model id> }
+// shared "wb.ai.use"    = { commit: <model id>, review: <model id>, mr: <model id> }  (global default model per use)
+// shared "wb.ai.project" = { [projectKey]: { [use]: { model?, template?, language?, noBlank? } } }
+//   projectKey = "<host>|<path>" of the origin remote (see projectKey()); "*" holds defaults for every project.
 // claude / codex run their CLI (the person's subscription) inside the repo folder, on the repo's
 // machine; local calls an OpenAI-compatible server (Ollama, LM Studio, llama.cpp).
 
 import { exec, readTextFile, shared, setShared } from "herdr";
 
 export const MODELS = "wb.ai.models", USE = "wb.ai.use";
-export const USES = [["commit", "Commit messages"], ["review", "PR review"]];
+export const USES = [["commit", "Commit messages"], ["review", "PR review"], ["mr", "MR description"]];
+export const PROJECT = "wb.ai.project";
+export const DEFAULTS = {
+  commit: "A first line of up to 72 characters in imperative mood. Then, only when they add something, one blank line and short bullet details (\"- ...\"), one per line. No other blank lines.",
+  review: "You are reviewing a pull request. Write a concise code review in GitHub-flavored markdown: "
+    + "a short summary of what it changes, then the concrete problems you find (bugs, risks, missing tests, unclear code) as a list, "
+    + "each with a file:line reference and why it matters, then optional suggestions. Skip praise and nitpicks; if nothing is wrong, say so briefly. "
+    + "Reply with the review only.",
+  mr: "GitHub-flavored markdown: a short summary of what the branch does and why, the notable changes as a short list, and anything a reviewer should check. Plain and concrete; no praise, no filler.",
+};
+export const LANGUAGES = ["English", "Ukrainian", "Polish", "German", "Spanish", "French"];
+export const languageLine = (lang) => `Write it in ${lang || "English"}.`;
 export const PROVIDERS = {
   claude: { label: "Claude", command: "claude", args: "-p", hint: "The claude CLI on the repo's machine, on your subscription." },
   codex: { label: "Codex", command: "codex", args: "exec", hint: "The codex CLI on the repo's machine (codex login: your ChatGPT subscription), read-only sandbox." },
@@ -51,11 +64,66 @@ function ensure() {
 }
 
 export function models() { ensure(); return shared(MODELS) ?? []; }
-export function modelFor(use) {
-  const list = models(), id = (shared(USE) ?? {})[use];
-  return list.find((m) => m.id === id) ?? list[0] ?? null;
+
+// One-time: the old global commit template / "No blank lines" (shared "wb.commit.gen") become the
+// commit defaults for every project (key "*").
+// Call it from init (it writes shared state; never from render).
+export function migrate() { migrateAi(); models(); migrateProject(); }
+function migrateProject() {
+  if (shared("wb.ai.projectMigrated")) return;
+  setShared("wb.ai.projectMigrated", true);
+  const c = shared("wb.commit.gen") ?? {}, tpl = String(c.template ?? "").trim();
+  if (!tpl && c.noBlank !== false) return;
+  const all = shared(PROJECT) ?? {};
+  setShared(PROJECT, { ...all, "*": { ...all["*"], commit: { ...(tpl ? { template: tpl } : {}), ...(c.noBlank === false ? { noBlank: false } : {}), ...all["*"]?.commit } } });
 }
-export const setUse = (use, id) => setShared(USE, { ...(shared(USE) ?? {}), [use]: id });
+const stored = (use, key) => { const all = shared(PROJECT) ?? {}; return [all[key]?.[use] ?? {}, all["*"]?.[use] ?? {}]; };
+
+// The model for a use: the project's pick, else the global one, else the first model.
+export function modelFor(use, key) {
+  const list = models(), id = (key && stored(use, key)[0].model) || (shared(USE) ?? {})[use];
+  return list.find((m) => m.id === id) ?? list.find((m) => m.id === (shared(USE) ?? {})[use]) ?? list[0] ?? null;
+}
+// Effective settings of a use in a project; missing fields fall back project -> "*" -> built-in.
+export function settingsFor(use, key) {
+  const [p, g] = stored(use, key);
+  return {
+    model: modelFor(use, key),
+    template: p.template || g.template || DEFAULTS[use],
+    language: p.language || g.language || "English",
+    noBlank: use === "commit" ? (p.noBlank ?? g.noBlank ?? true) : undefined,
+  };
+}
+export function setSetting(use, key, patch) {
+  const all = shared(PROJECT) ?? {};
+  setShared(PROJECT, { ...all, [key]: { ...all[key], [use]: { ...all[key]?.[use], ...patch } } });
+}
+export function setUse(use, id, key) {
+  if (key) setSetting(use, key, { model: id });
+  else setShared(USE, { ...(shared(USE) ?? {}), [use]: id });
+}
+
+// "<host>|<path>" of a git remote url (https://h/a/b.git, git@h:a/b.git, ssh://git@h:22/a/b); null if none.
+export function remoteKey(url) {
+  const m = /^(?:https?|ssh|git):\/\/(?:[^@/]+@)?([^/:]+)(?::\d+)?\/(.+?)(?:\.git)?\/?$/.exec(url) ?? /^(?:[^@]+@)?([^:/]+):(.+?)(?:\.git)?\/?$/.exec(url);
+  return m ? `${m[1].toLowerCase()}|${m[2]}` : null;
+}
+// Pure cache (module code is shared by copies), so sharing it is fine.
+const keys = new Map();
+export async function projectKey({ cwd, on }) {
+  const id = `${on}|${cwd}`;
+  if (keys.has(id)) return keys.get(id);
+  let key = null, answered = true;
+  const r = await exec("git", ["remote", "get-url", "origin"], { cwd, on }).catch(() => { answered = false; return null; });
+  if (r?.code === 0) key = remoteKey(r.stdout.trim());
+  if (!key) {
+    const t = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on }).catch(() => { answered = false; return null; });
+    key = `${on ?? "local"}:${(t?.code === 0 && t.stdout.trim()) || cwd}`;
+  }
+  if (answered) keys.set(id, key);
+  return key;
+}
+export const projectName = (key) => String(key ?? "").includes("|") ? key.split("|").slice(1).join("|") : String(key ?? "").replace(/\/+$/, "").split("/").pop() || String(key ?? "");
 export function saveModel(m) {
   const list = models();
   setShared(MODELS, list.some((x) => x.id === m.id) ? list.map((x) => (x.id === m.id ? m : x)) : [...list, m]);
@@ -76,6 +144,25 @@ export async function localModels(url) {
 const split = (s) => String(s || "").split(/\s+/).filter(Boolean);
 const clean = (text) => String(text ?? "").replace(/^```[^\n]*\n/, "").replace(/\n?```\s*$/, "").trim();
 
+// Starts `cmd` through the person's interactive shell, so shell functions, aliases and PATH set up
+// in ~/.zshrc / ~/.bashrc (nvm, a `claude` function picking an account per folder) work as in a terminal.
+// sh -c: $0 = cmd, $@ = args; the shell gets them as its own $0 / $@ (fish: $argv), unquoted nowhere.
+const VIA_SHELL = `case "\${SHELL##*/}" in fish) exec "$SHELL" -ic '$argv' "$0" "$@" ;; *) exec "\${SHELL:-/bin/sh}" -ic '"$0" "$@"' "$0" "$@" ;; esac`;
+
+// exec; a CLI that doesn't start on its own (only a shell function, or on the shell's PATH) is
+// retried through the interactive shell; one missing there too says so plainly.
+async function run(cmd, args, { cwd, on }) {
+  const missing = () => new Error(`\`${cmd}\` isn't installed on ${on ? `machine "${on}"` : "this computer"} (not even in its interactive shell): install it there, or set its full path in AI models settings`);
+  try { return await exec(cmd, args, { cwd, on, timeout: 600000 }); }
+  catch (e) {
+    if (!/cannot start|No such file|not found/i.test(String(e?.message ?? e))) throw e;
+  }
+  const r = await exec("sh", ["-c", VIA_SHELL, cmd, ...args], { cwd, on, timeout: 600000 });
+  if (r.code === 127) throw missing();
+  // An interactive shell without a terminal says so on stderr first; that's not the CLI's error.
+  return { ...r, stderr: String(r.stderr ?? "").split("\n").filter((l) => !/^\S+: (cannot set terminal process group|no job control in this shell)/.test(l)).join("\n") };
+}
+
 // Runs a model on a prompt and returns its answer. `cwd` / `on`: where a CLI runs (the repo).
 export async function runModel(m, prompt, { cwd, on } = {}) {
   if (!m) throw new Error("No AI model: add one in AI models settings");
@@ -92,13 +179,13 @@ export async function runModel(m, prompt, { cwd, on } = {}) {
     // The final answer goes to a file (-o): codex's stdout also carries its progress.
     const out = `/tmp/herdr-codex-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.md`;
     const args = [...split(m.args || "exec"), ...(m.model ? ["-m", m.model] : []), "--skip-git-repo-check", "-s", "read-only", "-o", out, prompt];
-    const r = await exec(m.command || "codex", args, { cwd, on, timeout: 600000 });
+    const r = await run(m.command || "codex", args, { cwd, on });
     const text = await readTextFile(out, { on }).catch(() => null);
     exec("rm", ["-f", out], { on }).catch(() => {});
     if (r.code !== 0 && !text) throw new Error((r.stderr || r.stdout || "codex failed").trim().slice(-300));
     return clean(text ?? r.stdout);
   }
-  const r = await exec(m.command || "claude", [...split(m.args ?? "-p"), ...(m.model ? ["--model", m.model] : []), prompt], { cwd, on, timeout: 600000 });
+  const r = await run(m.command || "claude", [...split(m.args ?? "-p"), ...(m.model ? ["--model", m.model] : []), prompt], { cwd, on });
   if (r.code !== 0) throw new Error((r.stderr || r.stdout || "no output").trim().slice(0, 300));
   return clean(r.stdout);
 }
