@@ -230,9 +230,10 @@ export default class DiffView extends View {
     };
     // A new, untracked file is one block of added lines: nothing to switch or jump between.
     const whole = Boolean(r?.fresh && !r?.commit);
-    const column = (name, width) => div().id(`diff-${name}`).flex_1().min_w(0).h_full().overflow_x_scrollbar()
+    // Rows span at least the whole column, so tints and @@ bars don't stop where the longest line ends.
+    const column = (name, w) => { const width = Math.max(w, colW); return div().id(`diff-${name}`).flex_1().min_w(0).h_full().overflow_x_scrollbar()
       .child(div().min_w(width).h_full().relative()
-        .child(v_flex().absolute().left(0).top(this.yOf(first) - off).children(Array.from({ length: Math.max(0, last - first) }, (_, k) => this.row(first + k, t, name, width)))));
+        .child(v_flex().absolute().left(0).top(this.yOf(first) - off).children(Array.from({ length: Math.max(0, last - first) }, (_, k) => this.row(first + k, t, name, width))))); };
     return v_flex().id("diff-view").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
       .on_key_down((e, cx) => {
         if (e.key === "down" && e.modifiers.alt) { this.jump(1, cx); cx.stop_propagation(); }
