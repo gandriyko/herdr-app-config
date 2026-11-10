@@ -20,11 +20,14 @@ export default class WorkspaceStatus extends View {
     // The active space's branch: asked when the space or its folder moves, after a checkout in the
     // branch picker, and every 30 s. From a timer, not render(): a task spawned with render's cx never runs.
     // ponytail: a 1 s compare of a string and a number, no exec unless something changed.
+    // One git at a time, and a place is asked again only 30 s after the last ask, answered or not:
+    // a hung or failing git (an unreachable machine) must not start a new one every second.
     const tick = (cx) => {
+      if (this.asking) return;
       const key = keyOf(spaces().find(p => p.active), panes());
       if (!JSON.parse(key)[1]) return;
-      const at = this.checked[key] ?? 0;
-      if (!(key in this.git) || Date.now() - at > 30000 || Number(shared("branch.switched") ?? 0) > at) this.ask(key, cx);
+      const at = this.checked[key];
+      if (at === undefined || Date.now() - at > 30000 || Number(shared("branch.switched") ?? 0) > at) this.ask(key, cx);
     };
     tick(cx);
     cx.timer.every(1000, tick);
@@ -34,6 +37,7 @@ export default class WorkspaceStatus extends View {
   // the same shape the spaces list uses). A machine away keeps the last answer.
   ask(key, cx) {
     this.checked[key] = Date.now();
+    this.asking = true;
     cx.spawn(async (cx) => {
       const [on, cwd] = JSON.parse(key);
       try {
@@ -51,7 +55,8 @@ export default class WorkspaceStatus extends View {
           }
           this.git[key] = info;
         }
-      } catch { /* couldn't ask: keep what it showed, the timer asks again */ }
+      } catch { /* couldn't ask: keep what it showed, the timer asks again in 30 s */ }
+      this.asking = false;
       cx.notify();
     });
   }

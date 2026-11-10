@@ -78,10 +78,12 @@ export default class History extends View {
   }
 
   reindex(cx) {
-    this.loading = true; cx.notify();
+    if (this.indexing) return; // one hh index at a time: clicks or the timer while one runs wait for it
+    this.indexing = true; this.loading = true; cx.notify();
     cx.spawn(async (cx) => {
       // exec rejects when hh can't start (or times out); `command -v` tells "not installed" apart.
       const r = await exec(HH, ["index"], { timeout: 120000 }).catch((e) => ({ code: -1, stderr: String(e.message ?? e) }));
+      this.indexing = false;
       this.missing = r.code === -1
         && (await exec("/bin/sh", ["-c", `command -v ${HH}`]).catch(() => ({ code: 1 }))).code !== 0;
       if (this.missing || r.code !== 0) {
