@@ -70,6 +70,13 @@ export default class DiffView extends View {
     const sp = spaces().find((s) => s.active);
     this.space = props()?.space ?? sp?.id ?? null;
     if (this.req) this.load(this.req, cx);
+    // A newer request (another file clicked in Changes): load it. From a timer, not render():
+    // a task spawned with render's cx never runs, which left the tab on "Loading diff…".
+    cx.timer.every(500, (cx) => {
+      const req = shared("wb.diff.request");
+      // Requests are per space: another space's Changes panel doesn't swap this tab's file.
+      if (req && req.ts !== this.applied && (!req.space || req.space === this.space)) { this.applied = req.ts; this.req = req; this.load(req, cx); }
+    });
   }
 
   load(req, cx) {
@@ -192,9 +199,6 @@ export default class DiffView extends View {
 
   render(cx) {
     const t = theme();
-    const req = shared("wb.diff.request");
-    // Requests are per space: another space's Changes panel doesn't swap this tab's file.
-    if (req && req.ts !== this.applied && (!req.space || req.space === this.space)) { this.applied = req.ts; this.req = req; this.load(req, cx); }
     const r = this.req;
     const z = settings().zoom || 1, H = this.viewH || 400;
     // Wrapped, a side is as wide as its half of the view (minus gutter, gap and scrollbar), in characters.

@@ -92,8 +92,11 @@ export default class Jira extends View {
   openSettings(cx) { this.fillForm(); this.editing = !this.editing; cx.notify(); }
 
   refresh(cx) {
-    if (this.loading) return;
-    this.loading = true; cx.notify();
+    // Herdr's fetch has no timeout or abort: a request that hangs would keep `loading` (and so every
+    // refresh) blocked for good. After 2 minutes a new one may start; the hung one's finally leaves it be.
+    if (this.loading && Date.now() - this.loadingSince < 120000) return;
+    const gen = this.gen = (this.gen ?? 0) + 1;
+    this.loading = true; this.loadingSince = Date.now(); cx.notify();
     cx.spawn(async (cx) => {
       try {
         const creds = await credentials(), s = this.settings();
@@ -135,7 +138,7 @@ export default class Jira extends View {
           this.setup = true; this.verified = false; this.groups = []; this.backlog = []; this.count = 0;
           this.fillForm(); this.formError = "Jira rejected the saved token · paste a new one";
         } else this.error = String(e.message ?? e);
-      } finally { this.loading = false; cx.notify(); }
+      } finally { if (gen === this.gen) this.loading = false; cx.notify(); }
     });
   }
 
@@ -249,7 +252,8 @@ export default class Jira extends View {
     const iconButton = (id, icon, tip, onClick, spin = false) => div().id(id).size(24).flex().items_center().justify_center().rounded(6).cursor_pointer()
       .text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip(tip).on_click(onClick).child(svg(icon).size(14).when(spin, (s) => s.spin(900)));
     return v_flex().id("jira").size_full().min_h(0).relative().rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(12)
-      .on_size_change((size, cx) => { this.width = size.width; cx.notify(); })
+      // Redraw only when the width really changed: a notify on every report could redraw forever.
+      .on_size_change((size, cx) => { if (size.width !== this.width) { this.width = size.width; cx.notify(); } })
       .on_mouse_down("right", (e, cx) => {
         if (!this.menuKey) return;
         this.selected = this.menuKey;

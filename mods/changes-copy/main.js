@@ -36,6 +36,8 @@ const COMMIT_MIN = 40, COMMIT_MAX = 420; // commit message box height, px
 const openGenSettings = () => openOverlay({ mod: "wb-ai", kind: "window", key: "wb-ai", width: 580 });
 export default class Changes extends View {
   init(_props, cx) {
+    // The Generate button's menu (a popup copy of this mod) draws one item: no git, no timers.
+    if (props()?.menu) return;
     this.files = []; this.view = "list"; this.scope = "head"; this.collapsed = new Set();
     try { if (localStorage.getItem("view") === "tree") this.view = "tree"; if (localStorage.getItem("scope") === "base") this.scope = "base"; } catch {}
     migrateAi();
@@ -56,20 +58,27 @@ export default class Changes extends View {
     this.input.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
     this.refresh(cx);
     cx.timer.every(10000, (cx) => this.refresh(cx));
+    // Focus moved to another folder or repo: refresh for it. From a timer, not render(): a task spawned
+    // with render's cx never runs, and refresh() had already set `loading`, freezing the panel for good.
+    cx.timer.every(500, (cx) => { if (key() !== this.context) this.refresh(cx); });
   }
 
   watch(root, gitDir, cx) {
     if (this.on || this.watched === root) return;
     this.watched = root;
+    // Each watch() is a generation: loops of an older one (still waiting in watchFolder) end when
+    // they wake, so going A → B → A doesn't leave two watchers on A.
+    const gen = this.watchGen = (this.watchGen ?? 0) + 1;
+    const live = () => this.watchGen === gen && this.watched === root;
     // A worktree's index and HEAD live outside it (the main repo's .git/worktrees/<name>), so commits
     // and staging there would only show on the 10 s timer: watch that folder too.
     for (const dir of gitDir.startsWith(root + "/") ? [root] : [root, gitDir]) cx.spawn(async (cx) => {
       try {
-        while (this.watched === root) {
+        while (live()) {
           await watchFolder(dir);
-          if (this.watched === root) this.refresh(cx);
+          if (live()) this.refresh(cx);
         }
-      } catch { if (dir === root) this.watched = null; }
+      } catch { if (dir === root && live()) this.watched = null; }
     });
   }
 
@@ -344,7 +353,6 @@ export default class Changes extends View {
 
   render(cx) {
     if (props()?.menu) return this.menuView();
-    if (key() !== this.context) this.refresh(cx);
     const t = theme(), add = this.files.reduce((n, f) => n + f.add, 0), del = this.files.reduce((n, f) => n + f.del, 0);
     const rows = this.listRows(), tree = this.view === "tree";
     const enabled = Boolean(this.message.trim() && this.root && !this.busy && !this.loading);

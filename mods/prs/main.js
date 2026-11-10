@@ -91,6 +91,12 @@ export default class Prs extends View {
     this.poll(cx);
     // The folder follows focus: check it often (cheap); a repo already polled is shown from memory.
     cx.timer.every(2000, (cx) => { const k = key(); if (k !== this.key) { this.key = k; this.focus(cx); } });
+    // A PR approved or created elsewhere: poll now. From a timer, not render(): a task spawned with
+    // render's cx never runs. poll() has its own loading/again guard.
+    cx.timer.every(500, (cx) => {
+      const changed = shared("prs.changed");
+      if (changed && changed.ts !== this.changedTs) { this.changedTs = changed.ts; if (changed.ts > (this.started ?? 0)) this.poll(cx); }
+    });
     cx.timer.every(60 * 1000, (cx) => { if (this.auto) this.poll(cx); });
   }
 
@@ -427,8 +433,6 @@ export default class Prs extends View {
   render(cx) {
     if (this.detailPr) return this.detailView(theme());
     if (this.cr) return this.createView(theme());
-    const changed = shared("prs.changed");
-    if (changed && changed.ts !== this.changedTs) { this.changedTs = changed.ts; if (changed.ts > (this.started ?? 0)) cx.spawn(async (cx) => this.poll(cx)); }
     const t = theme();
     const q = this.query;
     const shown = !q ? this.prs : this.prs.filter((pr) => [pr.title, pr.body, pr.headRefName, pr.author?.login, `#${pr.number}`].some((s) => (s ?? "").toLowerCase().includes(q)));
