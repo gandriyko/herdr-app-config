@@ -93,7 +93,7 @@ export default class Prs extends View {
     cx.timer.every(2000, (cx) => { const k = key(); if (k !== this.key) { this.key = k; this.focus(cx); } });
     // A PR approved or created elsewhere: poll now. From a timer, not render(): a task spawned with
     // render's cx never runs. poll() has its own loading/again guard.
-    cx.timer.every(500, (cx) => {
+    cx.timer.every(2000, (cx) => {
       const changed = shared("prs.changed");
       if (changed && changed.ts !== this.changedTs) { this.changedTs = changed.ts; if (changed.ts > (this.started ?? 0)) this.poll(cx); }
     });

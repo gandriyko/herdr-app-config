@@ -30,7 +30,7 @@ export default class WorkspaceStatus extends View {
       if (at === undefined || Date.now() - at > 30000 || Number(shared("branch.switched") ?? 0) > at) this.ask(key, cx);
     };
     tick(cx);
-    cx.timer.every(1000, tick);
+    cx.timer.every(2000, tick);
   }
 
   // One place's branch and ahead/behind, read-only (no index writes, no locks:
@@ -39,9 +39,9 @@ export default class WorkspaceStatus extends View {
     this.checked[key] = Date.now();
     this.asking = true;
     cx.spawn(async (cx) => {
-      const [on, cwd] = JSON.parse(key);
+      const [on, cwd] = JSON.parse(key), before = JSON.stringify([this.git[key]]);
       try {
-        const r = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v2", "--branch"], { cwd, on });
+        const r = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v2", "--branch", "-uno"], { cwd, on });
         if (r.code !== 0) this.git[key] = null;
         else {
           const info = { branch: null, ahead: 0, behind: 0 };
@@ -57,7 +57,8 @@ export default class WorkspaceStatus extends View {
         }
       } catch { /* couldn't ask: keep what it showed, the timer asks again in 30 s */ }
       this.asking = false;
-      cx.notify();
+      // A redraw is the whole window: only when the branch or ahead/behind changed.
+      if (JSON.stringify([this.git[key]]) !== before) cx.notify();
     });
   }
 
@@ -87,7 +88,7 @@ export default class WorkspaceStatus extends View {
         openOverlay({ mod: "branch-picker", kind: "popup", ...PICKER, props: { space: space.id },
           at: { x: Math.max(8, e.position.x - 16), y: Math.max(8, e.position.y - PICKER.height - 14) } });
       })
-      .child(svg("mods/workspace-chrome/branch.svg").size(13))
+      .child(svg("mods/status-copy/icons/branch.svg").size(13))
       .child(div().max_w(260).truncate().child(branch))
       .when(Boolean(ab), el => el.child(div().text_color(t.dim).child(ab)));
   }
@@ -97,7 +98,7 @@ export default class WorkspaceStatus extends View {
     const space = spaces().find(s => s.active);
     const list = agents();
     const needs = list.filter(a => a.status === "blocked").length;
-    const label = (icon, text) => h_flex().gap(6).items_center().child(svg(`mods/workspace-chrome/${icon}.svg`).size(13)).child(text);
+    const label = (icon, text) => h_flex().gap(6).items_center().child(svg(`mods/status-copy/icons/${icon}.svg`).size(13)).child(text);
     const branch = this.branchButton(space, t);
     return h_flex().size_full().px(14).gap(16).items_center().bg(t.chrome).border_t(1).border_color(t.border).text_size(11.8).text_color(t.muted)
       .child(label(space?.machine ? "server" : "monitor", space?.machine ?? "This computer"))

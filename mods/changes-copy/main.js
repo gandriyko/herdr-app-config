@@ -18,6 +18,9 @@ const key = () => JSON.stringify(location());
 // Reads write nothing under .git (no index refresh or lock, no fsmonitor cookie):
 // the folder watch would see it, and every refresh would start the next one.
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
+// The folder watch is recursive (node_modules, .git/objects too on macOS): a batch of only these paths can't change the list.
+// ponytail: a fixed list; ask `git check-ignore --stdin` per batch if another ignored folder floods it.
+const NOISE = /\/(node_modules|\.git\/(objects|logs)|target|\.venv|__pycache__|\.next|\.turbo|\.gradle)(\/|$)/;
 const STATUS = { A: "Added", M: "Modified", D: "Deleted", U: "Conflict" };
 // Theme colors per status: four distinct hues, since the icon's color is all that tells them apart.
 const STATUS_COLOR = { A: "ansi2", M: "ansi4", D: "ansi1", U: "ansi5" };
@@ -64,7 +67,8 @@ export default class Changes extends View {
     cx.timer.every(10000, (cx) => this.refresh(cx));
     // Focus moved to another folder or repo: refresh for it. From a timer, not render(): a task spawned
     // with render's cx never runs, and refresh() had already set `loading`, freezing the panel for good.
-    cx.timer.every(500, (cx) => { if (key() !== this.context) this.refresh(cx); });
+    // Every tick copies spaces/panes from the host: 2 s, not 500 ms.
+    cx.timer.every(2000, (cx) => { if (key() !== this.context) this.refresh(cx); });
   }
 
   watch(root, gitDir, cx) {
@@ -79,16 +83,18 @@ export default class Changes extends View {
     for (const dir of gitDir.startsWith(root + "/") ? [root] : [root, gitDir]) cx.spawn(async (cx) => {
       try {
         while (live()) {
-          await watchFolder(dir);
-          if (live()) this.refresh(cx);
+          const paths = await watchFolder(dir);
+          if (live() && !(paths?.length && paths.every((p) => NOISE.test(p)))) this.refresh(cx);
         }
       } catch { if (dir === root && live()) this.watched = null; }
     });
   }
 
   refresh(cx) {
-    if (this.loading || this.busy) return;
+    // A change during a refresh runs one more after it (see finally), instead of one per change.
+    if (this.loading || this.busy) { this.again = true; return; }
     const { cwd, on } = location(), context = key();
+    const shown = this.shownState();
     if (context !== this.context) {
       this.context = context; this.collapsed = new Set(); this.root = null; this.files = []; this.open = null;
       this.pk = null; this.message = ""; this.input.set_value(""); this.error = null; this.note = null; this.watched = null; this.limited = false;
@@ -158,8 +164,18 @@ export default class Changes extends View {
         this.pk = pk;
         if (this.open && !files.some((f) => f.path === this.open)) this.open = null;
       } catch (e) { if (!stale()) this.error = String(e); }
-      finally { this.loading = false; if (this.scope !== scope) this.refresh(cx); cx.notify(); }
+      finally {
+        this.loading = false;
+        if (this.scope !== scope) this.refresh(cx);
+        else if (this.again) { this.again = false; cx.timer.after(500, (cx) => this.refresh(cx)); }
+        // Redraw (the whole window) only when what the panel shows changed, or a frame drew "loading".
+        if (this.drewLoading || this.shownState() !== shown) { this.drewLoading = false; cx.notify(); }
+      }
     });
+  }
+
+  shownState() {
+    return JSON.stringify([this.context, this.root, this.upstream, this.ahead, this.behind, this.hasHead, this.against, this.base, this.files, this.limited, this.error, this.pk, this.open]);
   }
 
 
@@ -372,6 +388,7 @@ export default class Changes extends View {
 
   render(cx) {
     if (props()?.menu) return this.menuView();
+    if (this.loading) this.drewLoading = true;
     const t = theme(), add = this.files.reduce((n, f) => n + f.add, 0), del = this.files.reduce((n, f) => n + f.del, 0);
     const rows = this.listRows(), tree = this.view === "tree";
     const enabled = Boolean(this.message.trim() && this.root && !this.busy && !this.loading);
@@ -428,7 +445,7 @@ export default class Changes extends View {
         .child(h_flex().gap(8).items_center()
           .child(h_flex().id("generate").h(30).flex_none().rounded(8).overflow_hidden().border_1().border_color(genEnabled ? t.accent : t.border)
             .child(h_flex().id("generate-run").px(12).h_full().items_center().gap(6).text_size(12).text_color(this.generating ? t.accent : genEnabled ? t.accent : t.dim).when(genEnabled, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover))).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => this.generate(cx)).tooltip(`Write the commit message from the diff with ${modelFor("commit", this.pk)?.name ?? "no model"} (${describe(modelFor("commit", this.pk))})`)
-              .child(this.generating ? svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.accent).spin(900) : svg("mods/changes-copy/icons/layers.svg").size(12))
+              .child(this.generating ? svg("mods/changes-copy/icons/spinner.svg").size(12).text_color(t.accent).spin(900) : svg("mods/changes-copy/icons/layers.svg").size(12))
               .child(this.generating ? "Generating…" : "Generate"))
             .child(div().id("generate-menu").w(26).h_full().flex().items_center().justify_center().border_l(1).border_color(t.border).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("More").on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(() => openOverlay({ mod: "changes-copy", kind: "popup", width: 300, height: 28 * models().length + 110, props: { menu: true, project: this.pk } })).child(svg("mods/changes-copy/icons/chevron-down.svg").size(12))))
           .child(div().flex_1())
@@ -438,13 +455,13 @@ export default class Changes extends View {
               .text_color(pullEnabled ? (this.behind > 0 ? t.accent : t.foreground) : t.dim).when(pullEnabled, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover)))
               .tooltip(!this.root ? "No repository" : !this.upstream ? "No upstream to pull from" : this.behind ? `git pull: ${this.behind} commit${this.behind === 1 ? "" : "s"} from ${this.upstream} (fast-forward, or rebase when diverged)` : `git pull from ${this.upstream}`)
               .on_click((_e, cx) => { if (pullEnabled) this.pull(cx); })
-              .child(this.pulling ? svg("mods/workspace-chrome/spinner.svg").size(12).spin(900) : div())
+              .child(this.pulling ? svg("mods/changes-copy/icons/spinner.svg").size(12).spin(900) : div())
               .child(`Pull${this.behind > 0 ? ` ↓${this.behind}` : ""}`))
             .child(h_flex().id("push").h_full().px(12).gap(4).items_center().border_l(1).border_color(t.border).text_size(12)
               .text_color(pushEnabled ? (this.ahead > 0 ? t.accent : t.foreground) : t.dim).when(pushEnabled, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover)))
               .tooltip(!this.root ? "No repository" : this.upstream ? (this.ahead ? `git push: ${this.ahead} commit${this.ahead === 1 ? "" : "s"} to ${this.upstream}` : `Nothing to push: ${this.upstream} is up to date`) : "No upstream yet: git push -u origin HEAD")
               .on_click((_e, cx) => { if (pushEnabled) this.push(cx); })
-              .child(this.pushing ? svg("mods/workspace-chrome/spinner.svg").size(12).spin(900) : div())
+              .child(this.pushing ? svg("mods/changes-copy/icons/spinner.svg").size(12).spin(900) : div())
               .child(`Push${this.ahead > 0 ? ` ↑${this.ahead}` : ""}`)))
           .child(div().id("commit").h(30).px(14).flex().items_center().rounded(8).bg(enabled ? t.solid : t.raised).text_color(enabled ? t.solid_foreground : t.dim).text_size(12).when(enabled, (e) => e.cursor_pointer()).on_click((_e, cx) => this.commit(cx)).child(this.busy ? "Committing…" : "Commit"))));
   }

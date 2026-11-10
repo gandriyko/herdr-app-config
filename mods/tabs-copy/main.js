@@ -115,6 +115,6 @@ export default class Tabs extends View {
       .children(panels.map(([id, label]) => panelButton(id, label)))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs-copy/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs-copy/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
-        .child(button("close-window", w.platform === "windows" ? svg("mods/tabs-copy/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));
+        .child(button("close-window", w.platform === "windows" ? svg("mods/tabs-copy/win-close.svg").size(16) : svg("mods/tabs-copy/close.svg").size(13), () => run("window.close"))));
   }
 }

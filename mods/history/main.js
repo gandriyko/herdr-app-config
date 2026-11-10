@@ -73,8 +73,9 @@ export default class History extends View {
     cx.timer.every(5 * 60 * 1000, (cx) => this.reindex(cx));
     // Another space (or its terminal moved to another folder): search there. Not from render():
     // a task spawned with render's cx never ran, which left the spinner on until the next re-index.
-    // ponytail: a 500 ms string compare, no exec; nothing to subscribe to for "the place changed".
-    cx.timer.every(500, (cx) => { if (!this.missing && place() !== this.where) this.find(cx); });
+    // ponytail: a 2 s string compare, no exec; nothing to subscribe to for "the place changed".
+    // Each tick copies spaces/panes from the host, so not every 500 ms.
+    cx.timer.every(2000, (cx) => { if (!this.missing && place() !== this.where) this.find(cx); });
   }
 
   reindex(cx) {
