@@ -154,6 +154,13 @@
                       "content": {
                         "mod": "prs"
                       }
+                    },
+                    {
+                      "id": "history",
+                      "type": "block",
+                      "content": {
+                        "mod": "history"
+                      }
                     }
                   ],
                   "active": "files"

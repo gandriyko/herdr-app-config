@@ -15,7 +15,7 @@ function find(node, id) {
 // every child of that stack gets a button. Label: LABELS[id] or the capitalised id. Icon: panel-<id>.svg
 // in this folder when it ships (ICONS), else text only. Everything else lives in this folder.
 const LABELS = { prs: "PR" };
-const ICONS = new Set(["files", "changes", "jira", "prs"]);
+const ICONS = new Set(["files", "changes", "jira", "prs", "history"]);
 const panelsOf = (root) => (find(root, "panel-body")?.children ?? []).map((c) => [c.id, LABELS[c.id] ?? c.id[0].toUpperCase() + c.id.slice(1)]);
 
 function togglePanel(id) {
