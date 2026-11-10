@@ -137,6 +137,16 @@ export default class BranchPicker extends View {
     return lines.slice(0, 5).join("\n") || fallback;
   }
 
+  // The row's copy button: the full branch name to the clipboard, a check mark for a moment.
+  copy(name, cx) {
+    cx.stop_propagation();
+    cx.write_to_clipboard(name);
+    this.copied = name;
+    this.copyReset?.cancel();
+    this.copyReset = cx.timer.after(1200, (cx) => { if (this.copied === name) this.copied = null; cx.notify(); });
+    cx.notify();
+  }
+
   // A click: if tracked files have uncommitted changes, ask what to do first.
   pick(b, cx) {
     if (!b || this.busy || b.name === this.current) return;
@@ -242,9 +252,17 @@ export default class BranchPicker extends View {
         .when(on, el => el.bg(t.selected))
         .when(!on, el => el.hover(s => s.bg(t.hover)))
         .tooltip(r.b.name)
+        .on_hover((h, cx) => { if (h) this.hovered = r.b.name; else if (this.hovered === r.b.name) this.hovered = null; cx.notify(); })
         .on_click((_e, cx) => this.pick(r.b, cx))
         .child(svg(`mods/workspace-chrome/${r.depth ? "branch" : "git-branch"}.svg`).size(13).text_color(cur ? t.accent : t.dim))
         .child(div().flex_1().min_w(0).truncate().text_color(cur ? t.foreground : t.muted).child(r.rest ?? r.b.name))
+        // Copy the full name (tree rows show only the part after the folder); the click doesn't check out.
+        .when(on || this.hovered === r.b.name || this.copied === r.b.name, el => el.child(div().id(`br-copy-${i}`).flex_none().size(20).flex().items_center().justify_center().rounded(4)
+          .text_color(this.copied === r.b.name ? t.accent : t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
+          .tooltip(this.copied === r.b.name ? "Copied" : `Copy “${r.b.name}”`)
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_click((_e, cx) => this.copy(r.b.name, cx))
+          .child(svg(`mods/${this.copied === r.b.name ? "workspace-chrome/check" : "branch-picker/copy"}.svg`).size(12))))
         .when(cur, el => el.child(div().flex_none().text_size(11).text_color(t.accent).child("current")))
         .when(busy, el => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
         .when(!cur && !busy && r.b.at > 0, el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(ago(r.b.at))));
