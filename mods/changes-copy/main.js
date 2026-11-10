@@ -21,7 +21,9 @@ const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.a
 const STATUS = { A: "Added", M: "Modified", D: "Deleted", U: "Conflict" };
 // Theme colors per status: four distinct hues, since the icon's color is all that tells them apart.
 const STATUS_COLOR = { A: "ansi2", M: "ansi4", D: "ansi1", U: "ansi5" };
-const ITEM = 28, INDENT = 10; // ITEM: changed-file list row (same as Files), INDENT: per tree level
+// As in the Files panel: ITEM the row height, INDENT per tree level, GAP between a row's parts,
+// CHEVRON the space a folder's chevron takes (a file in the tree leaves it empty, so icons line up).
+const ITEM = 28, INDENT = 18, GAP = 7, CHEVRON = 12 + GAP;
 // A commit message in git's shape: a one-line title, one blank line, then the body. `compact` drops the body's own blank lines.
 const tidy = (msg, compact) => {
   const lines = String(msg).replace(/\r/g, "").split("\n");
@@ -223,7 +225,7 @@ export default class Changes extends View {
   }
 
   dirRow(r, t) {
-    return h_flex().id(`dir-${r.path}`).h(ITEM).flex_none().pl(8 + r.depth * INDENT).pr(8).gap(6).items_center().rounded(5).cursor_pointer()
+    return h_flex().id(`dir-${r.path}`).h(ITEM).flex_none().pl(8 + r.depth * INDENT).pr(8).gap(GAP).items_center().rounded(5).cursor_pointer()
       .hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.toggleDir(r.path, cx))
       // Chevron and folder as in the Files panel.
       .child(svg(`mods/changes-copy/icons/chevron-${r.open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim))
@@ -405,10 +407,10 @@ export default class Changes extends View {
         .child(v_flex().id("changes-list").absolute().inset_0().overflow_y_scroll().p(6).children(rows.map((r) => {
         if (r.dir) return this.dirRow(r, t);
         const f = r.file, parts = tree ? [] : f.path.split("/"), name = tree ? r.name : parts.pop();
-        return h_flex().id(`change-${f.path}`).h(ITEM).flex_none().px(8).pl(tree ? 8 + r.depth * INDENT + 18 : 8).gap(4).items_center().rounded(5).cursor_pointer().when(this.open === f.path, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.pick(f.path, cx))
+        return h_flex().id(`change-${f.path}`).h(ITEM).flex_none().px(8).pl(tree ? 8 + r.depth * INDENT + CHEVRON : 8).gap(GAP).items_center().rounded(5).cursor_pointer().when(this.open === f.path, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.pick(f.path, cx))
           // The file icon (as in Files) wears the status color instead of a separate A/M/D/U letter; its name is the tooltip.
           // In the tree it sits under the folders' icons.
-          .child(div().id(`status-${f.path}`).flex_none().mr(2).tooltip(STATUS[f.status] ?? f.status)
+          .child(div().id(`status-${f.path}`).flex_none().tooltip(STATUS[f.status] ?? f.status)
             .child(svg("mods/changes-copy/icons/file.svg").size(14).text_color(t[STATUS_COLOR[f.status] ?? "ansi4"])))
           .child(h_flex().flex_1().min_w(0).child(div().text_color(t.dim).truncate().child(parts.length ? parts.join("/") + "/" : "")).child(div().max_w(260).min_w(0).truncate().child(name)))
           .when(f.add > 0, (e) => e.child(div().text_size(11).text_color(t.ansi2).child(`+${f.add}`))).when(f.del > 0, (e) => e.child(div().text_size(11).text_color(t.ansi1).child(`−${f.del}`)));
