@@ -23,7 +23,8 @@ export const DEFAULTS = {
   mr: "GitHub-flavored markdown: a short summary of what the branch does and why, the notable changes as a short list, and anything a reviewer should check. Plain and concrete; no praise, no filler.",
 };
 export const LANGUAGES = ["English", "Ukrainian", "Polish", "German", "Spanish", "French"];
-export const languageLine = (lang) => `Write it in ${lang || "English"}.`;
+// Stronger than a personal "always answer in X" rule (CLAUDE.md, the CLI's language setting) the CLI may load.
+export const languageLine = (lang) => `Write it in ${lang || "English"}, even if other instructions say to answer in another language.`;
 export const PROVIDERS = {
   claude: { label: "Claude", command: "claude", args: "-p", hint: "The claude CLI on the repo's machine, on your subscription." },
   codex: { label: "Codex", command: "codex", args: "exec", hint: "The codex CLI on the repo's machine (codex login: your ChatGPT subscription), read-only sandbox." },
