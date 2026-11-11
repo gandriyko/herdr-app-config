@@ -62,6 +62,8 @@ export default class Changes extends View {
     this.places = new Map();
     // The Generate button's menu (a popup copy of this mod) draws one item: no git, no timers.
     if (props()?.menu) return;
+    // The Discard confirmation (a dialog copy of this mod): runs the discard itself; the panel's folder watch refreshes it.
+    if (props()?.discard) { this.discarding = false; this.discardError = null; return; }
     this.files = []; this.view = "list"; this.scope = "head"; this.collapsed = new Set();
     try { if (localStorage.getItem("view") === "tree") this.view = "tree"; if (localStorage.getItem("scope") === "base") this.scope = "base"; } catch {}
     migrate();
@@ -266,7 +268,19 @@ export default class Changes extends View {
       .child(svg(`mods/changes-copy/icons/chevron-${r.open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim))
       .child(svg("mods/changes-copy/icons/folder.svg").size(14).flex_none().text_color(t.muted))
       .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(r.label))
-      .child(div().text_size(10).text_color(t.dim).child(String(r.count)));
+      .child(div().text_size(10).text_color(t.dim).child(String(r.count)))
+      .when(this.canDiscard() && this.hasHead, (e) => e.child(this.discardButton(`discard-dir-${r.path}`, `Discard all changes in ${r.path}/ and its subfolders`, () => this.askDiscard(r.path, true), t)));
+  }
+
+  // Discard is offered only in the uncommitted list (in branch scope a row may hold committed work), and not mid-action.
+  canDiscard() { return Boolean(this.root && !this.base && !this.busy && !this.loading); }
+
+  // The row's Discard button (a file or a folder); its click opens the confirmation, not the row's own action.
+  discardButton(id, tip, act, t) {
+    return div().id(id).flex_none().size(20).flex().items_center().justify_center().rounded(4).cursor_pointer()
+      .text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.ansi1)).tooltip(tip)
+      .on_click((_e, cx) => { cx.stop_propagation(); act(); })
+      .child(svg("mods/changes-copy/icons/discard.svg").size(12));
   }
 
   // Where row i's text starts, in px from the row's left edge (see diffRow / fileRow).
@@ -405,8 +419,56 @@ export default class Changes extends View {
     cx.notify();
   }
 
+  // Discard a file, or a folder with everything under it: always asked first, in a dialog listing what goes.
+  // The dialog gets the exact files shown here, so it touches nothing the list didn't show.
+  askDiscard(path, isDir) {
+    if (!this.root || this.busy || this.loading || this.context !== this.key()) return;
+    const files = this.files.filter((f) => isDir ? f.path.startsWith(path + "/") : f.path === path);
+    if (!files.length) return;
+    const tracked = files.filter((f) => !f.fresh).map((f) => f.path), fresh = files.filter((f) => f.fresh).map((f) => f.path);
+    openOverlay({ mod: "changes-copy", kind: "dialog", width: 480, height: 190 + Math.min(files.length, 8) * 20,
+      props: { discard: { root: this.root, on: this.on ?? null, label: isDir ? `${path}/` : path, tracked, fresh } } });
+  }
+
+  // In the dialog: tracked files go back to HEAD in index and worktree (a staged new file is removed, a conflict takes
+  // HEAD's side); untracked ones are deleted (git clean -f, ignored files untouched).
+  runDiscard(cx) {
+    const d = props().discard;
+    if (this.discarding) return;
+    this.discarding = true; this.discardError = null; cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const git = async (args) => { const r = await exec("git", args, { cwd: d.root, on: d.on, timeout: 60000 }); if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().split("\n").pop()); };
+        if (d.tracked.length) await git(["restore", "--source=HEAD", "--staged", "--worktree", "--", ...d.tracked]);
+        if (d.fresh.length) await git(["clean", "-f", "--", ...d.fresh]);
+        closeOverlay(props()?.overlay);
+      } catch (e) { this.discardError = `Discard failed: ${e.message ?? e}`; }
+      this.discarding = false; cx.notify();
+    });
+  }
+
+  discardView() {
+    const t = theme(), d = props().discard, all = [...d.tracked, ...d.fresh], n = all.length;
+    const what = [d.tracked.length ? `${d.tracked.length} file${d.tracked.length === 1 ? "" : "s"} go back to HEAD` : "",
+      d.fresh.length ? `${d.fresh.length} untracked file${d.fresh.length === 1 ? " is" : "s are"} deleted` : ""].filter(Boolean).join(", ");
+    const btn = (id, label, danger, act) => div().id(id).h(30).px(14).flex().items_center().rounded(6).border_1().text_size(12.5).cursor_pointer()
+      .border_color(danger ? t.ansi1 : t.border).bg(danger ? t.ansi1 : t.background).text_color(danger ? t.background : t.foreground)
+      .hover((s) => s.opacity(0.85)).on_click(act).child(label);
+    return v_flex().id("discard").size_full().p(16).gap(10).bg(t.background).text_color(t.foreground).text_size(13)
+      .child(div().font_semibold().text_size(14).child(`Discard changes in ${d.label}?`))
+      .child(div().text_size(12).text_color(t.muted).child(`${what}. This can't be undone.`))
+      .child(v_flex().flex_1().min_h(0).gap(2).text_size(11.5).text_color(t.dim)
+        .children(all.slice(0, 8).map((p) => div().truncate().child(p)))
+        .when(n > 8, (e) => e.child(div().child(`… and ${n - 8} more`))))
+      .when(Boolean(this.discardError), (e) => e.child(div().text_size(12).text_color(t.ansi1).child(this.discardError)))
+      .child(h_flex().gap(8).justify_end()
+        .child(btn("discard-cancel", "Cancel", false, () => closeOverlay(props()?.overlay)))
+        .child(btn("discard-run", this.discarding ? "Discarding…" : "Discard", true, (_e, cx) => this.runDiscard(cx))));
+  }
+
   render(cx) {
     if (props()?.menu) return this.menuView();
+    if (props()?.discard) return this.discardView();
     if (this.loading) this.drewLoading = true;
     const t = theme(), add = this.files.reduce((n, f) => n + f.add, 0), del = this.files.reduce((n, f) => n + f.del, 0);
     const rows = this.listRows(), tree = this.view === "tree";
@@ -415,6 +477,7 @@ export default class Changes extends View {
     const pullEnabled = Boolean(this.root && this.hasHead && this.upstream && !this.pulling && !this.pushing && !this.busy && !this.loading);
     const genEnabled = Boolean(this.root && !this.generating && !this.busy && !this.loading && this.context === this.key());
     const noBase = this.scope === "base" && Boolean(this.root) && !this.base && !this.loading;
+    const canDiscard = this.canDiscard();
     return v_flex().id("changes").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
       .on_key_down((e, cx) => {
         if (e.key === "escape" && this.typing) { this.typing = false; this.handle.focus(); cx.stop_propagation(); cx.notify(); return; }
@@ -449,7 +512,9 @@ export default class Changes extends View {
           .child(div().id(`status-${f.path}`).flex_none().tooltip(STATUS[f.status] ?? f.status)
             .child(svg("mods/changes-copy/icons/file.svg").size(14).text_color(t[STATUS_COLOR[f.status] ?? "ansi4"])))
           .child(h_flex().flex_1().min_w(0).child(div().text_color(t.dim).truncate().child(parts.length ? parts.join("/") + "/" : "")).child(div().max_w(260).min_w(0).truncate().child(name)))
-          .when(f.add > 0, (e) => e.child(div().text_size(11).text_color(t.ansi2).child(`+${f.add}`))).when(f.del > 0, (e) => e.child(div().text_size(11).text_color(t.ansi1).child(`−${f.del}`)));
+          .when(f.add > 0, (e) => e.child(div().text_size(11).text_color(t.ansi2).child(`+${f.add}`))).when(f.del > 0, (e) => e.child(div().text_size(11).text_color(t.ansi1).child(`−${f.del}`)))
+          // Discard: only in the uncommitted list (in branch scope a row may hold committed work), not before the first commit.
+          .when(canDiscard && (f.fresh || this.hasHead), (e) => e.child(this.discardButton(`discard-${f.path}`, f.fresh ? "Discard: delete this untracked file" : "Discard this file's changes (back to HEAD)", () => this.askDiscard(f.path, false), t)));
       })).when(!this.files.length, (e) => e.child(div().p(8).text_color(t.dim).child(this.error || (this.loading ? "Loading changes…" : this.root ? (this.base ? `No changes since ${this.base}` : "No uncommitted changes") : "No folder")))))
         .child(Scrollbar.vertical("changes-list").absolute().inset_0()))
       .when(this.limited, el => el.child(div().px(12).py(4).text_size(11).text_color(t.dim).child("Showing the first 1,000 changed files")))

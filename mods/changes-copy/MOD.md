@@ -25,6 +25,7 @@ Extended copy of `changes`. Shows uncommitted or branch-scope changes as list or
 
 ## Notes
 - Timers: 10 s refresh, 2 s context check; `watchFolder` with a generation flag; git calls time out at 180 s, AI runs at 600 s.
+- Each file row of the uncommitted list, and each folder row in the tree, has a Discard button. It always opens a confirmation dialog (a dialog copy of this mod, `props.discard`) listing the files; the folder one covers every listed file under it, subfolders included. Confirmed: `git restore --source=HEAD --staged --worktree -- <tracked paths>` (a staged new file is removed, a conflict takes HEAD's side) and `git clean -f -- <untracked paths>`, with exactly the paths the list showed. Hidden in branch scope and before the first commit.
 - Generate sends the diff (first 60000 chars), `git status --short --branch` and the repo's own commit rules: the tracked agent docs that mention commit messages most (`CLAUDE.md`, `AGENTS.md`, `.claude/**/*.md`, `.github/**/*.md`, `.cursor/**`), then `CLAUDE.md`; at most 4 files, 8000 chars each. They take precedence over the `wb-ai` template.
 - Depends on mods `wb-diff` and `wb-ai` being installed for diff tab and AI settings.
 - `wb.diff.request` (read by wb-diff) and `branch.switched` (read by status-copy) are documented contracts; optional where read.
