@@ -22,7 +22,7 @@ when one of them is absent.
 | [changes-copy](changes-copy/MOD.md) | Changes panel (clone of changes) with list/tree views, side-by-side diff tab and AI commit messages |
 | [history](history/MOD.md) | Search and read past agent sessions (Claude, Codex, ...) via the human-history tool, with resume |
 | [jira](jira/MOD.md) | Panel with my open Jira issues by sprint and the project backlog |
-| [prs](prs/MOD.md) | Panel listing my open GitHub PRs for the focused repo, with detail, approve, create-PR and AI review/description. |
+| [prs](prs/MOD.md) | Panel listing my (or all) open GitHub PRs for the focused repo, with detail, approve, create-PR and AI review/description. |
 | [status-copy](status-copy/MOD.md) | Status bar piece showing the active space's git branch and a command-palette hint. |
 | [tabs-copy](tabs-copy/MOD.md) | Top tab bar with space tabs, side-panel toggle buttons and window controls. |
 | [wb-ai](wb-ai/MOD.md) | AI model registry and per-project settings window used to generate commit messages, reviews and MR descriptions. |

@@ -5,7 +5,8 @@ import { migrate, modelFor, settingsFor, projectKey, projectName, languageLine, 
 
 // My open pull requests in the repo of the focused folder, via the `gh` CLI. Click opens the PR in a popup
 // (description, who approved, comments and reviews); the popup has Open (browser) and Copy link.
-// ponytail: only open PRs I authored (first 100); add `--search "review-requested:@me"` as a second list if wanted.
+// The header switches between open PRs I authored (Mine) and every open PR of the repo (All); first 100.
+// ponytail: add `--search "review-requested:@me"` as a third choice if wanted.
 // A mod pane (a wb-diff tab) has no cwd: keep the last terminal folder of that space (`places`, per
 // instance) instead of the space folder, which may not be a repo.
 const PLACES_MAX = 50;
@@ -45,18 +46,24 @@ const copilot = (pr) => {
 };
 const reviewed = (state) => state === "done" || state === "clean";
 
-// Per PR number: `asked` = Copilot is among the pending review requests (it is reviewing), `urls` = unresolved Copilot
-// threads as their first comments' URLs (a thread is Copilot's by its first comment); one GraphQL call per repo.
+// Per PR number: `asked` = Copilot is among the pending review requests (it is reviewing), `me` = my review is
+// requested, `urls` = unresolved Copilot threads as their first comments' URLs (a thread is Copilot's by its first
+// comment); one GraphQL call per repo.
 // ponytail: first 50 PRs × 100 threads; a failed call leaves the map empty (the row falls back to gh's fields).
+// ponytail: a request to a team I'm in doesn't count as mine; add `... on Team{members}` if that's wanted.
 async function copilotGql(repo, numbers, cwd, on) {
   const out = new Map(), [owner, name] = repo.split("/");
   if (!numbers.length) return out;
-  const prs = numbers.slice(0, 50).map((n) => `p${n}:pullRequest(number:${n}){reviewRequests(first:20){nodes{requestedReviewer{... on Bot{login}}}} reviewThreads(first:100){nodes{isResolved comments(first:1){nodes{author{login} url}}}}}`).join(" ");
-  const r = await exec("gh", ["api", "graphql", "-f", `query={repository(owner:${JSON.stringify(owner)},name:${JSON.stringify(name)}){${prs}}}`], { cwd, on, timeout: 60000 }).catch(() => null);
+  const prs = numbers.slice(0, 50).map((n) => `p${n}:pullRequest(number:${n}){reviewRequests(first:20){nodes{requestedReviewer{... on Bot{login} ... on User{login}}}} reviewThreads(first:100){nodes{isResolved comments(first:1){nodes{author{login} url}}}}}`).join(" ");
+  const r = await exec("gh", ["api", "graphql", "-f", `query={viewer{login} repository(owner:${JSON.stringify(owner)},name:${JSON.stringify(name)}){${prs}}}`], { cwd, on, timeout: 60000 }).catch(() => null);
   try {
-    for (const [k, pr] of Object.entries(JSON.parse(r.stdout).data.repository ?? {}))
+    const data = JSON.parse(r.stdout).data;
+    out.ok = Boolean(data.repository);
+    out.viewer = data.viewer?.login; // my login: whose PRs get the Copilot sound in the "All" list
+    for (const [k, pr] of Object.entries(data.repository ?? {}))
       if (pr) out.set(Number(k.slice(1)), {
         asked: pr.reviewRequests.nodes.some((n) => isCopilot(n.requestedReviewer)),
+        me: Boolean(out.viewer) && pr.reviewRequests.nodes.some((n) => n.requestedReviewer?.login === out.viewer),
         urls: pr.reviewThreads.nodes.filter((t) => !t.isResolved && isCopilot(t.comments.nodes[0]?.author)).map((t) => t.comments.nodes[0].url),
       });
   } catch {}
@@ -86,10 +93,17 @@ function approval(pr) {
 }
 
 const FIELDS ="number,title,headRefName,isDraft,reviewDecision,url,statusCheckRollup,reviewRequests,reviews,body,author";
-async function list(cwd, on) {
+// `all`: every open PR of the repo; else mine, then those waiting for my review (a second gh call), by number.
+async function list(cwd, on, all) {
+  if (all) return listBy(cwd, on, []);
+  const [mine, asked] = await Promise.all([listBy(cwd, on, ["--author", "@me"]), listBy(cwd, on, ["--search", "review-requested:@me"])]);
+  const have = new Set(mine.map((pr) => pr.number));
+  return [...mine, ...asked.filter((pr) => !have.has(pr.number))];
+}
+async function listBy(cwd, on, filter) {
   // exec rejects when the program can't start (gh not installed); gh itself says "gh auth login" when not logged in.
   const setup = (message) => Object.assign(new Error(message), { setup: true });
-  const r = await exec("gh", ["pr", "list", "--author", "@me", "--state", "open", "--limit", "100", "--json", FIELDS], { cwd, on })
+  const r = await exec("gh", ["pr", "list", ...filter, "--state", "open", "--limit", "100", "--json", FIELDS], { cwd, on })
     .catch(() => { throw setup("GitHub CLI (gh) is not installed · install it (brew install gh), then run gh auth login"); });
   if (r.code !== 0) {
     const text = (r.stderr || r.stdout).trim();
@@ -161,6 +175,7 @@ export default class Prs extends View {
     this.seen = null; // PR url -> copilot state at the last poll; null until the first one (no sound for what already was)
     // Auto-sync (the minute poll and its sound) can be switched off; remembered. Refresh still works by hand.
     this.auto = (() => { try { return (localStorage.getItem("prs.auto") ?? localStorage.getItem("auto")) !== "0"; } catch { return true; } })();
+    this.all = (() => { try { return localStorage.getItem("prs.all") === "1"; } catch { return false; } })();
     this.poll(cx);
     // The folder follows focus: check it often (cheap); a repo already polled is shown from memory.
     cx.timer.every(2000, (cx) => { const k = this.locKey(); if (k !== this.key) { this.key = k; this.focus(cx); } });
@@ -177,6 +192,15 @@ export default class Prs extends View {
     this.auto = !this.auto;
     try { localStorage.setItem("prs.auto", this.auto ? "1" : "0"); } catch {}
     if (this.auto) this.poll(cx); else cx.notify();
+  }
+
+  // Mine (authored by me) or All open PRs of the repo; remembered.
+  setAll(all, cx) {
+    if (all === this.all) return;
+    // The old list stays (with the refresh spinner) until the new one arrives; no blank flash.
+    this.all = all; this.byRepo.clear();
+    try { localStorage.setItem("prs.all", all ? "1" : "0"); } catch {}
+    this.poll(cx); cx.notify();
   }
 
   loc() { return location(this.places); }
@@ -224,13 +248,22 @@ export default class Prs extends View {
         await Promise.all([...repos].map(async ([k, r]) => {
           const old = this.byRepo.get(k);
           try {
-            const listed = await list(r.cwd, r.on);
+            const all = this.all, listed = await list(r.cwd, r.on, all);
             const gql = r.name ? await copilotGql(r.name, listed.map((pr) => pr.number), r.cwd, r.on) : new Map();
-            const prs = listed.map((pr) => ({ ...pr, cpAsked: gql.get(pr.number)?.asked ?? false }));
-            this.byRepo.set(k, { name: r.name, prs: prs.map((pr) => ({ ...pr, cpBadge: copilotBadge(pr, gql.get(pr.number)?.urls), repo: { cwd: r.cwd, on: r.on } })), error: null });
-            for (const pr of prs) next.set(pr.url, { state: copilot(pr), pr });
+            if (all !== this.all) return; // switched while loading: the `again` poll fills it
+            // A failed GraphQL call keeps each PR's last Copilot state instead of flipping the badges.
+            const was = new Map((old?.prs ?? []).map((pr) => [pr.number, pr]));
+            const prs = listed.map((pr) => ({ ...pr,
+              cpAsked: gql.ok ? gql.get(pr.number)?.asked ?? false : was.get(pr.number)?.cpAsked ?? false,
+              needMe: gql.ok ? gql.get(pr.number)?.me ?? false : was.get(pr.number)?.needMe ?? false,
+              // Opened by me (null when my login is unknown: the list isn't grouped).
+              mine: gql.viewer ? pr.author?.login === gql.viewer : was.get(pr.number)?.mine ?? null }));
+            this.byRepo.set(k, { name: r.name, prs: prs.map((pr) => ({ ...pr, cpBadge: gql.ok || !was.has(pr.number) ? copilotBadge(pr, gql.get(pr.number)?.urls) : was.get(pr.number).cpBadge, repo: { cwd: r.cwd, on: r.on } })), error: null });
+            // Copilot sound only for PRs I opened (when my login is unknown: everything in Mine, nothing in All).
+            for (const pr of prs) if (gql.viewer ? pr.author?.login === gql.viewer : !all) next.set(pr.url, { state: copilot(pr), pr });
           } catch (e) {
-            this.byRepo.set(k, { name: r.name, prs: old?.prs ?? [], error: String(e.message ?? e) });
+            // A failed refresh keeps the last good list as it was; the error shows only when there is none.
+            this.byRepo.set(k, old?.prs?.length ? old : { name: r.name, prs: [], error: String(e.message ?? e) });
             // One toast per session: the panel is often closed, and a minute-by-minute toast would nag.
             if (e.setup && !this.warned) { this.warned = true; notify({ title: "Pull requests", body: e.message, level: "warning" }); }
           }
@@ -468,7 +501,10 @@ export default class Prs extends View {
             .when(!own, (s) => s.cursor_pointer().hover((h) => h.bg(t.hover)).on_click((_e, cx) => this.approve(cx)))
             .child(this.approving ? "Approving…" : "Approve"));
         })
-        .child(btn("open", "Open", () => exec("open", [pr.url])))
+        // Open is the main action: inverted (foreground fill, background text).
+        .child(div().id("open").h(26).px(10).flex().items_center().rounded(6).border_1().border_color(t.foreground).bg(t.foreground)
+          .text_size(12).font_medium().text_color(t.background).cursor_pointer().hover((s) => s.opacity(0.85))
+          .on_click(() => exec("open", [pr.url])).child("Open"))
         .child(btn("copy", "Copy link", (_e, cx) => cx.write_to_clipboard(pr.url)))
         .child(div().id("close").size(26).flex().items_center().justify_center().rounded(6).text_color(t.dim).cursor_pointer()
           .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click(() => closeOverlay(props()?.overlay)).child("✕")))
@@ -554,6 +590,9 @@ export default class Prs extends View {
           .tooltip(cpTip).child(level === "asked" ? svg("mods/prs/spinner.svg").size(11).text_color(t.working).spin(900) : "C"))
         .child(div().id(`ap-${pr.number}`).flex_none().size(15).flex().items_center().justify_center().tooltip(apTip)
           .child(svg(`mods/prs/${apIcon}.svg`).size(14).text_color(apColor)))
+        // My review is requested: an eye in the theme's "working" colour, so the PR stands out as one to look at.
+        .when(Boolean(pr.needMe), (e) => e.child(div().id(`me-${pr.number}`).flex_none().size(15).flex().items_center().justify_center()
+          .tooltip("Your review is requested").child(svg("mods/prs/review.svg").size(14).text_color(t.working))))
         .child(div().flex_none().text_size(11).text_color(t.dim).child(`#${pr.number}`))
         .child(div().flex_1().min_w(0).truncate().child(pr.title))
         // Copy the task key that starts the title (DA-20323: …); the row's own click doesn't fire.
@@ -567,6 +606,18 @@ export default class Prs extends View {
       .child(h_flex().pl(13).gap(6).text_size(10).text_color(t.dim)
         .child(div().flex_1().min_w(0).truncate().child(pr.headRefName))
         .when(Boolean(pr.author?.login), (e) => e.child(div().flex_none().max_w(120).truncate().text_color(t.muted).child(pr.author.login))));
+  }
+
+  // My PRs on top, then everyone else's (those waiting for my review first), each under a small heading.
+  // Not grouped while my login is unknown or when one group is empty.
+  grouped(shown, t) {
+    const mine = shown.filter((pr) => pr.mine), rest = shown.filter((pr) => !pr.mine);
+    if (!mine.length || !rest.length) return shown.map((pr) => this.row(pr, t));
+    rest.sort((a, b) => Number(Boolean(b.needMe)) - Number(Boolean(a.needMe)));
+    const head = (id, label, n) => h_flex().id(id).flex_none().px(8).pt(id === "g-mine" ? 2 : 10).pb(2).gap(6).items_center()
+      .text_size(10).font_semibold().text_color(t.muted).child(label).child(div().text_color(t.dim).child(String(n)));
+    return [head("g-mine", "Mine", mine.length), ...mine.map((pr) => this.row(pr, t)),
+      head("g-rest", "Others", rest.length), ...rest.map((pr) => this.row(pr, t))];
   }
 
   render(cx) {
@@ -584,6 +635,11 @@ export default class Prs extends View {
         .child(div().font_semibold().text_size(13).child("Pull requests"))
         .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(q ? `${shown.length}/${this.prs.length}` : String(this.prs.length)))
         .child(div().flex_1().min_w(0).truncate().text_size(10).text_color(t.dim).child(this.repo))
+        .child(h_flex().flex_none().h(24).p(2).gap(2).items_center().rounded(6).border_1().border_color(t.border)
+          .children([["mine", "Mine", false, "Only pull requests I opened"], ["all", "All", true, "Every open pull request of the repo"]].map(([id, label, all, tip]) =>
+            div().id(`show-${id}`).h_full().px(6).flex().items_center().rounded(4).text_size(10).cursor_pointer().tooltip(tip)
+              .bg(this.all === all ? t.hover : t.background).text_color(this.all === all ? t.foreground : t.muted)
+              .on_click((_e, cx) => this.setAll(all, cx)).child(label))))
         .child(h_flex().id("auto").h(24).px(5).gap(4).items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
           .tooltip(this.auto ? "Auto-sync every minute (with Copilot sound): on" : "Auto-sync: off · refresh by hand").on_click((_e, cx) => this.toggleAuto(cx))
           .child(div().size(13).flex().items_center().justify_center().rounded(3).border_1().text_size(10).font_semibold()
@@ -600,7 +656,7 @@ export default class Prs extends View {
       .child(div().flex_1().min_h(0).relative()
         .child(v_flex().id("prs-list").absolute().inset_0().overflow_y_scroll().p(6).gap(1)
           .when(Boolean(empty), (e) => e.child(div().p(8).text_color(this.error ? t.ansi1 : t.dim).child(empty)))
-          .children(shown.map((pr) => this.row(pr, t))))
+          .children(this.grouped(shown, t)))
         .child(Scrollbar.vertical("prs-list").absolute().inset_0()));
   }
 }
