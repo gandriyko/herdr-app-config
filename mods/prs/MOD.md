@@ -12,7 +12,7 @@ commands: [mod.open prs (dialog for PR detail and create), mod.open wb-ai (model
 
 ## What it does
 Lists open PRs authored by me (first 100, via gh) in the repo of the focused folder, with CI, review, approval and Copilot-review state. Click opens a dialog with description, comments and reviews; buttons open the PR in the browser, copy the link, approve, or generate an AI review.
-A create-PR dialog pushes the branch and runs gh pr create, with an AI-written title and description.
+A create-PR dialog (the header's + button) pushes the branch and runs gh pr create, with an AI-written title and description.
 
 ## Files
 - main.js: panel view, gh calls, PR detail and create dialogs.
