@@ -35,6 +35,33 @@ const copilot = (pr) => {
 };
 const reviewed = (state) => state === "done" || state === "clean";
 
+// Unresolved Copilot threads per PR number, as their first comments' URLs (a thread is Copilot's by its first comment);
+// one GraphQL call per repo.
+// ponytail: first 50 reviewed PRs × 100 threads; a failed call leaves the map empty (the row falls back to the review text).
+async function copilotOpen(repo, numbers, cwd, on) {
+  const out = new Map(), [owner, name] = repo.split("/");
+  if (!numbers.length) return out;
+  const prs = numbers.slice(0, 50).map((n) => `p${n}:pullRequest(number:${n}){reviewThreads(first:100){nodes{isResolved comments(first:1){nodes{author{login} url}}}}}`).join(" ");
+  const r = await exec("gh", ["api", "graphql", "-f", `query={repository(owner:${JSON.stringify(owner)},name:${JSON.stringify(name)}){${prs}}}`], { cwd, on, timeout: 60000 }).catch(() => null);
+  try {
+    for (const [k, pr] of Object.entries(JSON.parse(r.stdout).data.repository ?? {}))
+      if (pr) out.set(Number(k.slice(1)), pr.reviewThreads.nodes.filter((t) => !t.isResolved && isCopilot(t.comments.nodes[0]?.author)).map((t) => t.comments.nodes[0].url));
+  } catch {}
+  return out;
+}
+
+// The list's Copilot badge, worked out once per poll: "high" = an open Copilot thread that is High or Medium (or of
+// unknown severity), "low" = only Low ones open, "ok" = reviewed and none open, else copilot()'s "asked" / "".
+// Severity comes from Copilot's overview reviews, matched by thread URL. `urls` is undefined when the count is unknown.
+function copilotBadge(pr, urls) {
+  const cp = copilot(pr);
+  if (!reviewed(cp)) return { level: cp, open: 0 };
+  if (!urls) return { level: cp === "clean" ? "ok" : "high", open: null };
+  if (!urls.length) return { level: "ok", open: 0 };
+  const sev = new Map((pr.reviews ?? []).filter((r) => isCopilot(r.author)).flatMap((r) => copilotOverview(r.body)?.issues ?? []).map((i) => [i.url, i.severity.toLowerCase()]));
+  return { level: urls.every((u) => sev.get(u) === "low") ? "low" : "high", open: urls.length };
+}
+
 // "approved" if a human's latest review approves, "changes" if it requests changes, else "".
 // By reviews, not only reviewDecision: that one stays empty in repos that don't require reviews.
 function approval(pr) {
@@ -64,6 +91,23 @@ function approvedBy(reviews) {
   const last = new Map();
   for (const r of reviews ?? []) if (["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(r.state)) last.set(r.author?.login, r.state);
   return [...last].filter(([, st]) => st === "APPROVED").map(([login]) => login).filter(Boolean);
+}
+// A PR's line-comment threads with their comments. ponytail: first 100 threads, 30 comments each.
+const THREADS = "query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){pullRequest(number:$n){reviewThreads(first:100){nodes{isResolved isOutdated path line originalLine comments(first:30){nodes{author{login} body createdAt url}}}}}}}";
+
+// Copilot's overview review (<!-- ccr-overview-v2 -->): verdict, summary, issues { severity, title, url, note },
+// "What changed" (markdown) and the review effort. Null for any other text (an older overview stays a plain comment).
+// ponytail: parsed from Copilot's markdown; a new layout falls back to the plain comment.
+function copilotOverview(body) {
+  if (!/ccr-overview/.test(body ?? "")) return null;
+  const verdict = /^###\s+(.+)$/m.exec(body)?.[1]?.trim();
+  if (!verdict) return null;
+  const summary = body.split(/^###.+$/m)[1]?.split("<details")[0].trim() ?? "";
+  const issues = [...body.matchAll(/^- .*?alt="(\w+) severity".*?\[([^\]]+)\]\(([^)]+)\)(.*)$/gm)]
+    .map(([, severity, title, url, rest]) => ({ severity, title, url, note: rest.replace(/^\s*·\s*/, "").trim() }));
+  const what = /<summary><strong>What changed in this PR<\/strong><\/summary>([\s\S]*?)<\/details>/.exec(body)?.[1]?.trim() ?? "";
+  const effort = /<sub>([^<]+)<\/sub>/.exec(body)?.[1]?.trim() ?? "";
+  return { verdict, summary, issues, what, effort };
 }
 const when = (iso) => iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "";
 
@@ -164,7 +208,8 @@ export default class Prs extends View {
           const old = this.byRepo.get(k);
           try {
             const prs = await list(r.cwd, r.on);
-            this.byRepo.set(k, { name: r.name, prs: prs.map((pr) => ({ ...pr, repo: { cwd: r.cwd, on: r.on } })), error: null });
+            const open = r.name ? await copilotOpen(r.name, prs.filter((pr) => reviewed(copilot(pr))).map((pr) => pr.number), r.cwd, r.on) : new Map();
+            this.byRepo.set(k, { name: r.name, prs: prs.map((pr) => ({ ...pr, cpBadge: copilotBadge(pr, open.get(pr.number)), repo: { cwd: r.cwd, on: r.on } })), error: null });
             for (const pr of prs) next.set(pr.url, { state: copilot(pr), pr });
           } catch (e) {
             this.byRepo.set(k, { name: r.name, prs: old?.prs ?? [], error: String(e.message ?? e) });
@@ -189,19 +234,31 @@ export default class Prs extends View {
   // ── the PR popup ──
   loadDetail(cx) {
     const pr = this.detailPr, r = pr.repo ?? {};
+    const [, owner, name] = /github\.com\/([^/]+)\/([^/]+)\/pull\//.exec(pr.url ?? "") ?? [];
     cx.spawn(async (cx) => {
       try {
-        const x = await exec("gh", ["pr", "view", String(pr.number), "--json", "title,body,author,url,headRefName,baseRefName,createdAt,comments,reviews"], { cwd: r.cwd, on: r.on })
-          .catch(() => { throw new Error("GitHub CLI (gh) is not installed"); });
+        const [x, th] = await Promise.all([
+          exec("gh", ["pr", "view", String(pr.number), "--json", "title,body,author,url,headRefName,baseRefName,createdAt,comments,reviews"], { cwd: r.cwd, on: r.on })
+            .catch(() => { throw new Error("GitHub CLI (gh) is not installed"); }),
+          owner ? exec("gh", ["api", "graphql", "-f", `query=${THREADS}`, "-f", `owner=${owner}`, "-f", `name=${name}`, "-F", `n=${pr.number}`], { cwd: r.cwd, on: r.on, timeout: 60000 }).catch(() => null) : null]);
         if (x.code !== 0) throw new Error((x.stderr || x.stdout).trim().split("\n").pop() || "gh failed");
         const v = JSON.parse(x.stdout);
+        // Line comments: only the threads nobody resolved yet are shown (a failed call just shows none).
+        let all = [];
+        try { all = th?.code === 0 ? JSON.parse(th.stdout).data.repository.pullRequest.reviewThreads.nodes : []; } catch {}
+        const threads = all.filter((n) => !n.isResolved);
+        const resolved = new Set(all.filter((n) => n.isResolved).map((n) => n.comments?.nodes?.[0]?.url).filter(Boolean));
+        // Copilot's latest overview becomes a card (issues whose thread is resolved are left out); its older ones are dropped.
+        const cpReview = (v.reviews ?? []).filter((rv) => isCopilot(rv.author) && copilotOverview(rv.body)).pop();
+        const cp = cpReview ? { ...copilotOverview(cpReview.body), at: cpReview.submittedAt } : null;
+        if (cp) { const n = cp.issues.length; cp.issues = cp.issues.filter((i) => !resolved.has(i.url)); cp.resolved = n - cp.issues.length; }
         const items = [...(v.comments ?? []).map((c) => ({ author: c.author?.login, at: c.createdAt, body: c.body })),
-          ...(v.reviews ?? []).filter((rv) => rv.body || rv.state !== "COMMENTED").map((rv) => ({ author: rv.author?.login, at: rv.submittedAt, body: rv.body, extra: rv.state.toLowerCase().replace("_", " ") }))]
+          ...(v.reviews ?? []).filter((rv) => (rv.body || rv.state !== "COMMENTED") && !(cp && rv.state === "COMMENTED" && isCopilot(rv.author))).map((rv) => ({ author: rv.author?.login, at: rv.submittedAt, body: rv.body, extra: rv.state.toLowerCase().replace("_", " ") }))]
           .sort((p, q) => String(p.at).localeCompare(String(q.at))).map((c, i) => ({ ...c, id: i }));
         const me = await exec("gh", ["api", "user", "--jq", ".login"], { cwd: r.cwd, on: r.on }).then((m) => m.code === 0 ? m.stdout.trim() : null).catch(() => null);
         const by = approvedBy(v.reviews);
         this.detail = { me, mineApproved: Boolean(me && by.includes(me)), title: v.title, body: v.body ?? "", author: v.author?.login, from: v.headRefName, to: v.baseRefName, created: v.createdAt,
-          approvedBy: by, comments: items };
+          approvedBy: by, comments: items, threads, copilot: cp };
         this.detailError = null;
       } catch (e) { this.detailError = String(e.message ?? e); }
       cx.notify();
@@ -401,18 +458,53 @@ export default class Prs extends View {
         .when(Boolean(this.approveError), (e) => e.child(div().text_size(12).text_color(t.ansi1).child(this.approveError)))
         .when(!d, (e) => e.child(div().text_color(this.detailError ? t.ansi1 : t.dim).child(this.detailError ?? "Loading…")))
         .when(Boolean(d), (e) => e
-          .child(div().text_size(17).font_semibold().child(d.title))
+          // Selectable, so part of the title can be copied; HTML-escaped so * _ ` stay literal.
+          .child(div().text_size(17).font_semibold().child(TextView.html(`pr-title-${pr.number}`, d.title.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")).selectable(true)))
           .child(v_flex().gap(5).children([meta("Author", d.author), meta("Branches", `${d.from} → ${d.to}`), meta("Opened", when(d.created)),
             meta("Approved by", d.approvedBy.length ? d.approvedBy.join(", ") : "nobody yet")].filter(Boolean)))
           .child(div().h(1).bg(t.border))
           .child(d.body.trim() ? TextView.markdown(`pr-desc-${pr.number}`, d.body) : div().text_color(t.dim).child("No description"))
+          .when(Boolean(d.copilot), (e) => e.child(div().h(1).bg(t.border)).child(this.copilotCard(d.copilot, t)))
           .when(d.comments.length > 0, (e) => e
             .child(div().h(1).bg(t.border))
             .child(div().text_size(11).font_semibold().text_color(t.dim).child(`COMMENTS · ${d.comments.length}`))
             .children(d.comments.map((c) => v_flex().gap(4).p(10).rounded(8).bg(t.raised)
               .child(h_flex().gap(8).text_size(11).child(div().font_semibold().child(c.author ?? "")).child(div().text_color(t.dim).child(when(c.at)))
                 .when(Boolean(c.extra), (e) => e.child(div().text_color(t.muted).child(c.extra))))
-              .when(Boolean(c.body), (e) => e.child(TextView.markdown(`pr-c-${c.id}`, c.body))))))));
+              .when(Boolean(c.body), (e) => e.child(TextView.markdown(`pr-c-${c.id}`, c.body))))))
+          .when(d.threads.length > 0, (e) => e
+            .child(div().h(1).bg(t.border))
+            .child(div().text_size(11).font_semibold().text_color(t.dim).child(`OPEN THREADS · ${d.threads.length}`))
+            .children(d.threads.map((th, i) => v_flex().gap(8).p(10).rounded(8).bg(t.raised)
+              .child(h_flex().gap(8).text_size(11).text_color(t.muted)
+                .child(div().flex_1().min_w(0).truncate().child(`${th.path}${th.line ?? th.originalLine ? `:${th.line ?? th.originalLine}` : ""}`))
+                .when(th.isOutdated, (e) => e.child(div().flex_none().text_color(t.dim).child("outdated"))))
+              .children((th.comments?.nodes ?? []).map((c, j) => v_flex().gap(4)
+                .child(h_flex().gap(8).text_size(11).child(div().font_semibold().child(c.author?.login ?? "")).child(div().text_color(t.dim).child(when(c.createdAt))))
+                .when(Boolean(c.body), (e) => e.child(TextView.markdown(`pr-t-${i}-${j}`, c.body))))))))));
+  }
+
+  // Copilot's overview, laid out like GitHub's: verdict, summary, open issues with a severity pill (click opens the thread),
+  // "What changed" folded, review effort.
+  copilotCard(cp, t) {
+    const sev = { high: t.ansi1, medium: t.working, low: t.accent };
+    const n = cp.issues.length;
+    return v_flex().gap(10).p(12).rounded(8).border_1().border_color(t.border)
+      .child(h_flex().gap(8).text_size(11).child(div().font_semibold().child("Copilot")).child(div().text_color(t.dim).child(`commented ${when(cp.at)}`)))
+      .child(div().text_size(15).font_semibold().child(cp.verdict))
+      .when(Boolean(cp.summary), (e) => e.child(TextView.markdown(`pr-cp-sum-${this.detailPr.number}`, cp.summary)))
+      .child(div().text_size(12).font_semibold().child(`${n} open issue${n === 1 ? "" : "s"}${cp.resolved ? ` · ${cp.resolved} resolved` : ""}`))
+      .children(cp.issues.map((i, k) => h_flex().id(`pr-cp-i-${k}`).gap(8).items_center().text_size(12).cursor_pointer().on_click(() => exec("open", [i.url]))
+        .child(div().flex_none().px(8).py(1).rounded(9).border_1().text_size(10.5).font_semibold()
+          .border_color(sev[i.severity.toLowerCase()] ?? t.border).text_color(sev[i.severity.toLowerCase()] ?? t.muted).child(i.severity))
+        .child(div().flex_1().min_w(0).truncate().text_color(t.accent).hover((s) => s.underline()).child(i.title))
+        .when(Boolean(i.note), (e) => e.child(div().flex_none().text_color(t.dim).child(i.note)))))
+      .when(Boolean(cp.what), (e) => e
+        .child(h_flex().id("pr-cp-what").gap(6).items_center().text_size(12).font_semibold().cursor_pointer()
+          .on_click((_e, cx) => { this.cpWhat = !this.cpWhat; cx.notify(); })
+          .child(div().w(10).text_color(t.dim).child(this.cpWhat ? "▾" : "▸")).child("What changed in this PR"))
+        .when(Boolean(this.cpWhat), (e2) => e2.child(TextView.markdown(`pr-cp-what-${this.detailPr.number}`, cp.what))))
+      .when(Boolean(cp.effort), (e) => e.child(div().text_size(11).text_color(t.dim).child(cp.effort)));
   }
 
   row(pr, t) {
@@ -423,24 +515,34 @@ export default class Prs extends View {
     const ap = approval(pr);
     const [apIcon, apColor, apTip] = ap === "approved" ? ["approved", t.done, "Approved by a reviewer"]
       : ap === "changes" ? ["changes", t.ansi1, "Changes requested"] : ["approved", t.border, "Not approved yet"];
-    const cp = copilot(pr);
+    const { level, open } = pr.cpBadge ?? copilotBadge(pr);
+    const taskKey = /^[A-Za-z]+-\d+/.exec(pr.title ?? "")?.[0];
+    const fill = { high: t.ansi1, low: t.accent, ok: t.done }[level];
+    const s = open === 1 ? "" : "s";
+    const cpTip = level === "high" ? (open ? `Copilot: ${open} open thread${s}, High or Medium among them` : "Copilot reviewed: left comments")
+      : level === "low" ? `Copilot: ${open} open thread${s}, all Low` : level === "ok" ? "Copilot reviewed: no open threads"
+      : level === "asked" ? "Copilot review requested, no answer yet" : "Copilot not run yet";
     return v_flex().id(`pr-${pr.number}`).flex_none().px(8).py(4).gap(2).rounded(5).cursor_pointer()
       .hover((s) => s.bg(t.hover)).tooltip(`#${pr.number} ${pr.title}\n${pr.headRefName}`)
       .on_click(() => openOverlay({ mod: "prs", kind: "dialog", width: 780, height: 0.85, props: { pr } }))
       .child(h_flex().gap(6).items_center()
         .child(div().id(`ci-${pr.number}`).flex_none().size(9).flex().items_center().justify_center().tooltip(dotTip)
           .child(div().size(7).rounded(4).bg(dot ?? t.border)))
-        // Copilot badge "C": filled cyan = reviewed, no comments; filled green = reviewed with comments;
-        // yellow outline = requested; faint = not asked. Cyan (theme's ansi6) is used by no other mark here.
+        // Copilot badge "C": filled red = open High/Medium threads; filled blue = only Low ones open;
+        // filled green = reviewed, none open; yellow outline = requested; faint = not run yet.
         .child(div().id(`cp-${pr.number}`).flex_none().size(15).flex().items_center().justify_center().rounded(4).border_1().text_size(10).font_semibold()
-          .border_color(cp === "clean" ? t.ansi6 : cp === "done" ? t.done : cp === "asked" ? t.working : t.border)
-          .bg(cp === "clean" ? t.ansi6 : cp === "done" ? t.done : t.background)
-          .text_color(reviewed(cp) ? t.background : cp === "asked" ? t.working : t.dim)
-          .tooltip(cp === "clean" ? "Copilot reviewed: no comments" : cp === "done" ? "Copilot reviewed: left comments" : cp === "asked" ? "Copilot review requested, no answer yet" : "Copilot not requested").child("C"))
+          .border_color(fill ?? (level === "asked" ? t.working : t.border)).bg(fill ?? t.background)
+          .text_color(fill ? t.background : level === "asked" ? t.working : t.dim)
+          .tooltip(cpTip).child("C"))
         .child(div().id(`ap-${pr.number}`).flex_none().size(15).flex().items_center().justify_center().tooltip(apTip)
           .child(svg(`mods/prs/${apIcon}.svg`).size(14).text_color(apColor)))
         .child(div().flex_none().text_size(11).text_color(t.dim).child(`#${pr.number}`))
         .child(div().flex_1().min_w(0).truncate().child(pr.title))
+        // Copy the task key that starts the title (DA-20323: …); the row's own click doesn't fire.
+        .when(Boolean(taskKey), (e) => e.child(div().id(`key-${pr.number}`).flex_none().size(18).flex().items_center().justify_center().rounded(4)
+          .text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(`Copy ${taskKey}`)
+          .on_click((_e, cx) => { cx.stop_propagation(); cx.write_to_clipboard(taskKey); })
+          .child(svg("mods/prs/copy.svg").size(12))))
         // Draft: a purple "draft pull request" icon (theme's ansi5, a colour no other mark here uses).
         .when(pr.isDraft, (e) => e.child(div().id(`draft-${pr.number}`).flex_none().size(15).flex().items_center().justify_center().tooltip("Draft: not ready for review")
           .child(svg("mods/prs/draft.svg").size(14).text_color(t.ansi5)))))
