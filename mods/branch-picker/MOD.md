@@ -11,7 +11,7 @@ commands: []
 ---
 
 ## What it does
-Opened as an overlay behind the status bar branch. Shows local branches grouped by `prefix/`, recently used ones on top, with a filter box and copy-name button. Clicking runs `git checkout` only; spaces, tabs and terminals stay put. After a switch it sets `branch.switched` so the header chip refreshes.
+Opened as an overlay behind the status bar branch. Shows local branches grouped by `prefix/`: the current branch first (with a Pull button: `git pull --ff-only`, or `--rebase --autostash` when diverged, aborted on conflict; ↓N from the last fetch), then recently used ones, with a filter box and copy-name button. The current branch is skipped by ↑↓/↵. Clicking runs `git checkout` only; spaces, tabs and terminals stay put. After a switch it sets `branch.switched` so the header chip refreshes.
 
 ## Files
 - main.js: the picker (git calls, tree, recents, checkout, error display).

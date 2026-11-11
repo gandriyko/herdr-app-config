@@ -65,7 +65,12 @@ export default class BranchPicker extends View {
       this.repoName = rootRaw.replace(/\/+$/, "").split("/").pop();
       this.inSub = Boolean(prefix.trim());
       const head = await exec("git", [...READ, "status", "--porcelain=v2", "--branch"], { cwd: this.folder, on: this.on });
-      for (const line of head.stdout.split("\n")) if (line.startsWith("# branch.head ")) this.current = line.slice(14);
+      this.upstream = null; this.behind = 0;
+      for (const line of head.stdout.split("\n")) {
+        if (line.startsWith("# branch.head ")) this.current = line.slice(14);
+        else if (line.startsWith("# branch.upstream ")) this.upstream = line.slice(18);
+        else if (line.startsWith("# branch.ab ")) this.behind = Math.abs(Number(line.split(" ")[3]) || 0); // as of the last fetch
+      }
       const fmt = "--format=%(refname:short)%09%(committerdate:unix)";
       const local = await exec("git", [...READ, "for-each-ref", fmt, "refs/heads"], { cwd: this.folder, on: this.on });
       const list = local.stdout.split("\n").filter(Boolean)
@@ -88,13 +93,19 @@ export default class BranchPicker extends View {
     }
   }
 
-  // Rows to draw: the recent section (unfiltered), then a tree of the rest.
+  // Rows to draw: the current branch first, the recent section (unfiltered), then a tree of the rest.
   rows() {
     const f = this.text.trim().toLowerCase();
-    const all = this.branches ?? [];
+    const cur = this.current;
+    const all = (this.branches ?? []).filter(b => b.name !== cur);
     const match = (b) => !f || b.name.toLowerCase().includes(f);
     const inRecents = new Set(this.recents);
     const out = [];
+    const curB = (this.branches ?? []).find(b => b.name === cur);
+    if (curB && match(curB)) {
+      out.push({ kind: "head", label: "Current" });
+      out.push({ kind: "row", b: curB, depth: 0 });
+    }
     if (!f && this.recents.length) {
       const rec = this.recents.map(n => all.find(b => b.name === n)).filter(Boolean);
       if (rec.length) {
@@ -118,8 +129,9 @@ export default class BranchPicker extends View {
     return out;
   }
 
+  // Keyboard targets: every row but the current branch (checking it out does nothing).
   pickable() {
-    return this.rows().filter(r => r.kind === "row").map(r => r.b);
+    return this.rows().filter(r => r.kind === "row" && r.b.name !== this.current).map(r => r.b);
   }
 
   toggle(g, cx) {
@@ -170,6 +182,28 @@ export default class BranchPicker extends View {
         this.error = String(e?.message ?? e);
         cx.notify();
       }
+    });
+  }
+
+  // Pull the current branch: fast-forward when it can; when it diverged, rebase the local commits on top (autostash);
+  // a rebase that stops on a conflict is aborted, so nothing is left half done. The picker stays open.
+  pull(cx) {
+    if (this.busy || !this.upstream) return;
+    const msg = (r) => (r.stderr || r.stdout || "").trim().split("\n").slice(-3).join(" ");
+    const git = (args) => exec("git", args, { cwd: this.folder, on: this.on, timeout: 180000 });
+    this.busy = this.current; this.error = ""; cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        let r = await git(["pull", "--ff-only"]);
+        if (r.code !== 0 && /not possible to fast-forward|diverg/i.test(msg(r))) {
+          r = await git(["pull", "--rebase", "--autostash"]);
+          if (r.code !== 0) { const m = msg(r); await git(["rebase", "--abort"]).catch(() => null); throw new Error(`rebase stopped: ${m} · rebase aborted, nothing changed`); }
+        } else if (r.code !== 0) throw new Error(msg(r));
+        setShared("branch.switched", Date.now()); // the header chip and the other panels ask again. contract: read by status-copy
+        notify({ title: `Pulled ${this.current}`, body: msg(r) || "Up to date", level: "info" });
+        await this.load();
+      } catch (e) { this.error = `Pull failed: ${e?.message ?? e}`; }
+      this.busy = ""; cx.notify();
     });
   }
 
@@ -235,9 +269,9 @@ export default class BranchPicker extends View {
           .child(div().text_color(t.muted).child(r.g))
           .child(div().text_size(11).text_color(t.dim).child(String(r.count)));
       }
-      const i = ++rowNo;
-      const on = i === this.at;
       const cur = r.b.name === this.current;
+      const i = cur ? "cur" : ++rowNo; // the current row isn't counted: `at` indexes pickable()
+      const on = i === this.at;
       const busy = this.busy === r.b.name;
       return h_flex()
         .id(`br-${i}`)
@@ -263,6 +297,13 @@ export default class BranchPicker extends View {
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
           .on_click((_e, cx) => this.copy(r.b.name, cx))
           .child(svg(`mods/branch-picker/${this.copied === r.b.name ? "check" : "copy"}.svg`).size(12))))
+        .when(cur && !busy, el => el.child(div().id("br-pull").flex_none().h(22).px(8).flex().items_center().gap(4).rounded(5).border(1).text_size(11.5)
+          .border_color(this.upstream ? (this.behind ? t.accent : t.input) : t.border).text_color(this.upstream ? (this.behind ? t.accent : t.foreground) : t.dim)
+          .when(Boolean(this.upstream), s => s.cursor_pointer().hover(h => h.bg(t.hover)))
+          .tooltip(!this.upstream ? "No upstream to pull from" : this.behind ? `git pull: ${this.behind} commit${this.behind === 1 ? "" : "s"} from ${this.upstream} (as of the last fetch)` : `git pull from ${this.upstream}`)
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_click((_e, cx) => { cx.stop_propagation(); this.pull(cx); })
+          .child(`Pull${this.behind ? ` ↓${this.behind}` : ""}`)))
         .when(cur, el => el.child(div().flex_none().text_size(11).text_color(t.accent).child("current")))
         .when(busy, el => el.child(svg("mods/branch-picker/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
         .when(!cur && !busy && r.b.at > 0, el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(ago(r.b.at))));
