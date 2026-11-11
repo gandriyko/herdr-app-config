@@ -6,13 +6,21 @@ import { migrate, modelFor, settingsFor, projectKey, projectName, languageLine, 
 // My open pull requests in the repo of the focused folder, via the `gh` CLI. Click opens the PR in a popup
 // (description, who approved, comments and reviews); the popup has Open (browser) and Copy link.
 // ponytail: only open PRs I authored (first 100); add `--search "review-requested:@me"` as a second list if wanted.
-function location() {
+// A mod pane (a wb-diff tab) has no cwd: keep the last terminal folder of that space (`places`, per
+// instance) instead of the space folder, which may not be a repo.
+const PLACES_MAX = 50;
+function location(places) {
   const space = spaces().find((s) => s.active), f = focused();
   const pane = f?.pane ? panes().find((p) => p.pane === f.pane) : null;
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
-  return { cwd: pane?.cwd || f?.cwd || space?.folder, on };
+  const cwd = pane?.cwd || f?.cwd;
+  if (cwd) {
+    places.delete(space?.id); places.set(space?.id, { cwd, on });
+    if (places.size > PLACES_MAX) places.delete(places.keys().next().value);
+    return { cwd, on };
+  }
+  return places.get(space?.id) ?? { cwd: space?.folder, on };
 }
-const key = () => JSON.stringify(location());
 
 // CI of the PR: "fail" if any check failed, "wait" if any is still running, else "ok" (or "" without checks).
 function ci(rollup) {
@@ -140,7 +148,8 @@ export default class Prs extends View {
     this.query = "";
     this.search = InputState.new({ placeholder: "Search pull requests: title, description" });
     this.search.on("change", (_e, cx) => { this.query = this.search.value().trim().toLowerCase(); cx.notify(); });
-    this.prs = []; this.error = null; this.loading = false; this.key = key(); this.repo = "";
+    this.places = new Map(); // space id -> last terminal folder there (see location)
+    this.prs = []; this.error = null; this.loading = false; this.key = this.locKey(); this.repo = "";
     this.byRepo = new Map(); // repo key -> { name, prs, error }: one gh call per repo, whatever folders point at it
     this.remotes = new Map(); // folder -> its repo, from the local git remote (no API call)
     this.focusRepo = null;
@@ -149,7 +158,7 @@ export default class Prs extends View {
     this.auto = (() => { try { return (localStorage.getItem("prs.auto") ?? localStorage.getItem("auto")) !== "0"; } catch { return true; } })();
     this.poll(cx);
     // The folder follows focus: check it often (cheap); a repo already polled is shown from memory.
-    cx.timer.every(2000, (cx) => { const k = key(); if (k !== this.key) { this.key = k; this.focus(cx); } });
+    cx.timer.every(2000, (cx) => { const k = this.locKey(); if (k !== this.key) { this.key = k; this.focus(cx); } });
     // A PR approved or created elsewhere: poll now. From a timer, not render(): a task spawned with
     // render's cx never runs. poll() has its own loading/again guard.
     cx.timer.every(2000, (cx) => {
@@ -164,6 +173,9 @@ export default class Prs extends View {
     try { localStorage.setItem("prs.auto", this.auto ? "1" : "0"); } catch {}
     if (this.auto) this.poll(cx); else cx.notify();
   }
+
+  loc() { return location(this.places); }
+  locKey() { return JSON.stringify(this.loc()); }
 
   // The repo a place belongs to: `{ key, name }`. Folders (and worktrees) of one repo share the key.
   async repoOf({ cwd, on }) {
@@ -180,12 +192,12 @@ export default class Prs extends View {
   show() {
     const e = this.byRepo.get(this.focusRepo);
     this.prs = e?.prs ?? []; this.repo = e?.name ?? "";
-    this.error = e?.error ?? (!location().cwd ? "No folder" : !e && !this.auto ? "Auto-sync is off · press refresh" : null);
+    this.error = e?.error ?? (!this.loc().cwd ? "No folder" : !e && !this.auto ? "Auto-sync is off · press refresh" : null);
   }
 
   focus(cx) {
     cx.spawn(async (cx) => {
-      const r = await this.repoOf(location());
+      const r = await this.repoOf(this.loc());
       if (this.byRepo.has(r.key) || !this.auto) { this.focusRepo = r.key; this.show(); cx.notify(); } else this.poll(cx);
     });
   }
@@ -197,7 +209,7 @@ export default class Prs extends View {
   poll(cx) {
     if (this.loading) { this.again = true; return; }
     this.loading = true; cx.notify();
-    const focus = location(), places = new Map();
+    const focus = this.loc(), places = new Map();
     for (const p of [focus, ...spaces().map((s) => ({ cwd: s.folder, on: s.machine ?? null }))]) if (p.cwd) places.set(`${p.on}|${p.cwd}`, p);
     cx.spawn(async (cx) => {
       try {
@@ -573,7 +585,7 @@ export default class Prs extends View {
           .child(div().text_size(10).text_color(t.muted).child("Auto")))
         .child(div().id("new-pr").size(24).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer().bg(t.solid).text_color(t.solid_foreground)
           .hover((s) => s.opacity(0.85)).tooltip("New pull request from this folder's branch")
-          .on_click((_e, cx) => { cx.stop_propagation(); const l = location(); if (l.cwd) openOverlay({ mod: "prs", kind: "dialog", width: 660, height: 720, props: { create: l } }); })
+          .on_click((_e, cx) => { cx.stop_propagation(); const l = this.loc(); if (l.cwd) openOverlay({ mod: "prs", kind: "dialog", width: 660, height: 720, props: { create: l } }); })
           .child(svg("mods/prs/plus.svg").size(14)))
         .child(refresh))
       .when(Boolean(this.prs.length), (e) => e.child(div().flex_none().px(8).pt(8)
