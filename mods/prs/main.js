@@ -593,7 +593,6 @@ export default class Prs extends View {
         // My review is requested: an eye in the theme's "working" colour, so the PR stands out as one to look at.
         .when(Boolean(pr.needMe), (e) => e.child(div().id(`me-${pr.number}`).flex_none().size(15).flex().items_center().justify_center()
           .tooltip("Your review is requested").child(svg("mods/prs/review.svg").size(14).text_color(t.working))))
-        .child(div().flex_none().text_size(11).text_color(t.dim).child(`#${pr.number}`))
         .child(div().flex_1().min_w(0).truncate().child(pr.title))
         // Copy the task key that starts the title (DA-20323: …); the row's own click doesn't fire.
         .when(Boolean(taskKey), (e) => e.child(div().id(`key-${pr.number}`).flex_none().size(18).flex().items_center().justify_center().rounded(4)
@@ -604,7 +603,9 @@ export default class Prs extends View {
         .when(pr.isDraft, (e) => e.child(div().id(`draft-${pr.number}`).flex_none().size(15).flex().items_center().justify_center().tooltip("Draft: not ready for review")
           .child(svg("mods/prs/draft.svg").size(14).text_color(t.ansi5)))))
       .child(h_flex().pl(13).gap(6).text_size(10).text_color(t.dim)
-        .child(div().flex_1().min_w(0).truncate().child(pr.headRefName))
+        .child(div().min_w(0).truncate().child(pr.headRefName))
+        .child(div().flex_none().child(`#${pr.number}`))
+        .child(div().flex_1())
         .when(Boolean(pr.author?.login), (e) => e.child(div().flex_none().max_w(120).truncate().text_color(t.muted).child(pr.author.login))));
   }
 

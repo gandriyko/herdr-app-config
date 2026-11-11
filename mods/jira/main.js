@@ -106,6 +106,7 @@ export default class Jira extends View {
     this.tokenNew = input("API token");
     this.tokenKeep = input("Empty: the saved token will be used");
     this.tokenNew.set_masked(true); this.tokenKeep.set_masked(true);
+    this.current = localStorage.getItem("current") === "1"; // filter: only the active sprint, no other sprints or backlog
     this.search = InputState.new({ placeholder: "Search by key or title" });
     this.search.on("change", (_e, cx) => { this.query = this.search.value().trim().toLowerCase(); cx.notify(); });
     this.refresh(cx);
@@ -394,7 +395,7 @@ export default class Jira extends View {
     const f = issue.fields, cat = f.status?.statusCategory?.key;
     const color = cat === "indeterminate" ? t.working : cat === "done" ? t.done : t.muted;
     const hotfix = (f.labels ?? []).some((l) => l.toLowerCase() === "hotfix");
-    return h_flex().id(`issue-${section}-${issue.key}`).h(22).flex_none().px(8).gap(6).items_center().rounded(5).cursor_pointer().relative()
+    return h_flex().id(`issue-${section}-${issue.key}`).flex_none().px(8).py(3).gap(6).items_center().rounded(5).cursor_pointer().relative()
       // Label "hotfix": a red bar on the row's left edge.
       .when(hotfix, (e) => e.child(div().absolute().left(1).top(4).bottom(4).w(3).rounded(2).bg(t.ansi1)))
       .when(this.selected === issue.key || this.menu?.key === issue.key, (s) => s.bg(t.selected))
@@ -403,24 +404,30 @@ export default class Jira extends View {
       .on_mouse_down("left", (_e, cx) => { this.selected = issue.key; exec("open", [this.url(issue.key)]); cx.notify(); })
       // The root's own right-press handler (it runs next) places the menu.
       .on_mouse_down("right", () => { this.menuKey = issue.key; })
-      .child(div().flex_none().text_size(11).text_color(t.dim).child(issue.key))
-      .child(div().flex_1().min_w(0).truncate().child(f.summary ?? ""))
-      .child(div().flex_none().max_w(96).truncate().text_size(10).text_color(color).child(f.status?.name ?? ""))
-      // Start a Claude session for this task; the press stops here, so the row doesn't open Jira.
-      .child(div().id(`session-${section}-${issue.key}`).flex_none().size(18).flex().items_center().justify_center().rounded(4)
-        .text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(`Start a ${this.settings().agentName ?? "Claude Code"} session for ${issue.key}`)
-        .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.openStart(issue.key); })
-        .child(svg("mods/jira/session.svg").size(12)));
+      // Two lines: the summary, then the key (dim), the status (its category's color) and the session button, small.
+      .child(v_flex().flex_1().min_w(0)
+        .child(div().truncate().child(f.summary ?? ""))
+        .child(h_flex().gap(6).items_center().text_size(10)
+          .child(div().flex_none().text_color(t.dim).child(issue.key))
+          .child(div().flex_1().min_w(0).truncate().text_color(color).child(f.status?.name ?? ""))
+          // Start a Claude session for this task; the press stops here, so the row doesn't open Jira.
+          .child(div().id(`session-${section}-${issue.key}`).flex_none().size(16).flex().items_center().justify_center().rounded(4)
+            .text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(`Start a ${this.settings().agentName ?? "Claude Code"} session for ${issue.key}`)
+            .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.openStart(issue.key); })
+            .child(svg("mods/jira/session.svg").size(12)))));
   }
 
   render(cx) {
     if (this.st) return this.startView(theme());
     const t = theme(), q = this.query, form = this.setup || this.editing;
     const match = (issue) => !q || issue.key.toLowerCase().includes(q) || (issue.fields.summary ?? "").toLowerCase().includes(q);
-    const groups = this.groups.map((g) => ({ ...g, issues: g.issues.filter(match) })).filter((g) => g.issues.length);
-    const backlog = this.backlog.filter(match), project = this.settings().project;
+    // order 0: an active sprint (see refresh).
+    const groups = this.groups.filter((g) => !this.current || g.order === 0)
+      .map((g) => ({ ...g, issues: g.issues.filter(match) })).filter((g) => g.issues.length);
+    const backlog = this.current ? [] : this.backlog.filter(match), project = this.settings().project;
     const empty = form ? null : this.error || (this.loading && !this.groups.length ? "Loading…"
-      : q && !groups.length && !backlog.length ? "No matches" : !this.groups.length ? "No open issues assigned to you" : null);
+      : q && !groups.length && !backlog.length ? "No matches" : !this.groups.length ? "No open issues assigned to you"
+      : !groups.length ? "No issues in the current sprint" : null);
     const iconButton = (id, icon, tip, onClick, spin = false) => div().id(id).size(24).flex().items_center().justify_center().rounded(6).cursor_pointer()
       .text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip(tip).on_click(onClick).child(svg(icon).size(14).when(spin, (s) => s.spin(900)));
     return v_flex().id("jira").size_full().min_h(0).relative().rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(12)
@@ -438,9 +445,14 @@ export default class Jira extends View {
         .child(div().flex_1())
         .when(!this.setup, (e) => e.child(iconButton("settings", "mods/jira/settings.svg", "Settings", (_e, cx) => this.openSettings(cx))))
         .child(iconButton("refresh", "mods/jira/refresh.svg", "Refresh", (_e, cx) => this.refresh(cx), this.loading)))
-      .when(!form, (e) => e.child(div().flex_none().px(8).pt(8)
-        .child(div().id("search").h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
-          .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().text_size(12).text_color(t.foreground)))))
+      .when(!form, (e) => e.child(h_flex().flex_none().px(8).pt(8).gap(6).items_center()
+        .child(div().id("search").flex_1().min_w(0).h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().text_size(12).text_color(t.foreground)))
+        .child(div().id("current").flex_none().size(28).flex().items_center().justify_center().rounded(7).border_1().border_color(t.border).cursor_pointer()
+          .text_color(this.current ? t.foreground : t.muted).when(this.current, (s) => s.bg(t.selected)).when(!this.current, (s) => s.hover((st) => st.bg(t.hover)))
+          .tooltip(this.current ? "Showing the current sprint only · show all" : "Show the current sprint only")
+          .on_click((_e, cx) => { this.current = !this.current; localStorage.setItem("current", this.current ? "1" : "0"); cx.notify(); })
+          .child(svg("mods/jira/filter.svg").size(14)))))
       .child(div().flex_1().min_h(0).relative()
         .child(v_flex().id("jira-list").absolute().inset_0().overflow_y_scroll().p(6).gap(1)
           .when(form, (e) => e.child(this.formView(t)))

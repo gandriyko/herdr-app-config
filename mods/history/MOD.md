@@ -16,6 +16,7 @@ Lists the latest agent sessions of the active space's project, or searches promp
 ## Files
 - main.js: the whole mod (human-history calls, search, viewer, resume table).
 - icons/*.svg: back, copy, messages, refresh, star, star-outline, title icons.
+- icons/agents/*.svg: agent logos shown in each list row (claude, codex, opencode, copilot, pi, hermes; agent for any other), copied from Herdr's shipped `icons/`.
 
 ## Settings and data
 - localStorage: `scope` (titles only or prompts and answers).

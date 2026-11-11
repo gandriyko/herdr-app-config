@@ -1,4 +1,4 @@
-import { View, div, svg } from "gpui-kit";
+import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, TextView, InputState, Input } from "gpui-base";
 import { exec, home, theme, spaces, panes, run, notify } from "herdr";
 
@@ -25,6 +25,13 @@ const CARGO_BIN = "/.cargo/bin/" + BIN;
 const REPO ="https://github.com/gandriyko/human-history";
 const INSTALL = `cargo install --git ${REPO}`; // README: built from source, needs a Rust toolchain
 const SAFE_ID =/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/; // as human-history: never an option-looking id in argv
+
+// The agent's logo, copied from Herdr's icons/ (LobeHub, Lucide; see icons/LICENSES.md there). Claude and Codex
+// keep their colors; the rest are one-color glyphs tinted with the text color (pi's is white, so never as-is).
+const COLOR_ICONS = new Set(["claude", "codex"]);
+const TINT_ICONS = new Set(["opencode", "copilot", "pi", "hermes"]);
+const agentIcon = (agent, size) => COLOR_ICONS.has(agent) ? image(`mods/history/icons/agents/${agent}.svg`).size(size)
+  : svg(`mods/history/icons/agents/${TINT_ICONS.has(agent) ? agent : "agent"}.svg`).size(size);
 
 function resume(s) {
   const argv = RESUME[s.agent]?.(s.session_id);
@@ -191,7 +198,7 @@ export default class History extends View {
       .on_mouse_down("right", (_e, cx) => cx.write_to_clipboard(s.session_id))
       .child(v_flex().flex_1().min_w(0).gap(2)
         .child(h_flex().gap(6).items_center()
-          .child(div().flex_none().px(4).rounded(3).bg(t.raised).text_size(10).text_color(t.muted).child(s.agent))
+          .child(div().flex_none().text_color(t.muted).child(agentIcon(s.agent, 14)))
           .child(div().flex_1().min_w(0).truncate().child(s.title || "(untitled)")))
         // At most two lines of the snippet: gpui has no line_clamp, so cap the height.
         .when(Boolean(snippet), (e) => e.child(div().text_size(11).text_color(t.muted).max_h(31).overflow_hidden().child(snippet)))
