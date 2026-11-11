@@ -60,7 +60,8 @@ export default class Changes extends View {
     // The textarea is sized by this height, not by rows (a Textarea's layout height is its element's).
     this.commitH = Math.min(COMMIT_MAX, Math.max(COMMIT_MIN, Number(localStorage.getItem("commitH")) || 72));
     this.splitDrag = null;
-    this.input.set_rows(16);
+    // No set_rows: rows would set the textarea's own viewport (16 rows), taller than the clipped box,
+    // so it never scrolled to the lines below the box.
     this.input.on("change", (_e, cx) => {
       const hadMessage = Boolean(this.message.trim());
       this.message = this.input.value();
