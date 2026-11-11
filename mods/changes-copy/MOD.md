@@ -25,6 +25,7 @@ Extended copy of `changes`. Shows uncommitted or branch-scope changes as list or
 
 ## Notes
 - Timers: 10 s refresh, 2 s context check; `watchFolder` with a generation flag; git calls time out at 180 s, AI runs at 600 s.
+- Generate sends the diff (first 60000 chars), `git status --short --branch` and the repo's own commit rules: the tracked agent docs that mention commit messages most (`CLAUDE.md`, `AGENTS.md`, `.claude/**/*.md`, `.github/**/*.md`, `.cursor/**`), then `CLAUDE.md`; at most 4 files, 8000 chars each. They take precedence over the `wb-ai` template.
 - Depends on mods `wb-diff` and `wb-ai` being installed for diff tab and AI settings.
 - `wb.diff.request` (read by wb-diff) and `branch.switched` (read by status-copy) are documented contracts; optional where read.
 - ai.js is an intentional per-mod copy (isolation rule) with the same origin as wb-ai/ai.js; the `wb.ai.*` settings are shared on purpose with wb-ai, prs and changes-copy (documented contract, optional where read, defaults are created).

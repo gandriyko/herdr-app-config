@@ -67,6 +67,21 @@ function approvedBy(reviews) {
 }
 const when = (iso) => iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "";
 
+// The repo's own rules for a PR, as "### path\n<text>" blocks: the GitHub PR template, then tracked agent docs
+// (.claude rules/skills/commands, .github instructions, AGENTS.md) that mention pull requests most, then CLAUDE.md.
+// ponytail: found by grep, capped at 6 files × 8000 chars; a repo that keeps PR rules elsewhere needs its path here.
+const PR_TEMPLATES = [".github/pull_request_template.md", ".github/PULL_REQUEST_TEMPLATE.md", "pull_request_template.md", "PULL_REQUEST_TEMPLATE.md", "docs/pull_request_template.md", ".github/PULL_REQUEST_TEMPLATE/*.md"];
+async function prRules(root, on) {
+  const git = (args) => exec("git", args, { cwd: root, on, timeout: 10000 }).catch(() => null);
+  const [tpl, hits] = await Promise.all([git(["ls-files", "--", ...PR_TEMPLATES]),
+    git(["grep", "-c", "-i", "-I", "-E", "pull request|gh pr create", "--", "CLAUDE.md", "AGENTS.md", ".claude/*.md", ".github/*.md", ".cursor/*"])]);
+  const lines = (r) => r?.code === 0 ? r.stdout.split("\n").filter(Boolean) : [];
+  const ranked = lines(hits).map((l) => l.split(/:(\d+)$/)).sort((a, b) => b[1] - a[1]).map(([p]) => p);
+  const paths = [...new Set([...lines(tpl).slice(0, 1), ...ranked.filter((p) => !PR_TEMPLATES.includes(p)), "CLAUDE.md"])].slice(0, 6);
+  const texts = await Promise.all(paths.map((p) => readTextFile(`${root}/${p}`, { on }).catch(() => null)));
+  return paths.map((p, i) => texts[i]?.trim() ? `### ${p}\n${texts[i].trim().slice(0, 8000)}` : "").filter(Boolean).join("\n\n");
+}
+
 // "owner/name" from a git remote URL (https or ssh), or null.
 const repoName = (url) => /[:/]([^/:]+\/[^/]+?)(?:\.git)?\/?$/.exec(url)?.[1] ?? null;
 
@@ -259,10 +274,10 @@ export default class Prs extends View {
         const git = (args) => exec("git", args, { cwd: cr.root, on: cr.on });
         const [log, diff] = await Promise.all([git(["log", "--format=- %s", "-n", "30", `origin/${base}..HEAD`]), git(["diff", "--no-color", `origin/${base}...HEAD`])]);
         if (diff.code !== 0) throw new Error((diff.stderr || "git diff failed").trim().split("\n").pop());
-        const rules = (await readTextFile(`${cr.root}/CLAUDE.md`, { on: cr.on }).catch(() => null))?.trim().slice(0, 8000);
+        const rules = await prRules(cr.root, cr.on);
         const prompt = "Write a pull request for these changes. Line 1: the title, up to 72 characters, imperative mood, plain text (no quotes, no markdown, no trailing period). "
           + `Then one blank line, then the description. The description: ${cfg.template} `
-          + `${rules ? `The project's rules (CLAUDE.md); follow what they say about pull requests and their titles:\n${rules}\n\n` : ""}Reply with the title and the description only, nothing else. ${languageLine(cfg.language)}`;
+          + `${rules ? `The project's own files below take precedence over the description format above: follow what they say about pull request titles and descriptions, and keep the sections of the PR template if there is one (fill them, don't add new checklist items). Ignore their steps for running commands (push, gh, reviewers, labels): only the title and description are wanted.\n\n${rules}\n\n` : ""}Reply with the title and the description only, nothing else. ${languageLine(cfg.language)}`;
         const text = `Branch ${cr.branch} into ${base}.\n\nCommits:\n${log.stdout}\n\nDiff:\n${(diff.stdout || "").slice(0, 60000)}`;
         const out = await runModel(model, `${prompt}\n\n${text}`, { cwd: cr.root, on: cr.on });
         if (!out) throw new Error("the model returned nothing");
