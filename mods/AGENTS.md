@@ -4,6 +4,14 @@ The root AGENTS.md (rewritten by Herdr on every start, don't edit) explains the 
 rules for every mod we write or change; `CLAUDE.md` at the root imports this file. Check each one
 before calling a mod done, along with `herdr-app check mods/<name>`.
 
+## Scope: change only our mods
+
+Our mods are the ones tracked in git: whitelisted in `.gitignore` and listed in `mods/README.md`.
+Every other folder in `mods/` (e.g. `changes`, `tabs`, `pane`) is shipped with Herdr or someone
+else's, and is replaced on every start, so never edit it. To change its behaviour, fork it into a
+`-copy` mod (like `changes-copy`), whitelist it in `.gitignore` and add it to the index. When a
+request names a mod that has an `-copy` of ours, change the copy.
+
 ## Performance: CPU and memory
 
 Every mod runs inside the Herdr window process. Each `cx.notify()` redraws the **whole window**, and
