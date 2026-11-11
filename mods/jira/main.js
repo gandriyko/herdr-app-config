@@ -1,6 +1,6 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
-import { exec, theme, shared, setShared, spaces, panes, focused, run, knownAgents } from "herdr";
+import { exec, theme, shared, setShared, spaces, panes, focused, run, knownAgents, props, openOverlay, closeOverlay } from "herdr";
 import { Buffer } from "buffer";
 
 // My open Jira issues grouped by sprint, plus the project's backlog. Click opens the issue in Jira;
@@ -60,6 +60,33 @@ function sprintOf(sprints) {
   return list.find((s) => s.state === "active") ?? list.find((s) => s.state === "future") ?? null;
 }
 
+// Branch for a task: "DA-123-derive-sap-item-line-account" (key + first words of the title, kebab-case).
+const branchFor = (key, summary) => {
+  const words = (summary ?? "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").split("-").filter(Boolean);
+  let s = "";
+  for (const w of words) { if ((s + "-" + w).length > 40) break; s += "-" + w; }
+  return key + s;
+};
+// Tab/space name: "DA-123 First words of the title" (whole words, about 30 chars of title).
+const tabName = (key, summary) => {
+  let s = "";
+  for (const w of (summary ?? "").trim().split(/\s+/).filter(Boolean)) { if (s && (s + " " + w).length > 30) break; s = s ? s + " " + w : w; }
+  return s ? `${key} ${s.slice(0, 40)}` : key;
+};
+// A worktree sits next to the main checkout: <parent>/<repo>-<branch slug> (as dokka-backend's own recipe does).
+const worktreeSlug = (branch) => branch.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+const worktreePath = (main, branch) => `${main.replace(/\/[^/]+$/, "")}/${main.split("/").pop()}-${worktreeSlug(branch)}`;
+
+// The agent's first message. One line: a newline could send it early.
+// ponytail: the setup steps are left to the agent and the repo's own docs (which env files, certificates, deps).
+const worktreeTask = ({ key, summary, path, branch, base, main }) =>
+  `${key}: ${summary} — You are in a new git worktree ${path} on branch ${branch}, created from origin/${base}; the main checkout is ${main}. ` +
+  `First prepare this worktree as the repo's own docs say (CLAUDE.md, AGENTS.md, .claude/, README): copy the gitignored files it needs from the main checkout ` +
+  `(env files, certificates, local config), install dependencies, and list what you copied; don't change the main checkout. Then work on ${key}.`;
+const branchTask = ({ key, summary, branch, base }) =>
+  `${key}: ${summary} — First run git fetch origin, then create and switch to branch ${branch} from origin/${base}, following the repo's own rules ` +
+  `(CLAUDE.md, AGENTS.md, .claude/). If the working tree has uncommitted changes, stop and ask me what to do with them. Then work on ${key}.`;
+
 const normalizeSite = (text) => {
   const site = text.trim().replace(/\/+$/, "");
   return site && !/^https?:\/\//.test(site) ? `https://${site}` : site;
@@ -67,6 +94,8 @@ const normalizeSite = (text) => {
 
 export default class Jira extends View {
   init(_props, cx) {
+    // Opened as the "Start session" dialog of an issue (see openStart).
+    if (props()?.start) { this.initStart(cx); return; }
     this.groups = []; this.backlog = []; this.count = 0; this.error = null; this.loading = false;
     this.setup = false; this.editing = false; this.saving = false; this.formError = null; this.savedEmail = null; this.query = "";
     const input = (placeholder) => { const s = InputState.new({ placeholder }); s.on("submit", (_e, cx) => this.save(cx)); return s; };
@@ -234,17 +263,111 @@ export default class Jira extends View {
         : div().text_size(11).text_color(this.agentsError ? t.ansi1 : t.dim).child(this.agentsError ?? "No installed agents found"));
   }
 
-  // A new tab running the picked agent (default Claude Code) in the focused folder (else the space's), named and
-  // first-messaged with the task key: the repo's own rules (e.g. a jira-ticket skill) take it from there.
-  // An agent no longer installed there still starts by its key as the command, so the error shows in the tab.
-  startSession(key, cx) {
+  // Opens the "Start session" dialog for an issue, for the focused folder (else the space's) and its machine.
+  openStart(key) {
     const space = spaces().find((s) => s.active), f = focused();
     const pane = f?.pane ? panes().find((p) => p.pane === f.pane) : null;
-    const folder = pane?.cwd || f?.cwd || space?.folder, want = this.settings().agent ?? "claude";
-    cx.spawn(async () => {
-      const agent = await knownAgents({ on: space?.machine ?? null }).then((all) => all.find((a) => a.key === want && a.installed), () => null);
-      run("tab.new", { name: key, argv: agent?.run ?? [want], task: key, ...(folder ? { folder } : {}) });
+    const summary = [...this.groups.flatMap((g) => g.issues), ...this.backlog].find((i) => i.key === key)?.fields.summary ?? "";
+    openOverlay({ mod: "jira", kind: "dialog", width: 580, height: 360,
+      props: { start: { key, summary, folder: pane?.cwd || f?.cwd || space?.folder || null, on: space?.machine ?? null } } });
+  }
+
+  // The dialog: new worktree (the mod creates it from origin/<base>, then a new space runs the agent there and the
+  // agent copies env files etc. per the repo's docs) or a new branch here (the agent creates it). Outside a git
+  // repo it only starts the agent with the task. An agent no longer installed starts by its key, so the error shows.
+  initStart(cx) {
+    const s = props().start;
+    this.st = { ...s, mode: "worktree", git: null, error: null, busy: false };
+    this.stBranch = InputState.new({ value: branchFor(s.key, s.summary), placeholder: "branch name" });
+    this.stBase = InputState.new({ value: "", placeholder: "base branch, e.g. master" });
+    for (const i of [this.stBranch, this.stBase]) i.on("submit", (_e, cx) => this.start(cx));
+    cx.spawn(async (cx) => {
+      const git = (args) => exec("git", args, { cwd: s.folder, on: s.on, timeout: 15000 }).catch(() => null);
+      const common = s.folder ? await git(["rev-parse", "--path-format=absolute", "--git-common-dir"]) : null;
+      if (common?.code === 0) {
+        // The main checkout (not a worktree's folder) and the remote's default branch.
+        const main = common.stdout.trim().replace(/\/\.git\/?$/, "");
+        const head = await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+        const home = await exec("sh", ["-c", 'printf %s "$HOME"'], { on: s.on }).catch(() => null);
+        this.st.git = { main, repo: main.split("/").pop(), home: home?.stdout.trim() || "~" };
+        this.stBase.set_value(head?.code === 0 ? head.stdout.trim().replace(/^origin\//, "") : "master");
+      } else this.st.git = false;
+      cx.notify();
     });
+  }
+
+  start(cx) {
+    const st = this.st;
+    if (st.busy || st.git === null) return;
+    const branch = this.stBranch.value().trim(), base = this.stBase.value().trim().replace(/^origin\//, "");
+    const want = this.settings().agent ?? "claude";
+    const fail = (m) => { st.error = m; st.busy = false; cx.notify(); };
+    if (st.git && (!branch || /\s/.test(branch))) return fail("Branch name without spaces");
+    if (st.git && !base) return fail("Base branch, e.g. master");
+    st.busy = true; st.error = null; cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const agent = await knownAgents({ on: st.on }).then((all) => all.find((a) => a.key === want && a.installed), () => null);
+        const argv = agent?.run ?? [want];
+        if (st.git && st.mode === "worktree") {
+          const git = (args, timeout = 30000) => exec("git", args, { cwd: st.git.main, on: st.on, timeout });
+          const path = worktreePath(st.git.main, branch);
+          const fetched = await git(["fetch", "origin", base], 120000);
+          if (fetched.code !== 0) return fail(`git fetch origin ${base}: ${(fetched.stderr || fetched.stdout).trim().split("\n").pop()}`);
+          const added = await git(["worktree", "add", "-b", branch, path, `origin/${base}`]);
+          if (added.code !== 0) return fail(`git worktree add: ${(added.stderr || added.stdout).trim().split("\n").pop()}`);
+          run("space.new", { name: tabName(st.key, st.summary), folder: path, machine: st.on ?? "", argv,
+            task: worktreeTask({ key: st.key, summary: st.summary, path, branch, base, main: st.git.main }) });
+        } else {
+          const task = st.git ? branchTask({ key: st.key, summary: st.summary, branch, base }) : `${st.key}: ${st.summary}`;
+          run("tab.new", { name: tabName(st.key, st.summary), argv, task, ...(st.folder ? { folder: st.folder } : {}) });
+        }
+        closeOverlay(props().overlay);
+      } catch (e) { fail(String(e.message ?? e)); }
+    });
+  }
+
+  startView(t) {
+    const st = this.st, agentName = this.settings().agentName ?? "Claude Code";
+    // A choice card: a radio dot and a title, a short wrapped line under it. min_w(0) lets two share the row.
+    const choice = (mode, title, about) => {
+      const on = st.mode === mode;
+      return h_flex().id(`mode-${mode}`).flex_1().min_w(0).p(10).gap(10).items_start().rounded(8).border_1().cursor_pointer()
+        .border_color(on ? t.accent : t.border).bg(on ? t.selected : t.background).hover((s) => s.border_color(t.accent))
+        .on_click((_e, cx) => { st.mode = mode; cx.notify(); })
+        .child(div().mt(2).size(14).flex_none().flex().items_center().justify_center().rounded(7).border_1().border_color(on ? t.accent : t.muted)
+          .child(div().size(6).rounded(3).bg(on ? t.accent : t.background)))
+        .child(v_flex().flex_1().min_w(0).gap(2)
+          .child(div().text_size(12).font_semibold().child(title))
+          .child(div().text_size(11).text_color(t.dim).child(about)));
+    };
+    const button = (id, label, primary, onClick) => div().id(id).h(28).px(14).flex().items_center().justify_center().rounded(7).text_size(12)
+      .cursor_pointer().bg(primary ? t.solid : t.raised).text_color(primary ? t.solid_foreground : t.foreground).hover((s) => s.opacity(0.9)).on_click(onClick).child(label);
+    const tilde = (p) => st.git?.home && p?.startsWith(st.git.home) ? "~" + p.slice(st.git.home.length) : p;
+    const where = !st.git ? null : st.mode === "worktree"
+      ? `Opens a new space in ${tilde(worktreePath(st.git.main, this.stBranch.value().trim()))}`
+      : `Opens a new tab in ${tilde(st.folder)}; the agent creates the branch`;
+    return v_flex().id("start").size_full().bg(t.background).text_color(t.foreground).text_size(12)
+      .child(v_flex().flex_none().px(16).pt(14).pb(12).gap(4).border_b(1).border_color(t.border)
+        .child(div().font_semibold().text_size(14).child(`Start ${agentName} session`))
+        .child(h_flex().gap(6).items_center().min_w(0)
+          .child(div().flex_none().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(st.key))
+          .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(st.summary))))
+      .child(v_flex().flex_1().min_h(0).px(16).py(14).gap(14)
+        .child(st.git === null ? div().text_color(t.dim).child("Checking the folder…")
+          : st.git === false ? div().text_color(t.dim).child(`${tilde(st.folder) ?? "No folder"} is not a git repository: the agent starts there with the task.`)
+          : v_flex().gap(14)
+            .child(h_flex().gap(8).items_stretch()
+              .child(choice("worktree", "New worktree", "Own folder and space; the agent copies env files and certificates"))
+              .child(choice("branch", "New branch here", `In the current ${st.git.repo} folder`)))
+            .child(h_flex().gap(8).items_end()
+              .child(div().flex_1().min_w(0).child(this.field("st-branch", "Branch", this.stBranch, t)))
+              .child(div().w(150).flex_none().child(this.field("st-base", "From origin/", this.stBase, t))))
+            .child(div().text_size(11).text_color(t.dim).truncate().child(where)))
+        .when(Boolean(st.error), (e) => e.child(div().text_size(11).text_color(t.ansi1).child(st.error))))
+      .child(h_flex().flex_none().px(16).py(12).gap(8).justify_end().border_t(1).border_color(t.border)
+        .child(button("st-cancel", "Cancel", false, () => closeOverlay(props().overlay)))
+        .child(button("st-start", st.busy ? (st.mode === "worktree" ? "Creating worktree…" : "Starting…") : "Start", true, (_e, cx) => this.start(cx))));
   }
 
   menuView(t) {
@@ -257,7 +380,7 @@ export default class Jira extends View {
       // The menu floats over issue rows: without this the press falls through to the row below and opens Jira.
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .child(item("menu-copy-key", "Copy task ID", (cx) => cx.write_to_clipboard(key)))
-      .child(item("menu-session", `Start ${this.settings().agentName ?? "Claude Code"} session`, (cx) => this.startSession(key, cx)));
+      .child(item("menu-session", `Start ${this.settings().agentName ?? "Claude Code"} session…`, () => this.openStart(key)));
   }
 
   groupHeader(name, count, t) {
@@ -286,11 +409,12 @@ export default class Jira extends View {
       // Start a Claude session for this task; the press stops here, so the row doesn't open Jira.
       .child(div().id(`session-${section}-${issue.key}`).flex_none().size(18).flex().items_center().justify_center().rounded(4)
         .text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(`Start a ${this.settings().agentName ?? "Claude Code"} session for ${issue.key}`)
-        .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.startSession(issue.key, cx); })
+        .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.openStart(issue.key); })
         .child(svg("mods/jira/session.svg").size(12)));
   }
 
   render(cx) {
+    if (this.st) return this.startView(theme());
     const t = theme(), q = this.query, form = this.setup || this.editing;
     const match = (issue) => !q || issue.key.toLowerCase().includes(q) || (issue.fields.summary ?? "").toLowerCase().includes(q);
     const groups = this.groups.map((g) => ({ ...g, issues: g.issues.filter(match) })).filter((g) => g.issues.length);
