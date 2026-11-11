@@ -33,14 +33,50 @@ const TINT_ICONS = new Set(["opencode", "copilot", "pi", "hermes"]);
 const agentIcon = (agent, size) => COLOR_ICONS.has(agent) ? image(`mods/history/icons/agents/${agent}.svg`).size(size)
   : svg(`mods/history/icons/agents/${TINT_ICONS.has(agent) ? agent : "agent"}.svg`).size(size);
 
-function resume(s) {
+async function resume(s) {
   const argv = RESUME[s.agent]?.(s.session_id);
   if (!argv || !SAFE_ID.test(s.session_id)) {
     notify({ title: "Can't resume", body: `${s.agent} session ${s.session_id}`, level: "error" });
     return;
   }
   // The session's own folder, so the agent finds its history; the active space keeps it with this project.
-  run("tab.new", { argv, ...(s.cwd ? { folder: s.cwd } : {}) });
+  let folder = s.cwd || null;
+  // A removed worktree leaves sessions whose folder is gone (tab.new then fails with "cannot start /bin/zsh"):
+  // resume in the main checkout of the active space's repo instead.
+  if (folder && !(await ok("test", ["-d", folder]))) {
+    const moved = await mainCheckout();
+    if (!moved) {
+      notify({ title: "Can't resume: folder is gone", body: folder, level: "error" });
+      return;
+    }
+    // Claude looks a session up only under its folder's project dir (~/.claude/projects/<path, non-alnum → "-">),
+    // so copy the conversation there; other agents find a session by id from anywhere.
+    // ponytail: ignores CLAUDE_CONFIG_DIR; subagent transcripts (<id>/) are not copied.
+    if (s.agent === "claude" && !(await ok("/bin/sh", ["-c",
+      'src=$(ls "$HOME"/.claude/projects/*/"$1".jsonl 2>/dev/null | head -n 1); [ -n "$src" ] || exit 1; ' +
+      'dst="$HOME/.claude/projects/$2"; mkdir -p "$dst" && { [ -e "$dst/$1.jsonl" ] || cp "$src" "$dst/"; }',
+      "sh", s.session_id, moved.replace(/[^A-Za-z0-9]/g, "-")]))) {
+      notify({ title: "Can't resume: conversation file not found", body: `claude session ${s.session_id}`, level: "error" });
+      return;
+    }
+    notify({ title: "Resumed in the main checkout", body: `${folder} is gone; opened in ${moved}. Its uncommitted changes are lost.` });
+    folder = moved;
+  }
+  // Named after the session: an unnamed tab shows its number until the agent sets a terminal title, if ever.
+  const t = (s.title ?? "").trim().replace(/\s+/g, " ");
+  const name = t.length > 40 ? t.slice(0, 40).replace(/\s+\S*$/, "") + "…" : t;
+  run("tab.new", { argv, ...(name ? { name } : {}), ...(folder ? { folder } : {}) });
+}
+
+const ok = async (cmd, args) => (await exec(cmd, args, { timeout: 5000 }).catch(() => ({ code: 1 }))).code === 0;
+
+// The active space's repo, its main worktree (the parent of the shared .git dir); else the active folder.
+async function mainCheckout() {
+  const at = place();
+  if (!at) return null;
+  const r = await exec("git", ["-C", at, "rev-parse", "--path-format=absolute", "--git-common-dir"], { timeout: 5000 }).catch(() => null);
+  const git = r?.code === 0 ? r.stdout.trim() : "";
+  return git.endsWith("/.git") ? git.slice(0, -5) : at;
 }
 
 // Where the active space works now: its focused terminal's folder, else the first known one (as tabs-copy).

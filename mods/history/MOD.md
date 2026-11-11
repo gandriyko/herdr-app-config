@@ -4,14 +4,14 @@ summary: Search and read past agent sessions (Claude, Codex, ...) via the human-
 source: https://github.com/gandriyko/herdr-app-config/tree/main/mods/history
 install: copy the folder mods/history into ~/.config/herdr-app/mods/history
 place: none
-needs: [human-history, sh, env, open]
+needs: [human-history, sh, env, open, git, test]
 shared_keys: []
 reads_keys: []
 commands: [tab.new (resume a session in a new tab)]
 ---
 
 ## What it does
-Lists the latest agent sessions of the active space's project, or searches prompts and answers while typing. A click opens the conversation as Markdown (paged), with favorite, copy session id and Resume (new tab running the agent's resume command). If `human-history` is missing it shows an install hint with a link to the repository.
+Lists the latest agent sessions of the active space's project, or searches prompts and answers while typing. A click opens the conversation as Markdown (paged), with favorite, copy session id and Resume (new tab named after the session title, running the agent's resume command). If `human-history` is missing it shows an install hint with a link to the repository.
 
 ## Files
 - main.js: the whole mod (human-history calls, search, viewer, resume table).
@@ -23,6 +23,7 @@ Lists the latest agent sessions of the active space's project, or searches promp
 - human-history keeps its own index and favorites.
 
 ## Notes
+- Resume when the session's folder is gone (a removed worktree): opens it in the main checkout of the active space's repo and says so. For Claude it first copies `~/.claude/projects/*/<id>.jsonl` into that checkout's project dir (Claude finds a session only there); other agents resume by id from any folder.
 - Limit 50 results, 30 messages per page.
 - Timers: `human-history index` every 5 min, 2 s check for a changed space/folder, 250 ms search debounce.
 - Standalone. Needs `human-history` on PATH or at `~/.cargo/bin/human-history` (Herdr started from the Dock has a short PATH, so the mod tries both).
