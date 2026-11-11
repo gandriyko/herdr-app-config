@@ -1,10 +1,11 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
-import { exec, theme, shared, setShared } from "herdr";
+import { exec, theme, shared, setShared, spaces, panes, focused, run, knownAgents } from "herdr";
 import { Buffer } from "buffer";
 
 // My open Jira issues grouped by sprint, plus the project's backlog. Click opens the issue in Jira;
-// right-click: Copy task ID.
+// right-click: Copy task ID, Start agent session. The row's terminal button starts that session too; which agent
+// (Herdr's knownAgents(), e.g. Claude Code or Codex) is picked in the settings form and saved in "jira.settings".agent.
 // Settings (site, project) live in Herdr's shared state ("jira.settings"); the email and API token
 // in the macOS Keychain (service herdr-jira, account = email). Nothing personal is in this repo.
 // ponytail: an API token, not OAuth — OAuth needs a registered app with a secret and a local
@@ -93,7 +94,18 @@ export default class Jira extends View {
     this.token.set_value(""); this.formError = null;
   }
 
-  openSettings(cx) { this.fillForm(); this.editing = !this.editing; cx.notify(); }
+  openSettings(cx) { this.fillForm(); this.editing = !this.editing; if (this.editing) this.loadAgents(cx); cx.notify(); }
+
+  // The agents installed on the active space's machine, for the session picker in the form.
+  loadAgents(cx) {
+    const on = spaces().find((s) => s.active)?.machine ?? null;
+    this.agents = null; this.agentsError = null;
+    cx.spawn(async (cx) => {
+      try { this.agents = (await knownAgents({ on })).filter((a) => a.installed); }
+      catch (e) { this.agents = []; this.agentsError = String(e.message ?? e); }
+      cx.notify();
+    });
+  }
 
   refresh(cx) {
     // Herdr's fetch has no timeout or abort: a request that hangs would keep `loading` (and so every
@@ -171,7 +183,7 @@ export default class Jira extends View {
           if (r.code !== 0) throw new Error(`Keychain: ${(r.stderr || r.stdout).trim()}`);
           this.token.set_value(""); this.savedEmail = email;
         }
-        setShared(SETTINGS, { site, project, base });
+        setShared(SETTINGS, { ...this.settings(), site, project, base }); // keeps the agent picked below
         this.sprintField = undefined; this.verified = true; this.setup = false; this.editing = false;
       } catch (e) {
         this.formError = e.status === 401 || e.status === 403
@@ -202,11 +214,38 @@ export default class Jira extends View {
         .child(button("open-token-page", "Open token page", false, () => exec("open", [TOKEN_PAGE])))
         .child(button("save", this.saving ? "Checking…" : "Save", true, (_e, cx) => this.save(cx))))
       .when(this.editing, (e) => e.child(button("cancel", "Cancel", false, (_e, cx) => { this.editing = false; cx.notify(); })))
+      .when(this.editing, (e) => e.child(this.agentPicker(t)))
       .when(Boolean(this.formError), (e) => e.child(div().text_size(11).text_color(t.ansi1).child(this.formError)))
       .child(div().text_size(10).text_color(t.dim).child("Checked against Jira before saving. The token goes to the macOS Keychain (herdr-jira); a token with scopes needs read:jira-work and read:jira-user."));
   }
 
   url(key) { return `${this.settings().site}/browse/${key}`; }
+
+  // The agent for task sessions, one click to pick (saved at once, apart from Save): the installed ones of knownAgents().
+  agentPicker(t) {
+    const cur = this.settings().agent ?? "claude";
+    const pill = (a) => div().id(`agent-${a.key}`).h(24).px(10).flex().items_center().rounded(6).border_1().text_size(12).cursor_pointer()
+      .border_color(a.key === cur ? t.accent : t.border).text_color(a.key === cur ? t.accent : t.foreground).hover((s) => s.bg(t.hover))
+      .on_click((_e, cx) => { setShared(SETTINGS, { ...this.settings(), agent: a.key, agentName: a.name }); cx.notify(); }).child(a.name);
+    return v_flex().gap(4)
+      .child(div().text_size(10).text_color(t.dim).child("Agent for task sessions"))
+      .child(this.agents === null ? div().text_size(11).text_color(t.dim).child("Checking installed agents…")
+        : this.agents.length ? h_flex().gap(6).flex_wrap().children(this.agents.map(pill))
+        : div().text_size(11).text_color(this.agentsError ? t.ansi1 : t.dim).child(this.agentsError ?? "No installed agents found"));
+  }
+
+  // A new tab running the picked agent (default Claude Code) in the focused folder (else the space's), named and
+  // first-messaged with the task key: the repo's own rules (e.g. a jira-ticket skill) take it from there.
+  // An agent no longer installed there still starts by its key as the command, so the error shows in the tab.
+  startSession(key, cx) {
+    const space = spaces().find((s) => s.active), f = focused();
+    const pane = f?.pane ? panes().find((p) => p.pane === f.pane) : null;
+    const folder = pane?.cwd || f?.cwd || space?.folder, want = this.settings().agent ?? "claude";
+    cx.spawn(async () => {
+      const agent = await knownAgents({ on: space?.machine ?? null }).then((all) => all.find((a) => a.key === want && a.installed), () => null);
+      run("tab.new", { name: key, argv: agent?.run ?? [want], task: key, ...(folder ? { folder } : {}) });
+    });
+  }
 
   menuView(t) {
     const { key, x, y } = this.menu, w = 200;
@@ -217,7 +256,8 @@ export default class Jira extends View {
       .on_mouse_down_out((_e, cx) => { this.menu = null; cx.notify(); })
       // The menu floats over issue rows: without this the press falls through to the row below and opens Jira.
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-      .child(item("menu-copy-key", "Copy task ID", (cx) => cx.write_to_clipboard(key)));
+      .child(item("menu-copy-key", "Copy task ID", (cx) => cx.write_to_clipboard(key)))
+      .child(item("menu-session", `Start ${this.settings().agentName ?? "Claude Code"} session`, (cx) => this.startSession(key, cx)));
   }
 
   groupHeader(name, count, t) {
@@ -242,7 +282,12 @@ export default class Jira extends View {
       .on_mouse_down("right", () => { this.menuKey = issue.key; })
       .child(div().flex_none().text_size(11).text_color(t.dim).child(issue.key))
       .child(div().flex_1().min_w(0).truncate().child(f.summary ?? ""))
-      .child(div().flex_none().max_w(96).truncate().text_size(10).text_color(color).child(f.status?.name ?? ""));
+      .child(div().flex_none().max_w(96).truncate().text_size(10).text_color(color).child(f.status?.name ?? ""))
+      // Start a Claude session for this task; the press stops here, so the row doesn't open Jira.
+      .child(div().id(`session-${section}-${issue.key}`).flex_none().size(18).flex().items_center().justify_center().rounded(4)
+        .text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(`Start a ${this.settings().agentName ?? "Claude Code"} session for ${issue.key}`)
+        .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.startSession(issue.key, cx); })
+        .child(svg("mods/jira/session.svg").size(12)));
   }
 
   render(cx) {
