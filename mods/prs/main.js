@@ -31,29 +31,34 @@ function ci(rollup) {
   return "ok";
 }
 
-// Copilot: "clean" if its latest review left no comments, "done" if it left some, "asked" while its request is pending, else "".
+// Copilot: "asked" while its request is pending (also a re-request after an earlier review: it is reviewing),
+// "clean" if its latest review left no comments, "done" if it left some, else "".
 // ponytail: matches the login by /copilot/i (its review login is copilot-pull-request-reviewer, the request's is Copilot).
 // ponytail: "no comments" is read from the review text: "No open issues" (ccr-overview-v2), or the older
 // "...generated no (new) comments."; gh gives no comment count. A new Copilot wording needs a new pattern here.
 const isCopilot = (x) => /copilot/i.test(x?.login ?? x?.name ?? "");
+// `gh pr list --json reviewRequests` leaves bots out, so the request comes from GraphQL as `pr.cpAsked` (copilotGql).
 const copilot = (pr) => {
+  if (pr.cpAsked || pr.reviewRequests?.some(isCopilot)) return "asked";
   const last = pr.reviews?.filter((r) => isCopilot(r.author)).pop();
-  if (last) return /no open issues|generated no (new )?comments/i.test(last.body ?? "") ? "clean" : "done";
-  return pr.reviewRequests?.some(isCopilot) ? "asked" : "";
+  return !last ? "" : /no open issues|generated no (new )?comments/i.test(last.body ?? "") ? "clean" : "done";
 };
 const reviewed = (state) => state === "done" || state === "clean";
 
-// Unresolved Copilot threads per PR number, as their first comments' URLs (a thread is Copilot's by its first comment);
-// one GraphQL call per repo.
-// ponytail: first 50 reviewed PRs × 100 threads; a failed call leaves the map empty (the row falls back to the review text).
-async function copilotOpen(repo, numbers, cwd, on) {
+// Per PR number: `asked` = Copilot is among the pending review requests (it is reviewing), `urls` = unresolved Copilot
+// threads as their first comments' URLs (a thread is Copilot's by its first comment); one GraphQL call per repo.
+// ponytail: first 50 PRs × 100 threads; a failed call leaves the map empty (the row falls back to gh's fields).
+async function copilotGql(repo, numbers, cwd, on) {
   const out = new Map(), [owner, name] = repo.split("/");
   if (!numbers.length) return out;
-  const prs = numbers.slice(0, 50).map((n) => `p${n}:pullRequest(number:${n}){reviewThreads(first:100){nodes{isResolved comments(first:1){nodes{author{login} url}}}}}`).join(" ");
+  const prs = numbers.slice(0, 50).map((n) => `p${n}:pullRequest(number:${n}){reviewRequests(first:20){nodes{requestedReviewer{... on Bot{login}}}} reviewThreads(first:100){nodes{isResolved comments(first:1){nodes{author{login} url}}}}}`).join(" ");
   const r = await exec("gh", ["api", "graphql", "-f", `query={repository(owner:${JSON.stringify(owner)},name:${JSON.stringify(name)}){${prs}}}`], { cwd, on, timeout: 60000 }).catch(() => null);
   try {
     for (const [k, pr] of Object.entries(JSON.parse(r.stdout).data.repository ?? {}))
-      if (pr) out.set(Number(k.slice(1)), pr.reviewThreads.nodes.filter((t) => !t.isResolved && isCopilot(t.comments.nodes[0]?.author)).map((t) => t.comments.nodes[0].url));
+      if (pr) out.set(Number(k.slice(1)), {
+        asked: pr.reviewRequests.nodes.some((n) => isCopilot(n.requestedReviewer)),
+        urls: pr.reviewThreads.nodes.filter((t) => !t.isResolved && isCopilot(t.comments.nodes[0]?.author)).map((t) => t.comments.nodes[0].url),
+      });
   } catch {}
   return out;
 }
@@ -219,9 +224,10 @@ export default class Prs extends View {
         await Promise.all([...repos].map(async ([k, r]) => {
           const old = this.byRepo.get(k);
           try {
-            const prs = await list(r.cwd, r.on);
-            const open = r.name ? await copilotOpen(r.name, prs.filter((pr) => reviewed(copilot(pr))).map((pr) => pr.number), r.cwd, r.on) : new Map();
-            this.byRepo.set(k, { name: r.name, prs: prs.map((pr) => ({ ...pr, cpBadge: copilotBadge(pr, open.get(pr.number)), repo: { cwd: r.cwd, on: r.on } })), error: null });
+            const listed = await list(r.cwd, r.on);
+            const gql = r.name ? await copilotGql(r.name, listed.map((pr) => pr.number), r.cwd, r.on) : new Map();
+            const prs = listed.map((pr) => ({ ...pr, cpAsked: gql.get(pr.number)?.asked ?? false }));
+            this.byRepo.set(k, { name: r.name, prs: prs.map((pr) => ({ ...pr, cpBadge: copilotBadge(pr, gql.get(pr.number)?.urls), repo: { cwd: r.cwd, on: r.on } })), error: null });
             for (const pr of prs) next.set(pr.url, { state: copilot(pr), pr });
           } catch (e) {
             this.byRepo.set(k, { name: r.name, prs: old?.prs ?? [], error: String(e.message ?? e) });
@@ -533,7 +539,7 @@ export default class Prs extends View {
     const s = open === 1 ? "" : "s";
     const cpTip = level === "high" ? (open ? `Copilot: ${open} open thread${s}, High or Medium among them` : "Copilot reviewed: left comments")
       : level === "low" ? `Copilot: ${open} open thread${s}, all Low` : level === "ok" ? "Copilot reviewed: no open threads"
-      : level === "asked" ? "Copilot review requested, no answer yet" : "Copilot not run yet";
+      : level === "asked" ? "Copilot is reviewing (requested, no answer yet)" : "Copilot not run yet";
     return v_flex().id(`pr-${pr.number}`).flex_none().px(8).py(4).gap(2).rounded(5).cursor_pointer()
       .hover((s) => s.bg(t.hover)).tooltip(`#${pr.number} ${pr.title}\n${pr.headRefName}`)
       .on_click(() => openOverlay({ mod: "prs", kind: "dialog", width: 780, height: 0.85, props: { pr } }))
@@ -541,11 +547,11 @@ export default class Prs extends View {
         .child(div().id(`ci-${pr.number}`).flex_none().size(9).flex().items_center().justify_center().tooltip(dotTip)
           .child(div().size(7).rounded(4).bg(dot ?? t.border)))
         // Copilot badge "C": filled red = open High/Medium threads; filled blue = only Low ones open;
-        // filled green = reviewed, none open; yellow outline = requested; faint = not run yet.
+        // filled green = reviewed, none open; yellow spinner = reviewing (requested); faint = not run yet.
         .child(div().id(`cp-${pr.number}`).flex_none().size(15).flex().items_center().justify_center().rounded(4).border_1().text_size(10).font_semibold()
           .border_color(fill ?? (level === "asked" ? t.working : t.border)).bg(fill ?? t.background)
           .text_color(fill ? t.background : level === "asked" ? t.working : t.dim)
-          .tooltip(cpTip).child("C"))
+          .tooltip(cpTip).child(level === "asked" ? svg("mods/prs/spinner.svg").size(11).text_color(t.working).spin(900) : "C"))
         .child(div().id(`ap-${pr.number}`).flex_none().size(15).flex().items_center().justify_center().tooltip(apTip)
           .child(svg(`mods/prs/${apIcon}.svg`).size(14).text_color(apColor)))
         .child(div().flex_none().text_size(11).text_color(t.dim).child(`#${pr.number}`))
