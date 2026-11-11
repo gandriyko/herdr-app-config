@@ -119,10 +119,11 @@ export default class Changes extends View {
         if (status.code !== 0) throw new Error(status.stderr);
         const head = await git(["rev-parse", "--verify", "HEAD"]);
         // Commits not pushed yet (↑), and whether the branch has an upstream at all.
-        let upstream = null, ahead = 0, behind = 0;
+        // pushNew: no upstream, or one with another name (a branch made from origin/main); plain `git push` refuses that.
+        let upstream = null, ahead = 0, behind = 0, pushNew = true;
         if (head.code === 0) {
-          const up = await git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]);
-          if (up.code === 0) { upstream = up.stdout.trim(); [ahead, behind] = (await git(["rev-list", "--left-right", "--count", "HEAD...@{u}"])).stdout.trim().split(/\s+/).map((n) => Number(n) || 0); }
+          const up = await git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "HEAD", "@{u}"]);
+          if (up.code === 0) { const [branch, u] = up.stdout.trim().split("\n"); upstream = u; pushNew = u.slice(u.indexOf("/") + 1) !== branch; [ahead, behind] = (await git(["rev-list", "--left-right", "--count", "HEAD...@{u}"])).stdout.trim().split(/\s+/).map((n) => Number(n) || 0); }
         }
         let against = head.code === 0 ? "HEAD" : null, base = null;
         // Branch scope: everything since the branch left its base (like a PR), including uncommitted work.
@@ -163,7 +164,7 @@ export default class Changes extends View {
           files.push({ path, status: s, fresh, ...stat });
         }
         if (stale()) return;
-        this.root = root; this.on = on; this.upstream = upstream; this.ahead = ahead; this.behind = behind; this.hasHead = head.code === 0; this.against = against; this.base = base; this.files = files; this.limited = entries.length > 1000; this.error = null;
+        this.root = root; this.on = on; this.upstream = upstream; this.pushNew = pushNew; this.ahead = ahead; this.behind = behind; this.hasHead = head.code === 0; this.against = against; this.base = base; this.files = files; this.limited = entries.length > 1000; this.error = null;
         this.watch(root, gitDir, cx);
         // The project (repo) key for per-project AI settings; cached in ai.js after the first lookup.
         const pk = await projectKey({ cwd: root, on });
@@ -182,7 +183,7 @@ export default class Changes extends View {
   }
 
   shownState() {
-    return JSON.stringify([this.context, this.root, this.upstream, this.ahead, this.behind, this.hasHead, this.against, this.base, this.files, this.limited, this.error, this.pk, this.open]);
+    return JSON.stringify([this.context, this.root, this.upstream, this.pushNew, this.ahead, this.behind, this.hasHead, this.against, this.base, this.files, this.limited, this.error, this.pk, this.open]);
   }
 
 
@@ -361,10 +362,10 @@ export default class Changes extends View {
     });
   }
 
-  // Push the branch: plain `git push`, or `git push -u origin HEAD` when it has no upstream yet.
+  // Push the branch: plain `git push`, or `git push -u origin HEAD` when it has no upstream of its own name yet.
   push(cx) {
     if (!this.root || this.pushing || this.pulling || this.busy || this.loading || this.context !== this.key()) return;
-    const root = this.root, on = this.on, context = this.context, args = this.upstream ? ["push"] : ["push", "-u", "origin", "HEAD"];
+    const root = this.root, on = this.on, context = this.context, args = !this.pushNew ? ["push"] : ["push", "-u", "origin", "HEAD"];
     this.pushing = true; this.note = null; cx.notify();
     cx.spawn(async (cx) => {
       try {
@@ -399,7 +400,7 @@ export default class Changes extends View {
     const t = theme(), add = this.files.reduce((n, f) => n + f.add, 0), del = this.files.reduce((n, f) => n + f.del, 0);
     const rows = this.listRows(), tree = this.view === "tree";
     const enabled = Boolean(this.message.trim() && this.root && !this.busy && !this.loading);
-    const pushEnabled = Boolean(this.root && this.hasHead && !this.pushing && !this.pulling && !this.busy && !this.loading && (this.ahead > 0 || !this.upstream));
+    const pushEnabled = Boolean(this.root && this.hasHead && !this.pushing && !this.pulling && !this.busy && !this.loading && (this.ahead > 0 || this.pushNew));
     const pullEnabled = Boolean(this.root && this.hasHead && this.upstream && !this.pulling && !this.pushing && !this.busy && !this.loading);
     const genEnabled = Boolean(this.root && !this.generating && !this.busy && !this.loading && this.context === this.key());
     const noBase = this.scope === "base" && Boolean(this.root) && !this.base && !this.loading;
@@ -466,7 +467,7 @@ export default class Changes extends View {
               .child(`Pull${this.behind > 0 ? ` ↓${this.behind}` : ""}`))
             .child(h_flex().id("push").h_full().px(12).gap(4).items_center().border_l(1).border_color(t.border).text_size(12)
               .text_color(pushEnabled ? (this.ahead > 0 ? t.accent : t.foreground) : t.dim).when(pushEnabled, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover)))
-              .tooltip(!this.root ? "No repository" : this.upstream ? (this.ahead ? `git push: ${this.ahead} commit${this.ahead === 1 ? "" : "s"} to ${this.upstream}` : `Nothing to push: ${this.upstream} is up to date`) : "No upstream yet: git push -u origin HEAD")
+              .tooltip(!this.root ? "No repository" : this.upstream && this.pushNew ? `Tracks ${this.upstream}, another name: git push -u origin HEAD` : this.upstream ? (this.ahead ? `git push: ${this.ahead} commit${this.ahead === 1 ? "" : "s"} to ${this.upstream}` : `Nothing to push: ${this.upstream} is up to date`) : "No upstream yet: git push -u origin HEAD")
               .on_click((_e, cx) => { if (pushEnabled) this.push(cx); })
               .child(this.pushing ? svg("mods/changes-copy/icons/spinner.svg").size(12).spin(900) : div())
               .child(`Push${this.ahead > 0 ? ` ↑${this.ahead}` : ""}`)))
