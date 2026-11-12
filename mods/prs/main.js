@@ -5,8 +5,8 @@ import { migrate, modelFor, settingsFor, projectKey, projectName, languageLine, 
 
 // My open pull requests in the repo of the focused folder, via the `gh` CLI. Click opens the PR in a popup
 // (description, who approved, comments and reviews); the popup has Open (browser) and Copy link.
-// The header switches between open PRs I authored (Mine) and every open PR of the repo (All); first 100.
-// ponytail: add `--search "review-requested:@me"` as a third choice if wanted.
+// The header switches between open PRs I authored plus those waiting for my review (Mine) and every open PR
+// of the repo (All); first 100.
 // A mod pane (a wb-diff tab) has no cwd: keep the last terminal folder of that space (`places`, per
 // instance) instead of the space folder, which may not be a repo.
 const PLACES_MAX = 50;
@@ -637,7 +637,7 @@ export default class Prs extends View {
         .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(q ? `${shown.length}/${this.prs.length}` : String(this.prs.length)))
         .child(div().flex_1().min_w(0).truncate().text_size(10).text_color(t.dim).child(this.repo))
         .child(h_flex().flex_none().h(24).p(2).gap(2).items_center().rounded(6).border_1().border_color(t.border)
-          .children([["mine", "Mine", false, "Only pull requests I opened"], ["all", "All", true, "Every open pull request of the repo"]].map(([id, label, all, tip]) =>
+          .children([["mine", "Mine", false, "Pull requests I opened and those waiting for my review"], ["all", "All", true, "Every open pull request of the repo"]].map(([id, label, all, tip]) =>
             div().id(`show-${id}`).h_full().px(6).flex().items_center().rounded(4).text_size(10).cursor_pointer().tooltip(tip)
               .bg(this.all === all ? t.hover : t.background).text_color(this.all === all ? t.foreground : t.muted)
               .on_click((_e, cx) => this.setAll(all, cx)).child(label))))
