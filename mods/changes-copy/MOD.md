@@ -20,11 +20,12 @@ Extended copy of `changes`. Shows uncommitted or branch-scope changes as list or
 - gpui-kit.d.ts, jsconfig.json: editor typings only.
 
 ## Settings and data
-- localStorage: `view` (list/tree), `scope`, `commitH` (commit box height).
+- localStorage: `view` (list/tree), `scope`, `commitH` (commit box height), `bases` (chosen base branch per repo root, last 50).
 - Shared state holds the AI model list, chosen models and per-project settings (see keys above).
 
 ## Notes
 - Timers: 10 s refresh, 2 s context check; `watchFolder` with a generation flag; git calls time out at 180 s, AI runs at 600 s.
+- Branch scope compares against the merge-base with the base branch: by default origin/HEAD, main or master. A click on the active branch button opens a picker of `main`, `master`, `release`, `release-beta`, `production`, `production-beta`, showing only those the repo has (`origin/<name>` preferred over the local branch, one `git for-each-ref` call), plus a field for any other branch (Enter; a missing one shows "no branch X" and the default is used).
 - Each file row of the uncommitted list, and each folder row in the tree, has a Discard button. It always opens a confirmation dialog (a dialog copy of this mod, `props.discard`) listing the files; the folder one covers every listed file under it, subfolders included. Confirmed: `git restore --source=HEAD --staged --worktree -- <tracked paths>` (a staged new file is removed, a conflict takes HEAD's side) and `git clean -f -- <untracked paths>`, with exactly the paths the list showed. Hidden in branch scope and before the first commit.
 - Generate sends the diff (first 60000 chars), `git status --short --branch` and the repo's own commit rules: the tracked agent docs that mention commit messages most (`CLAUDE.md`, `AGENTS.md`, `.claude/**/*.md`, `.github/**/*.md`, `.cursor/**`), then `CLAUDE.md`; at most 4 files, 8000 chars each. They take precedence over the `wb-ai` template.
 - Depends on mods `wb-diff` and `wb-ai` being installed for diff tab and AI settings.

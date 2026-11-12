@@ -1,5 +1,5 @@
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, TextareaState, Textarea, Scrollbar } from "gpui-base";
+import { v_flex, h_flex, TextareaState, Textarea, Scrollbar, InputState, Input } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, run, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
 import { migrate, models, modelFor, settingsFor, setUse, projectKey, projectName, languageLine, runModel, describe } from "./ai.js";
 
@@ -36,6 +36,9 @@ const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.a
 // The folder watch is recursive (node_modules, .git/objects too on macOS): a batch of only these paths can't change the list.
 // ponytail: a fixed list; ask `git check-ignore --stdin` per batch if another ignored folder floods it.
 const NOISE = /\/(node_modules|\.git\/(objects|logs)|target|\.venv|__pycache__|\.next|\.turbo|\.gradle)(\/|$)/;
+// Base branches the branch scope can compare against, offered only when the repo has them (origin/<name> or local).
+const BASES = ["main", "master", "release", "release-beta", "production", "production-beta"];
+const BASES_MAX = 50; // remembered choices (repo root -> branch name)
 const STATUS = { A: "Added", M: "Modified", D: "Deleted", U: "Conflict" };
 // Theme colors per status: four distinct hues, since the icon's color is all that tells them apart.
 const STATUS_COLOR = { A: "ansi2", M: "ansi4", D: "ansi1", U: "ansi5" };
@@ -66,6 +69,12 @@ export default class Changes extends View {
     if (props()?.discard) { this.discarding = false; this.discardError = null; return; }
     this.files = []; this.view = "list"; this.scope = "head"; this.collapsed = new Set();
     try { if (localStorage.getItem("view") === "tree") this.view = "tree"; if (localStorage.getItem("scope") === "base") this.scope = "base"; } catch {}
+    // The chosen base per repo root; none = the default (origin/HEAD, main, master).
+    this.baseChoice = new Map(); this.bases = []; this.basesOpen = false;
+    this.baseInput = InputState.new({ placeholder: "other branch" });
+    // The picker stays open after a typed branch, so "no branch X" shows where it was typed.
+    this.baseInput.on("submit", (_e, cx) => { this.setBase(this.baseInput.value(), cx); this.basesOpen = true; });
+    try { this.baseChoice = new Map(Object.entries(JSON.parse(localStorage.getItem("bases") || "{}"))); } catch {}
     migrate();
     this.message = ""; this.handle = cx.focus_handle(); this.generating = false;
     this.input = TextareaState.new({ placeholder: "Commit message" });
@@ -121,7 +130,7 @@ export default class Changes extends View {
     }
     if (!cwd) return;
     this.loading = true;
-    const scope = this.scope, stale = () => this.key() !== context || this.scope !== scope;
+    const scope = this.scope, baseGen = this.baseGen, stale = () => this.key() !== context || this.scope !== scope || this.baseGen !== baseGen;
     cx.spawn(async (cx) => {
       try {
         const top = await exec("git", ["rev-parse", "--show-toplevel", "--absolute-git-dir"], { cwd, on });
@@ -138,15 +147,24 @@ export default class Changes extends View {
           const up = await git(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "HEAD", "@{u}"]);
           if (up.code === 0) { const [branch, u] = up.stdout.trim().split("\n"); upstream = u; pushNew = u.slice(u.indexOf("/") + 1) !== branch; [ahead, behind] = (await git(["rev-list", "--left-right", "--count", "HEAD...@{u}"])).stdout.trim().split(/\s+/).map((n) => Number(n) || 0); }
         }
-        let against = head.code === 0 ? "HEAD" : null, base = null;
+        let against = head.code === 0 ? "HEAD" : null, base = null, bases = [], baseMissing = null;
         // Branch scope: everything since the branch left its base (like a PR), including uncommitted work.
         if (scope === "base" && against) {
-          for (const ref of ["origin/HEAD", "origin/main", "origin/master", "main", "master"]) {
-            const r = await git(["rev-parse", "--abbrev-ref", ref]);
+          // Which of BASES exist, as origin/<name> (fresher) or else the local branch: one call.
+          const refs = await git(["for-each-ref", "--format=%(refname:short)", ...BASES.flatMap((b) => [`refs/remotes/origin/${b}`, `refs/heads/${b}`])]);
+          const have = new Set(refs.code === 0 ? refs.stdout.split("\n").filter(Boolean) : []);
+          bases = BASES.map((b) => have.has(`origin/${b}`) ? `origin/${b}` : have.has(b) ? b : null).filter(Boolean);
+          // The chosen base (a listed one or typed in by hand) as origin/<name> first, then local.
+          const choice = this.baseChoice.get(root), chosen = choice ? [`origin/${choice}`, choice] : [];
+          for (const ref of [...chosen, "origin/HEAD", "origin/main", "origin/master", "main", "master"]) {
+            const r = await git(["rev-parse", "--verify", "--quiet", "--abbrev-ref", ref]);
             if (r.code !== 0) continue;
             const mb = await git(["merge-base", "HEAD", ref]);
             if (mb.code === 0) { base = r.stdout.trim(); against = mb.stdout.trim(); break; }
           }
+          // A typed branch the repo doesn't have: say so, compare with the default.
+          baseMissing = choice && !chosen.includes(base) ? choice : null;
+          if (base && !bases.includes(base)) bases.push(base);
         }
         const stats = {};
         const results = against ? [await git(["diff", against, "--numstat", "-z", "--no-renames"])] : [await git(["diff", "--cached", "--numstat", "-z", "--no-renames"]), await git(["diff", "--numstat", "-z", "--no-renames"])];
@@ -177,7 +195,7 @@ export default class Changes extends View {
           files.push({ path, status: s, fresh, ...stat });
         }
         if (stale()) return;
-        this.root = root; this.on = on; this.upstream = upstream; this.pushNew = pushNew; this.ahead = ahead; this.behind = behind; this.hasHead = head.code === 0; this.against = against; this.base = base; this.files = files; this.limited = entries.length > 1000; this.error = null;
+        this.root = root; this.on = on; this.upstream = upstream; this.pushNew = pushNew; this.ahead = ahead; this.behind = behind; this.hasHead = head.code === 0; this.against = against; this.base = base; this.bases = bases; this.baseMissing = baseMissing; this.files = files; this.limited = entries.length > 1000; this.error = null;
         this.watch(root, gitDir, cx);
         // The project (repo) key for per-project AI settings; cached in ai.js after the first lookup.
         const pk = await projectKey({ cwd: root, on });
@@ -187,7 +205,7 @@ export default class Changes extends View {
       } catch (e) { if (!stale()) this.error = String(e); }
       finally {
         this.loading = false;
-        if (this.scope !== scope) this.refresh(cx);
+        if (this.scope !== scope || this.baseGen !== baseGen) this.refresh(cx);
         else if (this.again) { this.again = false; cx.timer.after(500, (cx) => this.refresh(cx)); }
         // Redraw (the whole window) only when what the panel shows changed, or a frame drew "loading".
         if (this.drewLoading || this.shownState() !== shown) { this.drewLoading = false; cx.notify(); }
@@ -196,7 +214,7 @@ export default class Changes extends View {
   }
 
   shownState() {
-    return JSON.stringify([this.context, this.root, this.upstream, this.pushNew, this.ahead, this.behind, this.hasHead, this.against, this.base, this.files, this.limited, this.error, this.pk, this.open]);
+    return JSON.stringify([this.context, this.root, this.upstream, this.pushNew, this.ahead, this.behind, this.hasHead, this.against, this.base, this.bases, this.baseMissing, this.files, this.limited, this.error, this.pk, this.open]);
   }
 
 
@@ -208,10 +226,24 @@ export default class Changes extends View {
   }
 
   setScope(scope, cx) {
-    if (this.scope === scope) return;
-    this.scope = scope;
+    // A click on the branch scope while it is on opens (or closes) the base branch picker.
+    if (this.scope === scope) { if (scope === "base") { this.basesOpen = !this.basesOpen; cx.notify(); } return; }
+    this.scope = scope; this.basesOpen = false;
     try { localStorage.setItem("scope", scope); } catch {}
     this.files = []; this.open = null; this.note = null;
+    this.refresh(cx); cx.notify();
+  }
+
+  // Compare the branch against `ref` (origin/<name> or <name>), remembered per repo root.
+  setBase(ref, cx) {
+    const name = String(ref).trim().replace(/^origin\//, "");
+    if (!name) return;
+    this.basesOpen = false; this.baseInput.set_value("");
+    if (!this.root || (ref === this.base && !this.baseMissing)) { cx.notify(); return; }
+    this.baseChoice.delete(this.root); this.baseChoice.set(this.root, name);
+    if (this.baseChoice.size > BASES_MAX) this.baseChoice.delete(this.baseChoice.keys().next().value);
+    try { localStorage.setItem("bases", JSON.stringify(Object.fromEntries(this.baseChoice))); } catch {}
+    this.baseGen = (this.baseGen ?? 0) + 1; this.files = []; this.open = null; this.note = null;
     this.refresh(cx); cx.notify();
   }
 
@@ -497,10 +529,23 @@ export default class Changes extends View {
         .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(`${this.files.length} files`))
         .child(div().flex_1())
         .child(this.segment("scope", this.scope, [["head", "uncommitted", "Uncommitted changes"],
-          ["base", "branch", this.base ? `Branch changes vs ${this.base} (incl. uncommitted)` : noBase ? "No base branch (origin/HEAD, main, master) · showing uncommitted" : "Branch changes vs base"]],
+          ["base", "branch", this.base ? `Branch changes vs ${this.base} (incl. uncommitted) · click to pick the base` : noBase ? "No base branch (origin/HEAD, main, master) · showing uncommitted" : "Branch changes vs base"]],
           (v, cx) => this.setScope(v, cx), t, noBase ? "base" : null))
         .child(this.segment("view", this.view, [["list", "list", "List"], ["tree", "tree", "Tree"]], (v, cx) => this.setView(v, cx), t))
         .child(div().text_size(11).text_color(t.ansi2).child(`+${add}`)).child(div().text_size(11).text_color(t.ansi1).child(`−${del}`)))
+      // The base branch picker: the BASES this repo has, shown without "origin/".
+      // A vertical list (rows like the file list's), then a field for any other branch.
+      .when(this.basesOpen && this.scope === "base", (e) => e.child(v_flex().flex_none().p(6).gap(1).border_b(1).border_color(t.border).text_size(12)
+        .children(this.bases.map((ref) => h_flex().id(`base-${ref}`).h(26).flex_none().px(8).gap(GAP).items_center().rounded(RADIUS).cursor_pointer().tooltip(ref)
+          .text_color(ref === this.base ? t.foreground : t.muted)
+          .when(ref === this.base, (s) => s.bg(t.selected)).when(ref !== this.base, (s) => s.hover((h) => h.bg(t.hover)))
+          .on_click((_e, cx) => this.setBase(ref, cx))
+          .child(svg("mods/changes-copy/icons/branch.svg").size(13).flex_none().text_color(ref === this.base ? t.accent : t.dim))
+          .child(div().flex_1().min_w(0).truncate().child(ref.replace(/^origin\//, "")))))
+        // Any other branch by hand: Enter compares with it (origin/<name> first, then local).
+        .child(div().id("base-input").h(26).mt(4).flex_none().px(8).flex().items_center().rounded(RADIUS).border_1().border_color(t.border).cursor_text()
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.baseInput).w_full().text_size(12).text_color(t.foreground)))
+        .when(Boolean(this.baseMissing), (e) => e.child(div().px(8).pt(4).text_size(11).text_color(t.ansi1).child(`No branch ${this.baseMissing} · comparing with the default`)))))
       // overflow_y_scrollbar() wraps the list, so its flex sizing never reached the panel's layout.
       .child(div().flex_1().min_h(44).relative()
         .child(v_flex().id("changes-list").absolute().inset_0().overflow_y_scroll().p(6).children(rows.map((r) => {
