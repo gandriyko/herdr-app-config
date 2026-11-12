@@ -24,12 +24,21 @@ function togglePanel(id) {
   else { run("layout.select", { stack: "panel-body", child: id }); run("layout.show", { id: "panel" }); }
 }
 
+const openNewMenu = () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 });
+
 export default class Tabs extends View {
   init(_props, cx) {
     this.pressed = null;
     this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}");
-    // keys.json: "cmd-shift-j": "tabs-copy.jira" (any panel id works: tabs-copy.files, tabs-copy.changes).
-    cx.spawn(async () => { for (;;) { const id = await nextCommand(); if (panelsOf(layout()).some(([p]) => p === id)) togglePanel(id); } });
+    // keys.json: "cmd-shift-j": "tabs-copy.jira" (any panel id works: tabs-copy.files, tabs-copy.changes);
+    // "cmd-shift-t": "tabs-copy.new" opens the + popup.
+    cx.spawn(async () => {
+      for (;;) {
+        const id = await nextCommand();
+        if (id === "new") openNewMenu();
+        else if (panelsOf(layout()).some(([p]) => p === id)) togglePanel(id);
+      }
+    });
   }
 
   // The side panel is remembered per space: switching shows that space's choice
@@ -111,7 +120,7 @@ export default class Tabs extends View {
       .on_mouse_up("left", () => { this.pressed = null; })
       .on_scroll_wheel(e => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? "tab.prev" : "tab.next"); })
       .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().children(shown.map(item)))
-      .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
+      .child(button("tab-new", "+", openNewMenu))
       .children(panels.map(([id, label]) => panelButton(id, label)))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs-copy/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs-copy/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))

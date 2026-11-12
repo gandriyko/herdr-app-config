@@ -20,7 +20,7 @@ Draws the tab bar of the active space: program icon, agent topic as name, status
 - gpui-kit.d.ts, jsconfig.json: editor typings.
 
 ## Settings and data
-localStorage key `panels`: map of space id to the panel shown last. Key commands: bind `tabs-copy.<panel id>` (e.g. `tabs-copy.jira`) in keys.json to toggle a panel.
+localStorage key `panels`: map of space id to the panel shown last. Key commands: bind `tabs-copy.<panel id>` (e.g. `tabs-copy.jira`) in keys.json to toggle a panel; `tabs-copy.new` opens the `new-menu` popup (bound to cmd-shift-t).
 
 ## Notes
 No timers. Relies on the layout having nodes `sidebar`, `panel`, `panel-body`; without them the panel buttons are simply absent. Opens the `menu` and `new-menu` overlays (app mods); those buttons do nothing useful if the mods are removed.
