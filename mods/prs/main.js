@@ -159,7 +159,7 @@ const repoName = (url) => /[:/]([^/:]+\/[^/]+?)(?:\.git)?\/?$/.exec(url)?.[1] ??
 export default class Prs extends View {
   init(_props, cx) {
     // Opened as a popup for one PR (click on a row): its description, approvals, comments and reviews.
-    if (props()?.pr) { this.detailPr = props().pr; this.loadDetail(cx); return; }
+    if (props()?.pr) { this.detailPr = props().pr; this.cpOpen = new Set(); this.loadDetail(cx); return; }
     // Opened as a dialog from the header's + : a new pull request for the branch of that folder.
     if (props()?.create) { this.initCreate(cx); return; }
     this.started = Date.now();
@@ -309,14 +309,19 @@ export default class Prs extends View {
         // Copilot's latest overview becomes a card (issues whose thread is resolved are left out); its older ones are dropped.
         const cpReview = (v.reviews ?? []).filter((rv) => isCopilot(rv.author) && copilotOverview(rv.body)).pop();
         const cp = cpReview ? { ...copilotOverview(cpReview.body), at: cpReview.submittedAt } : null;
-        if (cp) { const n = cp.issues.length; cp.issues = cp.issues.filter((i) => !resolved.has(i.url)); cp.resolved = n - cp.issues.length; }
+        // Each open issue gets its thread (matched by the first comment's URL), so the card can unfold it.
+        const byUrl = new Map(threads.map((th) => [th.comments?.nodes?.[0]?.url, th]));
+        if (cp) { const n = cp.issues.length; cp.issues = cp.issues.filter((i) => !resolved.has(i.url)).map((i) => ({ ...i, thread: byUrl.get(i.url) })); cp.resolved = n - cp.issues.length; }
+        // A thread already unfolded in the Copilot card isn't repeated under OPEN THREADS.
+        const inCard = new Set(cp?.issues.map((i) => i.thread).filter(Boolean));
+        const rest = threads.filter((th) => !inCard.has(th));
         const items = [...(v.comments ?? []).map((c) => ({ author: c.author?.login, at: c.createdAt, body: c.body })),
           ...(v.reviews ?? []).filter((rv) => (rv.body || rv.state !== "COMMENTED") && !(cp && rv.state === "COMMENTED" && isCopilot(rv.author))).map((rv) => ({ author: rv.author?.login, at: rv.submittedAt, body: rv.body, extra: rv.state.toLowerCase().replace("_", " ") }))]
           .sort((p, q) => String(p.at).localeCompare(String(q.at))).map((c, i) => ({ ...c, id: i }));
         const me = await exec("gh", ["api", "user", "--jq", ".login"], { cwd: r.cwd, on: r.on }).then((m) => m.code === 0 ? m.stdout.trim() : null).catch(() => null);
         const by = approvedBy(v.reviews);
         this.detail = { me, mineApproved: Boolean(me && by.includes(me)), title: v.title, body: v.body ?? "", author: v.author?.login, from: v.headRefName, to: v.baseRefName, created: v.createdAt,
-          approvedBy: by, comments: items, threads, copilot: cp };
+          approvedBy: by, comments: items, threads: rest, copilot: cp };
         this.detailError = null;
       } catch (e) { this.detailError = String(e.message ?? e); }
       cx.notify();
@@ -555,11 +560,27 @@ export default class Prs extends View {
       .child(div().text_size(15).font_semibold().child(cp.verdict))
       .when(Boolean(cp.summary), (e) => e.child(TextView.markdown(`pr-cp-sum-${this.detailPr.number}`, cp.summary)))
       .child(div().text_size(12).font_semibold().child(`${n} open issue${n === 1 ? "" : "s"}${cp.resolved ? ` · ${cp.resolved} resolved` : ""}`))
-      .children(cp.issues.map((i, k) => h_flex().id(`pr-cp-i-${k}`).gap(8).items_center().text_size(12).cursor_pointer().on_click(() => exec("open", [i.url]))
-        .child(div().flex_none().px(8).py(1).rounded(9).border_1().text_size(10.5).font_semibold()
-          .border_color(sev[i.severity.toLowerCase()] ?? t.border).text_color(sev[i.severity.toLowerCase()] ?? t.muted).child(i.severity))
-        .child(div().flex_1().min_w(0).truncate().text_color(t.accent).hover((s) => s.underline()).child(i.title))
-        .when(Boolean(i.note), (e) => e.child(div().flex_none().text_color(t.dim).child(i.note)))))
+      // Click unfolds the issue's thread (Copilot's explanation and replies); without a loaded thread it opens GitHub.
+      .children(cp.issues.map((i, k) => {
+        const open = this.cpOpen.has(k), th = i.thread;
+        return v_flex().gap(6)
+          .child(h_flex().id(`pr-cp-i-${k}`).gap(8).items_center().text_size(12).cursor_pointer()
+            .on_click((_e, cx) => { if (!th) return exec("open", [i.url]); open ? this.cpOpen.delete(k) : this.cpOpen.add(k); cx.notify(); })
+            .child(div().flex_none().w(10).text_color(t.dim).child(th ? (open ? "▾" : "▸") : "↗"))
+            .child(div().flex_none().px(8).py(1).rounded(9).border_1().text_size(10.5).font_semibold()
+              .border_color(sev[i.severity.toLowerCase()] ?? t.border).text_color(sev[i.severity.toLowerCase()] ?? t.muted).child(i.severity))
+            .child(div().flex_1().min_w(0).truncate().text_color(t.accent).hover((s) => s.underline()).child(i.title))
+            .when(Boolean(i.note), (e) => e.child(div().flex_none().text_color(t.dim).child(i.note))))
+          .when(open && Boolean(th), (e) => e.child(v_flex().ml(18).gap(8).p(10).rounded(8).bg(t.raised)
+            .child(h_flex().gap(8).text_size(11).text_color(t.muted)
+              .child(div().flex_1().min_w(0).truncate().child(`${th.path}${th.line ?? th.originalLine ? `:${th.line ?? th.originalLine}` : ""}`))
+              .when(th.isOutdated, (e) => e.child(div().flex_none().text_color(t.dim).child("outdated")))
+              .child(div().id(`pr-cp-gh-${k}`).flex_none().text_color(t.accent).cursor_pointer().hover((s) => s.underline())
+                .on_click(() => exec("open", [i.url])).child("Open on GitHub ↗")))
+            .children((th.comments?.nodes ?? []).map((c, j) => v_flex().gap(4)
+              .child(h_flex().gap(8).text_size(11).child(div().font_semibold().child(c.author?.login ?? "")).child(div().text_color(t.dim).child(when(c.createdAt))))
+              .when(Boolean(c.body), (e) => e.child(TextView.markdown(`pr-cp-c-${k}-${j}`, c.body)))))));
+      }))
       .when(Boolean(cp.what), (e) => e
         .child(h_flex().id("pr-cp-what").gap(6).items_center().text_size(12).font_semibold().cursor_pointer()
           .on_click((_e, cx) => { this.cpWhat = !this.cpWhat; cx.notify(); })
