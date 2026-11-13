@@ -35,7 +35,7 @@ function location(places) {
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
 // The folder watch is recursive (node_modules, .git/objects too on macOS): a batch of only these paths can't change the list.
 // ponytail: a fixed list; ask `git check-ignore --stdin` per batch if another ignored folder floods it.
-const NOISE = /\/(node_modules|\.git\/(objects|logs)|target|\.venv|__pycache__|\.next|\.turbo|\.gradle)(\/|$)/;
+const NOISE = /\/(node_modules|\.git\/(objects|logs)|target|\.venv|__pycache__|\.next|\.turbo|\.gradle|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.idea)(\/|$)|(\/\.DS_Store|\.pyc|\/\.git\/FETCH_HEAD)$/;
 // Base branches the branch scope can compare against, offered only when the repo has them (origin/<name> or local).
 const BASES = ["main", "master", "release", "release-beta", "production", "production-beta"];
 const BASES_MAX = 50; // remembered choices (repo root -> branch name)
@@ -93,7 +93,10 @@ export default class Changes extends View {
     this.input.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
     this.input.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
     this.refresh(cx);
-    cx.timer.every(10000, (cx) => this.refresh(cx));
+    // While the folder watch is live it sees every change: then the poll is only a 60 s safety net (refs moved in a
+    // worktree's common dir, a missed event). Remote repos (no watch) or a dead watch: every 10 s.
+    this.ticks = 0;
+    cx.timer.every(10000, (cx) => { if (this.on || !this.watched || ++this.ticks >= 6) { this.ticks = 0; this.refresh(cx); } });
     // Focus moved to another folder or repo: refresh for it. From a timer, not render(): a task spawned
     // with render's cx never runs, and refresh() had already set `loading`, freezing the panel for good.
     // Every tick copies spaces/panes from the host: 2 s, not 500 ms.

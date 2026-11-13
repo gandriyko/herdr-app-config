@@ -103,7 +103,7 @@ async function list(cwd, on, all) {
 async function listBy(cwd, on, filter) {
   // exec rejects when the program can't start (gh not installed); gh itself says "gh auth login" when not logged in.
   const setup = (message) => Object.assign(new Error(message), { setup: true });
-  const r = await exec("gh", ["pr", "list", ...filter, "--state", "open", "--limit", "100", "--json", FIELDS], { cwd, on })
+  const r = await exec("gh", ["pr", "list", ...filter, "--state", "open", "--limit", "100", "--json", FIELDS], { cwd, on, timeout: 60000 })
     .catch(() => { throw setup("GitHub CLI (gh) is not installed · install it (brew install gh), then run gh auth login"); });
   if (r.code !== 0) {
     const text = (r.stderr || r.stdout).trim();
@@ -177,11 +177,11 @@ export default class Prs extends View {
     this.auto = (() => { try { return (localStorage.getItem("prs.auto") ?? localStorage.getItem("auto")) !== "0"; } catch { return true; } })();
     this.all = (() => { try { return localStorage.getItem("prs.all") === "1"; } catch { return false; } })();
     this.poll(cx);
-    // The folder follows focus: check it often (cheap); a repo already polled is shown from memory.
-    cx.timer.every(2000, (cx) => { const k = this.locKey(); if (k !== this.key) { this.key = k; this.focus(cx); } });
+    // One 2 s tick for two checks. The folder follows focus: a repo already polled is shown from memory.
     // A PR approved or created elsewhere: poll now. From a timer, not render(): a task spawned with
     // render's cx never runs. poll() has its own loading/again guard.
     cx.timer.every(2000, (cx) => {
+      const k = this.locKey(); if (k !== this.key) { this.key = k; this.focus(cx); }
       const changed = shared("prs.changed");
       if (changed && changed.ts !== this.changedTs) { this.changedTs = changed.ts; if (changed.ts > (this.started ?? 0)) this.poll(cx); }
     });
@@ -258,7 +258,12 @@ export default class Prs extends View {
               needMe: gql.ok ? gql.get(pr.number)?.me ?? false : was.get(pr.number)?.needMe ?? false,
               // Opened by me (null when my login is unknown: the list isn't grouped).
               mine: gql.viewer ? pr.author?.login === gql.viewer : was.get(pr.number)?.mine ?? null }));
-            this.byRepo.set(k, { name: r.name, prs: prs.map((pr) => ({ ...pr, cpBadge: gql.ok || !was.has(pr.number) ? copilotBadge(pr, gql.get(pr.number)?.urls) : was.get(pr.number).cpBadge, repo: { cwd: r.cwd, on: r.on } })), error: null });
+            // Kept in memory: only what a row, the search and the popup use. Reviews, checks and full bodies
+            // (Copilot's reviews are long) are reduced to their badges here, once per poll.
+            this.byRepo.set(k, { name: r.name, prs: prs.map(({ statusCheckRollup, reviews, reviewRequests, body, ...pr }) => ({ ...pr,
+              ciState: ci(statusCheckRollup), approvalState: approval({ reviews, reviewDecision: pr.reviewDecision }), body: (body ?? "").slice(0, 500),
+              cpBadge: gql.ok || !was.has(pr.number) ? copilotBadge({ ...pr, reviews, reviewRequests }, gql.get(pr.number)?.urls) : was.get(pr.number).cpBadge,
+              repo: { cwd: r.cwd, on: r.on } })), error: null });
             // Copilot sound only for PRs I opened (when my login is unknown: everything in Mine, nothing in All).
             for (const pr of prs) if (gql.viewer ? pr.author?.login === gql.viewer : !all) next.set(pr.url, { state: copilot(pr), pr });
           } catch (e) {
@@ -268,6 +273,8 @@ export default class Prs extends View {
             if (e.setup && !this.warned) { this.warned = true; notify({ title: "Pull requests", body: e.message, level: "warning" }); }
           }
         }));
+        // Repos no space points at any more (a closed space) leave memory.
+        for (const k of this.byRepo.keys()) if (!repos.has(k)) this.byRepo.delete(k);
         for (const [url, { state, pr }] of next) if (this.seen?.get(url) !== undefined && !reviewed(this.seen.get(url)) && reviewed(state)) done.push(pr);
         // A failed repo drops out of `next`; keep its old states so a later success isn't mistaken for news.
         this.seen = new Map([...(this.seen ?? []), ...[...next].map(([url, { state }]) => [url, state])]);
@@ -562,14 +569,14 @@ export default class Prs extends View {
   }
 
   row(pr, t) {
-    const state = ci(pr.statusCheckRollup);
+    const state = pr.ciState;
     const dot = { ok: t.done, fail: t.ansi1, wait: t.working }[state];
     const dotTip = { ok: "CI: all checks passed", fail: "CI: a check failed", wait: "CI: checks are running" }[state] ?? "CI: no checks";
     // Review icon: green check = someone approved, red cross = changes requested, grey check = not approved yet.
-    const ap = approval(pr);
+    const ap = pr.approvalState;
     const [apIcon, apColor, apTip] = ap === "approved" ? ["approved", t.done, "Approved by a reviewer"]
       : ap === "changes" ? ["changes", t.ansi1, "Changes requested"] : ["approved", t.border, "Not approved yet"];
-    const { level, open } = pr.cpBadge ?? copilotBadge(pr);
+    const { level, open } = pr.cpBadge;
     const taskKey = /^[A-Za-z]+-\d+/.exec(pr.title ?? "")?.[0];
     const fill = { high: t.ansi1, low: t.accent, ok: t.done }[level];
     const s = open === 1 ? "" : "s";

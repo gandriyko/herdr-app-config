@@ -68,12 +68,13 @@ function ensure() {
   setShared(USE, { commit: local && c.url ? "local" : "claude", review: "claude" });
 }
 
-export function models() { ensure(); return shared(MODELS) ?? []; } // contract: wb.ai.models optional, falls back to []
+// No ensure() here: models() runs in render (every window redraw), and ensure() costs ~15 host copies. migrate() in init covers it.
+export function models() { return shared(MODELS) ?? []; } // contract: wb.ai.models optional, falls back to []
 
 // One-time: the old global commit template / "No blank lines" (shared "wb.commit.gen") become the
 // commit defaults for every project (key "*").
 // Call it from init (it writes shared state; never from render).
-export function migrate() { migrateAi(); models(); migrateProject(); }
+export function migrate() { ensure(); migrateProject(); }
 function migrateProject() {
   if (shared("wb.ai.projectMigrated")) return;
   setShared("wb.ai.projectMigrated", true); // contract: read by wb-ai, prs, changes-copy
