@@ -1,6 +1,6 @@
 import { View, div, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { spaces, panes, agents, theme, run, window, keys, exec, shared, setShared, openOverlay, closeOverlay, props } from "herdr";
+import { spaces, panes, agents, theme, run, window, keys, exec, shared, setShared, openOverlay, closeOverlay, props, watchFolder } from "herdr";
 
 // Keep the computer awake; the display may still sleep. macOS: `caffeinate -ims` (no idle, disk or on-power sleep);
 // Linux: `systemd-inhibit --what=idle:sleep` around a `sleep`. Neither found (no systemd, Windows): no button.
@@ -32,6 +32,8 @@ function place(sp, ps) {
 const keyOf = (sp, ps) => JSON.stringify([sp?.machine ?? null, place(sp, ps)]);
 
 const PICKER = { width: 460, height: 560 };
+// Git dir paths that move a branch or ahead/behind: any HEAD (also worktrees/<name>/HEAD), local and remote refs.
+const REFS = /(^|\/)(HEAD|packed-refs)$|\/refs\/(heads|remotes)\//;
 
 export default class WorkspaceStatus extends View {
   init(_props, cx) {
@@ -50,7 +52,7 @@ export default class WorkspaceStatus extends View {
     this.git = {}; // keyOf -> { branch, ahead, behind }, null: not a repo
     this.checked = {}; // keyOf -> when it was last asked
     // The active space's branch: asked when the space or its folder moves, after a checkout in the
-    // branch picker, and every 30 s. From a timer, not render(): a task spawned with render's cx never runs.
+    // branch picker, when its git refs move (watch()), and every 30 s. From a timer, not render(): a task spawned with render's cx never runs.
     // ponytail: a 1 s compare of a string and a number, no exec unless something changed.
     // One git at a time, and a place is asked again only 30 s after the last ask, answered or not:
     // a hung or failing git (an unreachable machine) must not start a new one every second.
@@ -97,6 +99,7 @@ export default class WorkspaceStatus extends View {
   }
 
   async close() {
+    this.watchGen = (this.watchGen ?? 0) + 1;
     if (this.caff) await stop(this.caff.pid);
   }
 
@@ -155,11 +158,32 @@ export default class WorkspaceStatus extends View {
             }
           }
           this.git[key] = info;
+          if (!on && this.watching !== key) this.watch(key, cwd, cx);
         }
       } catch { /* couldn't ask: keep what it showed, the timer asks again in 30 s */ }
       this.asking = false;
       // A redraw is the whole window: only when the branch or ahead/behind changed.
       if (JSON.stringify([this.git[key]]) !== before) cx.notify();
+    });
+  }
+
+  // A pull, commit or checkout from anywhere (a terminal, a popup closed before its pull ended) moves a ref:
+  // watch the active local repo's git dir and let the next tick ask again. The common dir holds every
+  // worktree's HEAD and the shared refs. One watch at a time; an older loop ends when it wakes.
+  // ponytail: recursive on macOS (objects too), but a batch only clears a timestamp; the 2 s tick coalesces.
+  watch(key, cwd, cx) {
+    this.watching = key;
+    const gen = this.watchGen = (this.watchGen ?? 0) + 1;
+    cx.spawn(async () => {
+      const r = await exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, timeout: 5000 }).catch(() => null);
+      const dir = r?.code === 0 ? r.stdout.trim() : null;
+      try {
+        while (dir && this.watchGen === gen) {
+          const paths = await watchFolder(dir);
+          if (this.watchGen === gen && paths?.some((p) => p === dir || REFS.test(p))) delete this.checked[key];
+        }
+      } catch { /* no watch: the 30 s ask still runs */ }
+      if (this.watchGen === gen) this.watching = null;
     });
   }
 
