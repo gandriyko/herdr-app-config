@@ -461,8 +461,8 @@ export default class Board extends View {
             .when(Boolean(a.space_name && r.tabShown), (el) => el.child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.dim).child(`/ ${r.tabShown}`)))
             .when(r.sub !== null, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("↳ sub-agent")))
             .child(div().flex_1())
-            .when(a.status === "working" || a.status === "blocked" || a.status === "done", (el) => el.child(glyph(t, a.status)))
-            .child(div().flex_none().text_size(11).text_color(blocked ? t.blocked : t.dim).child(timeText(r))),
+            .child(div().flex_none().w(16).h(16).flex().items_center().justify_center().child(glyph(t, a.status)))
+            .child(div().flex_none().w(30).flex().justify_end().text_size(11).text_color(blocked ? t.blocked : t.dim).child(timeText(r))),
         )
         .when(r.sub, (el) => el.child(div().truncate().text_size(11).text_color(t.dim).child(`↳ sub-agent of ${r.sub}`)))
         .when(Boolean(r.report), (el) =>

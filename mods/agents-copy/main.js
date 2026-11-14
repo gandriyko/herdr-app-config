@@ -692,7 +692,7 @@ export default class Agents extends View {
           cx.notify();
         })
         .on_click(() => run("pane.focus", { pane: a.pane }));
-      const timeOrPin = this.hovered === a.address ? pin : Boolean(when) ? div().flex_none().text_size(11).text_color(a.status === "blocked" ? t.blocked : t.dim).child(duration(now - when)) : null;
+      const timeOrPin = this.hovered === a.address ? pin : Boolean(when) ? div().flex_none().w(30).flex().justify_end().text_size(11).text_color(a.status === "blocked" ? t.blocked : t.dim).child(duration(now - when)) : null;
       const picFold = (p) => div().id(`agent-fold-${a.address}`)
         .when(subs.length > 0, (el) => el.on_click((_e, cx) => {
           cx.stop_propagation();
@@ -736,7 +736,7 @@ export default class Agents extends View {
             .when(Boolean(tabTxt), (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`/ ${tabTxt}`))))
           .when(Boolean(machine), (el) => el.child(div().text_size(10).text_color(t.dim).child(machine)))
           .when(subs.length > 0, (el) => el.child(fold(a, subs)))
-          .when(a.status === "working" || a.status === "blocked" || a.status === "done", (el) => el.child(glyph(t, a.status, "mods/agents-copy/spinner.svg")))
+          .child(div().flex_none().w(16).h(16).flex().items_center().justify_center().child(glyph(t, a.status, "mods/agents-copy/spinner.svg")))
           .when(Boolean(timeOrPin), (el) => el.child(timeOrPin)))
         .when(Boolean(report), (el) => el.child(div().pl(23).min_w(0).max_h(34).overflow_hidden().text_size(12).line_height("17px").text_color(blocked ? t.blocked : t.muted).child(report)))
         .when(Boolean(pr), (el) => el.child(h_flex().pl(23).child(prChip(a, pr))))
