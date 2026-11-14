@@ -705,7 +705,7 @@ export default class Agents extends View {
       const tabInfo = tabs.get(a.tab);
       const prog = a.program?.name ?? "";
       // Line 2: the report, else the agent's title, else the tab name; never the bare program name.
-      let report = reportText(term?.report) || reportText(a.title) || (tabInfo?.name ?? "").trim();
+      let report = reportText(term?.report) || reportText(a.title) || (tabInfo?.named ? (tabInfo.name ?? "").trim() : "");
       if (report.toLowerCase() === prog.trim().toLowerCase()) report = "";
       // Line 1 names the tab only when a person named it and it says something new.
       const tabName = tabInfo?.named ? (tabInfo.name ?? "").trim() : "";
@@ -744,7 +744,7 @@ export default class Agents extends View {
               .when(Boolean(machine), (el) => el.child(div().text_size(10).text_color(t.dim).child(machine)))
               .when(subs.length > 0, (el) => el.child(fold(a, subs)))
               .when(Boolean(timeOrPin), (el) => el.child(timeOrPin)))
-            .child(div().min_w(0).max_h(34).overflow_hidden().text_size(12).line_height("17px").text_color(report ? (blocked ? t.blocked : t.muted) : t.dim).child(report || (tabInfo?.name ?? "").trim() || prog || label(a)))
+            .child(div().min_w(0).max_h(34).overflow_hidden().text_size(12).line_height("17px").text_color(report ? (blocked ? t.blocked : t.muted) : t.dim).child(report || prog || label(a)))
             .when(Boolean(pr), (el) => el.child(h_flex().child(prChip(a, pr))))))
         .when(subs.length > 0 && !this.folded.has(a.address), (el) => el.children(subs.map((x) => this.subRow(t, x, shown, byPriority))));
     };

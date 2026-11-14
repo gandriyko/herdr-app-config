@@ -346,7 +346,7 @@ export default class Board extends View {
       const at = a.status === "working" ? tb?.working_since : tb?.changed_at;
       const prog = a.program?.name ?? "agent";
       // Line 2: the report, else the agent's title, else the tab name; never the bare program name.
-      let report = clean(term?.report) || clean(a.title) || (tb?.name ?? "").trim();
+      let report = clean(term?.report) || clean(a.title) || (tb?.named ? (tb.name ?? "").trim() : "");
       if (report.toLowerCase() === prog.trim().toLowerCase()) report = "";
       // The tab shows on line 1 only when a person named it and it says something new.
       const tabName = tb?.named ? (tb.name ?? "").trim() : "";
@@ -482,7 +482,7 @@ export default class Board extends View {
                     .text_size(12)
                     .line_height("17px")
                     .text_color(r.report ? (blocked ? t.blocked : t.muted) : t.dim)
-                    .child(r.report || r.tabShown || r.program || " "),
+                    .child(r.report || r.program || " "),
                 )
                 .when(Boolean(r.pr), (el) => el.child(h_flex().items_center().child(prPill(r)))),
             ),
