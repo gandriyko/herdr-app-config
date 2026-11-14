@@ -11,7 +11,7 @@ commands: [tab.new/tab.select/tab.rename, mod wb-diff (tab), mod wb-ai (window/d
 ---
 
 ## What it does
-Extended copy of `changes`. Shows uncommitted or branch-scope changes as list or tree, commits/pushes, and opens a clicked file in a side-by-side diff tab (`wb-diff`). It generates commit messages and reviews through a configurable model (Claude CLI, Codex CLI or a local OpenAI-compatible server) with per-project settings edited in `wb-ai`.
+Extended copy of `changes`. Shows uncommitted or branch-scope changes as list or tree, commits/pushes, and opens a clicked file in a diff tab (`wb-diff`), sending the whole listed set (first 300 files, in the list or tree order) so the tab scrolls through all of them. It generates commit messages and reviews through a configurable model (Claude CLI, Codex CLI or a local OpenAI-compatible server) with per-project settings edited in `wb-ai`.
 
 ## Files
 - main.js: panel UI, git calls, watching, commit/push, diff tab opening.

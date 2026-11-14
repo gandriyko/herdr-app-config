@@ -14,6 +14,17 @@ async function commitRules(root, on) {
   return paths.map((p, i) => texts[i]?.trim() ? `### ${p}\n${texts[i].trim().slice(0, 8000)}` : "").filter(Boolean).join("\n\n");
 }
 
+// The tree view's order: at every level folders first, then files, each by name.
+function treeOrder(a, b) {
+  const x = a.split("/"), y = b.split("/");
+  for (let i = 0; ; i++) {
+    const xd = i < x.length - 1, yd = i < y.length - 1;
+    if (xd !== yd) return xd ? -1 : 1;
+    if (x[i] !== y[i]) return x[i].localeCompare(y[i]);
+    if (!xd) return 0;
+  }
+}
+
 // A pane without a folder (the wb-diff tab, any mod pane) has the keyboard after a click on a file: then the
 // panel stays on the last place it knew in this space, instead of falling back to the space's own folder.
 // `places` is the view's own map (space id -> { cwd, on }), capped by PLACES_MAX: module scope is shared by every copy.
@@ -333,7 +344,10 @@ export default class Changes extends View {
     const file = this.files.find((f) => f.path === path);
     const space = spaces().find((s) => s.active);
     // `space`: each space's diff tab takes only its own space's requests.
-    const req = { space: space?.id ?? null, root: this.root, on: this.on ?? null, path, against: this.against ?? null, status: file?.status ?? "M", fresh: Boolean(file?.fresh), ts: Date.now() };
+    // `files`: every listed file in the panel's order, so the diff tab scrolls through them all (capped).
+    const order = this.view === "tree" ? [...this.files].sort((a, b) => treeOrder(a.path, b.path)) : this.files;
+    const files = order.slice(0, 300).map((f) => [f.path, f.status, f.fresh ? 1 : 0, f.add ?? 0, f.del ?? 0]);
+    const req = { space: space?.id ?? null, root: this.root, on: this.on ?? null, path, against: this.against ?? null, status: file?.status ?? "M", fresh: Boolean(file?.fresh), files, ts: Date.now() };
     const ids = new Set((space?.tabs ?? []).map((t) => t.id));
     const existing = panes().find((p) => p.mod === "wb-diff" && ids.has(p.tab));
     const name = path.split("/").pop();

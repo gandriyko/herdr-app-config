@@ -26,7 +26,7 @@ when one of them is absent.
 | [status-copy](status-copy/MOD.md) | Status bar piece showing the active space's git branch, a keep-awake button and a command-palette hint. |
 | [tabs-copy](tabs-copy/MOD.md) | Top tab bar with space tabs, side-panel toggle buttons and window controls. |
 | [wb-ai](wb-ai/MOD.md) | AI model registry and per-project settings window used to generate commit messages, reviews and MR descriptions. |
-| [wb-diff](wb-diff/MOD.md) | Side-by-side diff viewer with syntax highlighting, opened as a tab for a changed file or commit. |
+| [wb-diff](wb-diff/MOD.md) | Diff viewer (side by side or unified) with syntax highlighting that scrolls through all changed files in one tab. |
 
 ## Shared keys (contracts)
 
