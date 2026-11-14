@@ -4,7 +4,7 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
 import { agents, terminals, panes, spaces, run, theme, shared, setShared, openOverlay, closeOverlay, props, exec, hc } from "herdr";
 import { AskingTracker } from "./asking.js";
-import { parseOptions, parseQuestion, parseSuggestion, sameOptions } from "./reply.js";
+import { isSelectMenu, parseOptions, parseQuestion, parseSuggestion, sameOptions } from "./reply.js";
 import { CHECKS_WORD, newPrState, prMap, prOf, refreshPrs } from "./prs.js";
 
 const ICONS = "mods/agents-board/";
@@ -111,7 +111,7 @@ export default class Board extends View {
     this.searchFocus = false;
     this.input.on("focus", () => (this.searchFocus = true));
     this.input.on("blur", () => (this.searchFocus = false));
-    this.reply = null; // { address, suggestion, options, sending, error, input } while a reply area is open
+    this.reply = null; // { address, question, detail, tabs, suggestion, options, select, typing, sending, error, input } while a reply area is open
     this.replyFocus = false;
     this.replySeq = 0;
     this.input.focus();
@@ -251,16 +251,8 @@ export default class Board extends View {
         text = await this.readScreen(a.address);
       } catch (_e) {}
       if (!this.live || seq !== this.replySeq) return;
-      const options = parseOptions(text);
-      const suggestion = options.length ? null : parseSuggestion(text);
-      const reply = { address: a.address, question: parseQuestion(text), suggestion, options, sending: false, error: null, input: null };
-      if (!options.length) {
-        const input = InputState.new({ placeholder: suggestion || "Reply to agent…" });
-        reply.input = input;
-        input.on("focus", () => (this.replyFocus = true));
-        input.on("blur", () => (this.replyFocus = false));
-        input.on("submit", (_e, cx) => this.submitReply(cx));
-      }
+      const reply = { address: a.address, sending: false, error: null, input: null };
+      this.fillReply(reply, text);
       this.reply = reply;
       this.sel = a.address;
       cx.notify();
@@ -268,13 +260,105 @@ export default class Board extends View {
     });
   }
 
-  // Enter in the box: the typed text, else Claude's suggestion.
+  // Text input for the reply box or a free-text answer; Enter submits.
+  makeInput(placeholder) {
+    const input = InputState.new({ placeholder });
+    input.on("focus", () => (this.replyFocus = true));
+    input.on("blur", () => (this.replyFocus = false));
+    input.on("submit", (_e, cx) => this.submitReply(cx));
+    return input;
+  }
+
+  // Puts the parsed screen into the reply: question, tabs, options (buttons), else a text input.
+  // Only parsed fields are kept, never the screen text.
+  fillReply(r, text) {
+    if (r.input) {
+      try {
+        r.input.release();
+      } catch (_e) {}
+      r.input = null;
+    }
+    this.replyFocus = false;
+    const options = parseOptions(text);
+    const q = parseQuestion(text);
+    r.question = q.question || "";
+    r.detail = q.detail || "";
+    r.tabs = q.tabs || null;
+    r.options = options;
+    r.select = options.length > 0 && isSelectMenu(text);
+    r.typing = null; // the free-text option being answered
+    r.suggestion = options.length ? null : parseSuggestion(text);
+    r.sending = false;
+    if (!options.length) r.input = this.makeInput(r.suggestion || "Reply to agent…");
+  }
+
+  // Enter in the box: a free-text answer, else the typed text or Claude's suggestion.
   submitReply(cx) {
     const r = this.reply;
     if (!r || r.sending) return;
-    const text = r.input?.value().trim() || r.suggestion;
+    const text = r.input?.value().trim() || (r.typing ? "" : r.suggestion);
     if (!text) return;
+    if (r.typing) return this.followUp(r, [["keys", r.address, String(r.typing)], 300, ["send", "--force", r.address, text]], cx);
     this.runReply(["send", r.address, text], r, cx);
+  }
+
+  // A click on a free-text option: a text input takes the place of the buttons.
+  startTyping(o, cx) {
+    const r = this.reply;
+    if (!r || r.sending) return;
+    r.typing = o.n;
+    r.input = this.makeInput("Type your answer…");
+    cx.notify();
+    r.input.focus();
+  }
+
+  // Back from the free-text input to the option buttons.
+  stopTyping(r, cx) {
+    try {
+      r.input?.release();
+    } catch (_e) {}
+    r.input = null;
+    r.typing = null;
+    this.replyFocus = false;
+    if (this.live) this.handle.focus();
+    cx.notify();
+  }
+
+  // Runs hc steps in order (an array is a command, a number a pause in ms), then re-reads the screen:
+  // a menu still shown (next question, Submit) refreshes the area, no menu closes it.
+  followUp(r, steps, cx) {
+    r.sending = true;
+    r.error = null;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      let err = null;
+      try {
+        for (const s of steps) {
+          if (typeof s === "number") {
+            await new Promise((res) => cx.timer.after(s, () => res()));
+          } else {
+            const res = await hc(s);
+            if (res?.code !== 0) throw new Error(String(res?.stderr || res?.stdout || "Failed").trim().split("\n")[0] || "Failed");
+          }
+          if (!this.live || this.reply !== r) return;
+        }
+        await new Promise((res) => cx.timer.after(600, () => res()));
+        if (!this.live || this.reply !== r) return;
+        const text = await this.readScreen(r.address);
+        if (!this.live || this.reply !== r) return;
+        if (!parseOptions(text).length) return this.closeReply(cx);
+        this.fillReply(r, text);
+        cx.notify();
+        r.input?.focus();
+      } catch (e) {
+        err = String(e?.message ?? e).split("\n")[0];
+        if (this.live && this.reply === r) {
+          r.sending = false;
+          r.error = err;
+          cx.notify();
+        }
+      }
+    });
   }
 
   // Runs one hc command for the open reply; success closes the area, failure shows the first line of stderr.
@@ -305,6 +389,8 @@ export default class Board extends View {
   pickOption(n, cx) {
     const r = this.reply;
     if (!r || r.sending) return;
+    // "Enter to select" picker: a digit only moves the cursor, so press it, then Enter; then follow the screen.
+    if (r.select) return this.followUp(r, [["keys", r.address, String(n)], 150, ["keys", r.address, "enter"]], cx);
     const menu = r.options;
     this.runReply(["keys", r.address, String(n)], r, cx, (cx) => {
       cx.timer.after(600, (cx) => {
@@ -562,31 +648,36 @@ export default class Board extends View {
     };
 
     const replyArea = (rp) => {
-      const body = rp.options.length
-        ? h_flex()
-            .gap(6)
-            .flex_wrap()
+      const body = rp.options.length && !rp.input
+        ? v_flex()
+            .gap(4)
             .children(
               rp.options.map((o) =>
-                div()
+                v_flex()
                   .id(`opt-${o.n}`)
+                  .w_full()
                   .px(9)
-                  .h(26)
-                  .flex()
-                  .items_center()
+                  .py(5)
+                  .gap(1)
+                  .items_start()
                   .rounded(6)
                   .border_1()
                   .border_color(t.border)
                   .bg(t.background)
-                  .text_size(12)
-                  .text_color(rp.sending ? t.dim : t.foreground)
                   .cursor_pointer()
                   .hover((s) => s.bg(t.hover))
                   .on_click((_e, cx) => {
                     cx.stop_propagation();
-                    this.pickOption(o.n, cx);
+                    if (o.freeText) this.startTyping(o, cx);
+                    else this.pickOption(o.n, cx);
                   })
-                  .child(`${o.n} · ${o.label}`),
+                  .child(
+                    h_flex()
+                      .gap(8)
+                      .child(div().flex_none().text_size(12).text_color(t.dim).child(String(o.n)))
+                      .child(div().min_w(0).text_size(12).text_color(rp.sending ? t.dim : t.foreground).child(o.label)),
+                  )
+                  .when(Boolean(o.desc), (el) => el.child(div().pl(17).text_size(11).text_color(t.dim).child(o.desc))),
               ),
             )
         : h_flex()
@@ -603,7 +694,8 @@ export default class Board extends View {
               // Only Esc and Tab are intercepted; every other key (text, Enter) reaches the Input,
               // which emits "submit" on Enter. Stopping other keys would block text input.
               if (e.key === "escape") {
-                this.closeReply(cx);
+                if (rp.typing) this.stopTyping(rp, cx);
+                else this.closeReply(cx);
                 cx.stop_propagation();
               } else if (e.key === "tab" && !rp.input.value() && rp.suggestion) {
                 rp.input.set_value(rp.suggestion);
@@ -620,19 +712,43 @@ export default class Board extends View {
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_mouse_down_out((_e, cx) => this.dismissReply(cx))
         .on_click((_e, cx) => cx.stop_propagation())
+        .when(Boolean(rp.tabs?.length), (el) =>
+          el.child(
+            h_flex()
+              .gap(4)
+              .flex_wrap()
+              .children(
+                rp.tabs.map((tb, i) =>
+                  h_flex()
+                    .id(`reply-tab-${i}`)
+                    .gap(3)
+                    .px(6)
+                    .py(1)
+                    .items_center()
+                    .rounded(5)
+                    .border_1()
+                    .border_color(t.border)
+                    .text_size(11)
+                    .text_color(tb.done ? t.done : t.muted)
+                    .when(tb.done, (e) => e.child(svg(ICONS + "check.svg").size(10).flex_none()))
+                    .child(tb.label),
+                ),
+              ),
+          ),
+        )
         .when(Boolean(rp.question), (el) =>
           el.child(
-            div()
+            v_flex()
               .id(`reply-question-${rp.address}`)
               .w_full()
               .max_h(160)
               .overflow_y_scroll()
               .p(8)
+              .gap(3)
               .rounded(6)
               .bg(t.background)
-              .text_size(12)
-              .text_color(t.foreground)
-              .child(rp.question),
+              .child(div().text_size(13).text_color(t.foreground).child(rp.question))
+              .when(Boolean(rp.detail), (e) => e.child(div().text_size(12).text_color(t.dim).child(rp.detail))),
           ),
         )
         .child(body)

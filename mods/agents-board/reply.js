@@ -7,7 +7,57 @@ const BORDER = /^\s*[─━]{10,}\s*$/;
 const OPTION = /^\s*[❯>]?\s*(\d{1,2})\.\s+(\S.*?)\s*$/;
 const PROMPT = /^\s*[❯>]\s?(.*)$/;
 const MENU_LINES = 14;
-const MAX_OPTIONS = 9;
+const MAX_OPTIONS = 12;
+const FOOTER = /Enter to (?:select|confirm)|Esc to cancel/;
+const TAB_MARK = /[☐✔☑■✓]/;
+const FREE_TEXT = /^(?:type something|other)\b[.…]*$/i;
+const OPTION_RE = /^\s*(?:[❯>]\s*)?(\d+)\.\s+(.+?)\s*$/;
+const MAX_FOOTER_TAIL = 8;
+
+const isTabBar = (l) => TAB_MARK.test(l) && /[←→]/.test(l);
+
+// "←  ☐ A  ☐ B  ✔ Submit  →" -> [{ label, done }].
+function parseTabs(line) {
+  return line
+    .replace(/[←→]/g, " ")
+    .split(/(?=[☐✔☑■✓])/)
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .map((p) => ({ label: p.slice(1).trim(), done: p[0] !== "☐" }))
+    .filter((t) => t.label);
+}
+
+// A menu found by its footer ("Enter to select/confirm", "Esc to cancel"): scans upward over option lines,
+// their indented descriptions, blank lines and rules, up to the question or the tab bar.
+// -> { options } or null.
+function findMenu(lines) {
+  const footer = lines.findLastIndex((l) => FOOTER.test(l));
+  if (footer < 1) return null;
+  if (lines.slice(footer + 1).filter((l) => l.trim()).length > MAX_FOOTER_TAIL) return null;
+  const options = [];
+  let pending = [];
+  for (let i = footer - 1; i >= 0; i--) {
+    const l = lines[i];
+    if (!l.trim() || BORDER.test(l)) continue;
+    if (isTabBar(l)) break;
+    const m = OPTION_RE.exec(l);
+    if (m) {
+      options.unshift({ n: Number(m[1]), label: m[2], desc: pending.join(" "), freeText: FREE_TEXT.test(m[2]) });
+      pending = [];
+      continue;
+    }
+    if (/^\s{4,}/.test(l) && options.length) {
+      pending.unshift(l.trim());
+      continue;
+    }
+    break;
+  }
+  if (options.length < 2 || options[0].n !== 1 || options.some((o, i) => o.n !== i + 1)) return null;
+  return { options: options.slice(0, MAX_OPTIONS) };
+}
+
+// True for the picker where a digit only moves the cursor and Enter selects ("Enter to select").
+export const isSelectMenu = (text) => Boolean(text) && /Enter to select/.test(text);
 
 // The two border lines around the input box, counted from the bottom: [upper, lower] or fewer.
 function boxBorders(lines) {
@@ -19,8 +69,11 @@ function boxBorders(lines) {
 // The numbered options of a choice menu drawn above the input box (or at the screen bottom): [{ n, label }].
 // Empty when the screen shows no menu. Only the last run of options counts, and it must start at 1.
 export function parseOptions(text) {
-  if (!text || !isAsking(text)) return [];
+  if (!text) return [];
   const lines = text.split("\n");
+  const menu = findMenu(lines);
+  if (menu) return menu.options;
+  if (!isAsking(text)) return [];
   const b = boxBorders(lines);
   const end = b.length ? b[0] : lines.length;
   const near = lines.slice(0, end).filter((l) => l.trim()).slice(-MENU_LINES);
@@ -30,7 +83,7 @@ export function parseOptions(text) {
     if (m) {
       const n = Number(m[1]);
       if (n === 1) run = [];
-      if (n === run.length + 1) run.push({ n, label: m[2] });
+      if (n === run.length + 1) run.push({ n, label: m[2], desc: "", freeText: FREE_TEXT.test(m[2]) });
     }
   }
   return run.length >= 2 ? run.slice(0, MAX_OPTIONS) : [];
@@ -68,12 +121,13 @@ const clean = (l) => l.replace(BOX_CHARS, "").replace(/ /g, " ").trimEnd();
 // the menu and its first option), else the agent's last reply (after the last ⏺/● line, up to the
 // status line or the input-box rule). Capped to the end of the text. "" when nothing is found.
 export function parseQuestion(text) {
-  if (!text) return "";
+  if (!text) return { question: "" };
   const lines = text.split("\n");
   const b = boxBorders(lines);
   const end = b.length ? b[0] : lines.length;
   let out = [];
   let first = -1;
+  let tabs = null;
   // A menu shows its own footer ("Esc to cancel", "Enter to select"); its first option sits right above it.
   const footer = lines.findLastIndex((l) => /Esc to cancel|Enter to (confirm|select)/.test(l));
   if (footer > 0 || isAsking(text)) {
@@ -87,7 +141,8 @@ export function parseQuestion(text) {
   }
   if (first > 0) {
     let top = first - 1;
-    while (top >= 0 && !BORDER.test(lines[top])) top--;
+    while (top >= 0 && !BORDER.test(lines[top]) && !isTabBar(lines[top])) top--;
+    if (top >= 0 && isTabBar(lines[top])) tabs = parseTabs(lines[top]);
     out = lines.slice(top + 1, first).map(clean);
   } else {
     let start = -1;
@@ -112,5 +167,8 @@ export function parseQuestion(text) {
     s = s.slice(-QUESTION_CHARS);
     cut = true;
   }
-  return cut ? "…" + s : s;
+  s = cut ? "…" + s : s;
+  if (first <= 0) return { question: s };
+  const nl = s.indexOf("\n");
+  return { tabs, question: nl < 0 ? s : s.slice(0, nl).trim(), detail: nl < 0 ? "" : s.slice(nl + 1).trim() };
 }
