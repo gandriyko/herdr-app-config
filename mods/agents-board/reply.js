@@ -55,3 +55,62 @@ export function parseSuggestion(text) {
 
 // True when `a` and `b` show the same menu (same numbers and labels).
 export const sameOptions = (a, b) => a.length === b.length && a.every((o, i) => o.n === b[i].n && o.label === b[i].label);
+
+const MARK = /^\s*[⏺●]\s?/;
+const STATUS = /^\s*[✻✶✳✢·*]\s.*\bdone\b/i;
+const BOX_CHARS = /[─━│┃┌┐└┘├┤┬┴┼╭╮╰╯═║]/g;
+const QUESTION_LINES = 12;
+const QUESTION_CHARS = 1200;
+
+const clean = (l) => l.replace(BOX_CHARS, "").replace(/ /g, " ").trimEnd();
+
+// What the agent is asking: a choice menu's heading and description (the lines between the rule above
+// the menu and its first option), else the agent's last reply (after the last ⏺/● line, up to the
+// status line or the input-box rule). Capped to the end of the text. "" when nothing is found.
+export function parseQuestion(text) {
+  if (!text) return "";
+  const lines = text.split("\n");
+  const b = boxBorders(lines);
+  const end = b.length ? b[0] : lines.length;
+  let out = [];
+  let first = -1;
+  // A menu shows its own footer ("Esc to cancel", "Enter to select"); its first option sits right above it.
+  const footer = lines.findLastIndex((l) => /Esc to cancel|Enter to (confirm|select)/.test(l));
+  if (footer > 0 || isAsking(text)) {
+    for (let i = (footer > 0 ? footer : lines.length) - 1; i >= Math.max(0, lines.length - 40); i--) {
+      const m = OPTION.exec(lines[i]);
+      if (m && Number(m[1]) === 1) {
+        first = i;
+        break;
+      }
+    }
+  }
+  if (first > 0) {
+    let top = first - 1;
+    while (top >= 0 && !BORDER.test(lines[top])) top--;
+    out = lines.slice(top + 1, first).map(clean);
+  } else {
+    let start = -1;
+    for (let i = end - 1; i >= 0; i--) {
+      if (MARK.test(lines[i])) {
+        start = i;
+        break;
+      }
+    }
+    if (start >= 0) {
+      let stop = start + 1;
+      while (stop < end && !STATUS.test(lines[stop]) && !BORDER.test(lines[stop]) && !MARK.test(lines[stop])) stop++;
+      out = lines.slice(start, stop).map((l, i) => clean(i === 0 ? l.replace(MARK, "") : l));
+    }
+  }
+  out = out.map((l) => l.trim() === "" ? "" : l.trim());
+  while (out.length && !out[0]) out.shift();
+  while (out.length && !out[out.length - 1]) out.pop();
+  let cut = out.length > QUESTION_LINES;
+  let s = out.slice(-QUESTION_LINES).join("\n");
+  if (s.length > QUESTION_CHARS) {
+    s = s.slice(-QUESTION_CHARS);
+    cut = true;
+  }
+  return cut ? "…" + s : s;
+}

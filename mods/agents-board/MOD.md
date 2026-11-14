@@ -20,13 +20,13 @@ A frameless full-window overlay: a dim backdrop (a click on it closes the board)
 - Header: summary ("2 need you · 3 working · 1 unseen · 4 seen", zero parts left out, "No agents" when none), search (program, space, tab, report), close.
 - Filters: space chips with their agent counts (idle included), and a "PR" segmented control: Any / Has PR / Failing / No PR.
 - Keys: up/down between cards, left/right between columns (while the search is empty), Enter = peek the selected card, `r` = reply to the selected card (when the search box is not focused; Esc closes the reply area first, then the board).
-- Reply: cards that are not working (needs you, done, idle) have a small reply button at the end of line 2. It reads the screen once (`hc read`) and opens a reply area in the card. On a choice menu: one button per option ("1 · Yes"); a click runs `hc keys <n>`, and after 600 ms, if the same menu is still shown, `hc keys enter`. Otherwise a text box, focused: the placeholder is the prompt suggestion, Tab fills it, Enter sends the text (or the suggestion when the box is empty) with `hc send`; Esc closes. A failed send shows the error under the box and keeps the text. Only one reply area is open; closing the board or the card leaving the list closes it.
+- Reply: cards that are not working (needs you, done, idle) have a small reply button at the end of line 2. It reads the screen once (`hc read`) and opens a reply area in the card. At its top it shows what the agent asked: the menu's heading and description, else the agent's last reply (text after the last `⏺`/`●` line, last 12 lines / 1200 chars, scrollable); only that parsed string is kept. On a choice menu: one button per option ("1 · Yes"); a click runs `hc keys <n>`, and after 600 ms, if the same menu is still shown, `hc keys enter`. Otherwise a text box, focused: the placeholder is the prompt suggestion, Tab fills it, Enter sends the text (or the suggestion when the box is empty) with `hc send`; Esc closes. A failed send shows the error under the box and keeps the text. Only one reply area is open; closing the board or the card leaving the list closes it.
 
 ## Files
 - main.js: the view.
 - prs.js: PR lookup helpers (state is kept by the view instance).
 - asking.js: the asking detector and its read queue.
-- reply.js: pure parsers for the reply area (menu options, input-line suggestion).
+- reply.js: pure parsers for the reply area (menu options, input-line suggestion, the agent's question).
 - reply.svg: reply icon.
 - grip.svg: resize grip.
 - check.svg, x.svg, spinner.svg, search.svg, chevron-down.svg, chevron-right.svg: icons.

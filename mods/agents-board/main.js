@@ -4,7 +4,7 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
 import { agents, terminals, panes, spaces, run, theme, shared, setShared, openOverlay, closeOverlay, props, exec, hc } from "herdr";
 import { AskingTracker } from "./asking.js";
-import { parseOptions, parseSuggestion, sameOptions } from "./reply.js";
+import { parseOptions, parseQuestion, parseSuggestion, sameOptions } from "./reply.js";
 import { CHECKS_WORD, newPrState, prMap, prOf, refreshPrs } from "./prs.js";
 
 const ICONS = "mods/agents-board/";
@@ -240,7 +240,7 @@ export default class Board extends View {
       if (!this.live || seq !== this.replySeq) return;
       const options = parseOptions(text);
       const suggestion = options.length ? null : parseSuggestion(text);
-      const reply = { address: a.address, suggestion, options, sending: false, error: null, input: null };
+      const reply = { address: a.address, question: parseQuestion(text), suggestion, options, sending: false, error: null, input: null };
       if (!options.length) {
         const input = InputState.new({ placeholder: suggestion || "Reply to agent…" });
         reply.input = input;
@@ -606,6 +606,21 @@ export default class Board extends View {
         .gap(4)
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_click((_e, cx) => cx.stop_propagation())
+        .when(Boolean(rp.question), (el) =>
+          el.child(
+            div()
+              .id(`reply-question-${rp.address}`)
+              .w_full()
+              .max_h(160)
+              .overflow_y_scroll()
+              .p(8)
+              .rounded(6)
+              .bg(t.background)
+              .text_size(12)
+              .text_color(t.foreground)
+              .child(rp.question),
+          ),
+        )
         .child(body)
         .when(Boolean(rp.error), (el) => el.child(div().text_size(11).text_color(t.blocked).child(rp.error)));
     };
