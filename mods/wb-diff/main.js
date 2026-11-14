@@ -63,6 +63,33 @@ function fileList(req) {
   return list.some((f) => f.path === req.path) ? list : [own];
 }
 
+// The request's files asked again from git, for Refresh: files made or reverted since the panel sent the list.
+// Same rule as changes-copy: tracked changes against `against` (or the status before the first commit), plus
+// untracked files. Known files keep their order, new ones follow by path. Null for a commit (it doesn't change).
+async function relist(req) {
+  if (req.commit) return null;
+  const git = (args) => exec("git", [...READ, ...args], { cwd: req.root, on: req.on, timeout: 60000 });
+  const st = await git(["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"]);
+  if (st.code !== 0) throw new Error(st.stderr.trim() || "git status failed");
+  let entries = st.stdout.split("\0").filter(Boolean);
+  if (req.against) {
+    const ns = await git(["diff", req.against, "--name-status", "-z", "--no-renames"]);
+    if (ns.code !== 0) throw new Error(ns.stderr.trim() || "git diff failed");
+    const parts = ns.stdout.split("\0"), tracked = [];
+    for (let i = 0; i + 1 < parts.length; i += 2) tracked.push(`${parts[i][0] === "U" ? "UU" : parts[i][0] + " "} ${parts[i + 1]}`);
+    entries = [...tracked, ...entries.filter((e) => e.startsWith("??"))];
+  }
+  const found = new Map();
+  for (const e of entries) {
+    const xy = e.slice(0, 2), path = e.slice(3), fresh = xy === "??";
+    const s = xy.includes("U") || xy === "AA" || xy === "DD" ? "U" : xy.includes("D") ? "D" : fresh || xy.includes("A") ? "A" : "M";
+    found.set(path, { path, status: s, fresh });
+  }
+  const known = fileList(req).map((f) => f.path).filter((p) => found.has(p)), seen = new Set(known);
+  const added = [...found.keys()].filter((p) => !seen.has(p)).sort();
+  return [...known, ...added].slice(0, MAX_FILES).map((p) => found.get(p));
+}
+
 // Same set of files, same contents (by their line counts), same comparison: only scroll, don't reload.
 const keyOf = (req, mode) => JSON.stringify([req.root, req.on, req.against, req.commit, mode, fileList(req).map((f) => [f.path, f.fresh, f.add, f.del])]);
 
@@ -196,13 +223,24 @@ export default class DiffView extends View {
     cx.timer.after(0, (acx) => this.load(req, acx));
   }
 
-  load(req, cx, target = req.path) {
+  // `fresh`: Refresh, which asks git for the file list again and keeps the folds and the scroll offset within `target`.
+  load(req, cx, target = req.path, fresh = null) {
     const gen = ++this.gen, mode = this.mode;
     this.loading = true; this.error = null; this.loadingKey = keyOf(req, mode); this.target = target;
     cx.spawn(async (cx) => {
       try {
         const { root, on, against, commit } = req;
-        const list = fileList(req);
+        let list = fileList(req);
+        if (fresh) {
+          const now = await relist(req);
+          if (gen !== this.gen) return;
+          if (now) {
+            list = now;
+            const path = now.some((f) => f.path === target) ? target : now[0]?.path ?? req.path;
+            req = this.req = { ...req, path, status: now.find((f) => f.path === path)?.status ?? req.status, files: now.map((f) => [f.path, f.status, f.fresh ? 1 : 0]) };
+            this.loadingKey = keyOf(req, mode); this.target = path;
+          }
+        }
         const tracked = list.filter((f) => !f.fresh || commit).map((f) => f.path);
         let byPath = new Map();
         if (tracked.length) {
@@ -245,9 +283,10 @@ export default class DiffView extends View {
         if (gen !== this.gen) return;
         this.files = files; this.loadedKey = this.loadingKey; this.loadingKey = null;
         // The file asked for is always shown open; folds of files no longer listed are dropped.
-        this.collapsed = new Set(files.map((f) => f.path).filter((p) => p !== this.target && this.collapsed.has(p)));
+        this.collapsed = new Set(files.map((f) => f.path).filter((p) => (fresh || p !== this.target) && this.collapsed.has(p)));
         this.build();
         this.scrollToFile(this.target);
+        if (fresh && this.target === target) this.scrollY += fresh.delta;
         this.loading = false;
       } catch (e) {
         if (gen !== this.gen) return;
@@ -504,7 +543,10 @@ export default class DiffView extends View {
       .on_click((_e, cx) => this.reveal(r.fi, r.hi, dir, r.hidden, cx))
       .child(svg(`mods/wb-diff/icons/${icon}.svg`).size(12));
     const small = r.hidden !== null && r.hidden <= STEP;
-    const btns = small ? [btn("all", "expand-all", `Show ${r.hidden} hidden ${r.hidden === 1 ? "line" : "lines"}`)]
+    // Below the last hunk before the file is read, the rest's length is unknown: one button reads it and shows
+    // STEP lines (or all, when fewer are left); a longer rest then gets its exact count and both buttons.
+    const btns = r.hidden === null ? [btn("down", "expand-down", `Show up to ${STEP} more lines`)]
+      : small ? [btn("all", "expand-all", `Show ${r.hidden} hidden ${r.hidden === 1 ? "line" : "lines"}`)]
       : [!first && btn("down", "expand-down", `Show ${STEP} more lines below the change above`),
         !tail && btn("up", "expand-up", `Show ${STEP} more lines above the change below`),
         tail && btn("all", "expand-all", "Show the rest of the file")].filter(Boolean);
@@ -560,6 +602,12 @@ export default class DiffView extends View {
       if (fi >= 0) this.scrollY = this.yOf(this.heads[fi]) + delta;
       cx.notify();
     };
+    // Reload the diff, with the file list asked again from git (the panel's list was taken when the file was clicked).
+    const refresh = (cx) => {
+      if (!this.req || this.loading) return;
+      this.load(this.req, cx, cf?.path ?? this.req.path, { delta: fi >= 0 ? Math.max(0, off - this.yOf(this.heads[fi])) : 0 });
+      cx.notify();
+    };
     const toggleWrap = (cx) => {
       const top = this.indexAt(this.scrollY);
       this.wrap = !this.wrap;
@@ -600,6 +648,7 @@ export default class DiffView extends View {
         .child(div().flex_none().max_w(260).truncate().font_semibold().child((cf?.path ?? r?.path)?.split("/").pop() ?? "Diff"))
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(nf > 1 && fi >= 0 ? `file ${fi + 1} of ${nf}` : (cf?.path ?? r?.path ?? "").includes("/") ? (cf?.path ?? r.path).replace(/\/[^/]*$/, "") : ""))
         .when(whole, (e) => e.child(div().flex_none().text_size(11).text_color(t.dim).child("new file")))
+        .when(Boolean(r), (e) => e.child(group([cell("refresh", "refresh", r.commit ? "Reload the diff" : "Refresh: reload the diff and pick up new or reverted files", false, !this.loading, refresh)])))
         .child(group([cell("wrap", "wrap", "Wrap long lines", this.wrap, true, toggleWrap)]))
         .child(group([cell("layout-split", "split", "Side by side", split, true, setLayout("split")),
           cell("layout-unified", "unified", "Unified", !split, true, setLayout("unified"))]))
