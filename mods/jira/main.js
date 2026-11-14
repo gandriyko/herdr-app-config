@@ -87,6 +87,12 @@ const branchTask = ({ key, summary, branch, base }) =>
   `${key}: ${summary} — First run git fetch origin, then create and switch to branch ${branch} from origin/${base}, following the repo's own rules ` +
   `(CLAUDE.md, AGENTS.md, .claude/). If the working tree has uncommitted changes, stop and ask me what to do with them. Then work on ${key}.`;
 
+// A saved JSON list of strings, or [] (missing or broken).
+const parseList = (text) => {
+  try { const v = JSON.parse(text ?? "[]"); return Array.isArray(v) ? v.filter((s) => typeof s === "string").slice(0, 50) : []; }
+  catch { return []; }
+};
+
 const normalizeSite = (text) => {
   const site = text.trim().replace(/\/+$/, "");
   return site && !/^https?:\/\//.test(site) ? `https://${site}` : site;
@@ -106,7 +112,11 @@ export default class Jira extends View {
     this.tokenNew = input("API token");
     this.tokenKeep = input("Empty: the saved token will be used");
     this.tokenNew.set_masked(true); this.tokenKeep.set_masked(true);
-    this.current = localStorage.getItem("current") === "1"; // filter: only the active sprint, no other sprints or backlog
+    // Filters (the filter button's popover): only the active sprint (no other sprints or backlog), and the statuses
+    // picked by name (none picked = all). Names, not ids: ids differ per project, names are what Jira shows.
+    this.current = localStorage.getItem("current") === "1";
+    this.statuses = new Set(parseList(localStorage.getItem("statuses")));
+    this.filterOpen = false;
     this.search = InputState.new({ placeholder: "Search by key or title" });
     this.search.on("change", (_e, cx) => { this.query = this.search.value().trim().toLowerCase(); cx.notify(); });
     this.refresh(cx);
@@ -384,6 +394,42 @@ export default class Jira extends View {
       .child(item("menu-session", `Start ${this.settings().agentName ?? "Claude Code"} session…`, () => this.openStart(key)));
   }
 
+  saveFilters() {
+    localStorage.setItem("current", this.current ? "1" : "0");
+    localStorage.setItem("statuses", JSON.stringify([...this.statuses]));
+  }
+
+  // The filter popover under the filter button. `statuses`: [{ name, cat, count }] of the shown issues.
+  filterView(t, statuses) {
+    const box = (on) => div().size(14).flex_none().flex().items_center().justify_center().rounded(3).border_1()
+      .border_color(on ? t.accent : t.muted).when(on, (s) => s.bg(t.accent).text_color(t.background))
+      .when(on, (s) => s.child(svg("mods/jira/check.svg").size(10)));
+    const row = (id, on, label, color, count, toggle) => h_flex().id(id).h(26).px(8).gap(8).items_center().rounded(5).cursor_pointer()
+      .hover((s) => s.bg(t.hover)).on_click((_e, cx) => { toggle(); this.saveFilters(); cx.notify(); })
+      .child(box(on))
+      .child(div().flex_1().min_w(0).truncate().text_color(color).child(label))
+      .when(count !== null, (e) => e.child(div().flex_none().text_size(10).text_color(t.dim).child(String(count))));
+    const title = (text) => div().px(8).pt(6).pb(2).text_size(10).font_semibold().text_color(t.dim).child(text);
+    const catColor = (cat) => cat === "indeterminate" ? t.working : cat === "done" ? t.done : t.foreground;
+    return v_flex().id("filter-menu").absolute().top(82).right(8).w(230).max_h(360).overflow_y_scroll().p(4).gap(1)
+      .rounded(8).border_1().border_color(t.border).bg(t.popover).shadow_lg()
+      .on_mouse_down_out((_e, cx) => { this.filterOpen = false; this.filterClosedAt = Date.now(); cx.notify(); })
+      // The popover floats over issue rows: without this the press falls through and opens Jira.
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .child(title("SPRINT"))
+      .child(row("filter-current", this.current, "Current sprint only", t.foreground, null, () => { this.current = !this.current; }))
+      .child(title("STATUS"))
+      .when(!statuses.length, (e) => e.child(div().px(8).py(4).text_size(11).text_color(t.dim).child("No issues loaded yet")))
+      .children(statuses.map((s, i) => row(`filter-status-${i}`, this.statuses.has(s.name), s.name, catColor(s.cat), s.count,
+        () => { this.statuses.has(s.name) ? this.statuses.delete(s.name) : this.statuses.add(s.name); })))
+      .when(this.current || this.statuses.size > 0, (e) => e
+        .child(div().my(3).mx(4).h(1).bg(t.border))
+        .child(div().id("filter-clear").h(26).px(8).flex().items_center().rounded(5).cursor_pointer().text_color(t.muted)
+          .hover((s) => s.bg(t.hover).text_color(t.foreground))
+          .on_click((_e, cx) => { this.current = false; this.statuses.clear(); this.saveFilters(); cx.notify(); })
+          .child("Clear filters")));
+  }
+
   groupHeader(name, count, t) {
     return h_flex().h(24).flex_none().px(8).pt(6).gap(6).items_center().text_size(10).text_color(t.dim)
       .child(div().flex_1().min_w(0).truncate().font_semibold().child(name.toUpperCase()))
@@ -420,14 +466,33 @@ export default class Jira extends View {
   render(cx) {
     if (this.st) return this.startView(theme());
     const t = theme(), q = this.query, form = this.setup || this.editing;
-    const match = (issue) => !q || issue.key.toLowerCase().includes(q) || (issue.fields.summary ?? "").toLowerCase().includes(q);
+    const picked = this.statuses, filtered = this.current || picked.size > 0;
+    const byStatus = (issue) => !picked.size || picked.has(issue.fields.status?.name ?? "");
+    const match = (issue) => byStatus(issue) && (!q || issue.key.toLowerCase().includes(q) || (issue.fields.summary ?? "").toLowerCase().includes(q));
     // order 0: an active sprint (see refresh).
-    const groups = this.groups.filter((g) => !this.current || g.order === 0)
-      .map((g) => ({ ...g, issues: g.issues.filter(match) })).filter((g) => g.issues.length);
+    const inSprint = this.groups.filter((g) => !this.current || g.order === 0);
+    const groups = inSprint.map((g) => ({ ...g, issues: g.issues.filter(match) })).filter((g) => g.issues.length);
     const backlog = this.current ? [] : this.backlog.filter(match), project = this.settings().project;
     const empty = form ? null : this.error || (this.loading && !this.groups.length ? "Loading…"
       : q && !groups.length && !backlog.length ? "No matches" : !this.groups.length ? "No open issues assigned to you"
-      : !groups.length ? "No issues in the current sprint" : null);
+      : !groups.length ? (picked.size ? "None of your issues match the filter" : "No issues in the current sprint") : null);
+    // The popover's statuses: those of the issues the sprint filter leaves (to do, then in progress, by name), with
+    // counts, plus picked ones no issue has now so they can be unpicked. At most ~150 issues, only while it's open.
+    let statuses = [];
+    if (this.filterOpen && !form) {
+      const seen = new Map();
+      for (const issue of [...inSprint.flatMap((g) => g.issues), ...(this.current ? [] : this.backlog)]) {
+        const st = issue.fields.status, name = st?.name;
+        if (!name) continue;
+        if (!seen.has(name)) seen.set(name, { name, cat: st.statusCategory?.key, count: 0 });
+        seen.get(name).count++;
+      }
+      for (const name of picked) if (!seen.has(name)) seen.set(name, { name, cat: null, count: 0 });
+      const order = (cat) => cat === "new" ? 0 : cat === "indeterminate" ? 1 : cat === "done" ? 2 : 3;
+      statuses = [...seen.values()].sort((a, b) => order(a.cat) - order(b.cat) || a.name.localeCompare(b.name));
+    }
+    const filterTip = !filtered ? "Filter by sprint and status"
+      : [this.current ? "Current sprint only" : null, picked.size ? `Status: ${[...picked].join(", ")}` : null].filter(Boolean).join("\n");
     const iconButton = (id, icon, tip, onClick, spin = false) => div().id(id).size(24).flex().items_center().justify_center().rounded(6).cursor_pointer()
       .text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip(tip).on_click(onClick).child(svg(icon).size(14).when(spin, (s) => s.spin(900)));
     return v_flex().id("jira").size_full().min_h(0).relative().rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(12)
@@ -448,11 +513,18 @@ export default class Jira extends View {
       .when(!form, (e) => e.child(h_flex().flex_none().px(8).pt(8).gap(6).items_center()
         .child(div().id("search").flex_1().min_w(0).h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().text_size(12).text_color(t.foreground)))
-        .child(div().id("current").flex_none().size(28).flex().items_center().justify_center().rounded(7).border_1().border_color(t.border).cursor_pointer()
-          .text_color(this.current ? t.foreground : t.muted).when(this.current, (s) => s.bg(t.selected)).when(!this.current, (s) => s.hover((st) => st.bg(t.hover)))
-          .tooltip(this.current ? "Showing the current sprint only · show all" : "Show the current sprint only")
-          .on_click((_e, cx) => { this.current = !this.current; localStorage.setItem("current", this.current ? "1" : "0"); cx.notify(); })
-          .child(svg("mods/jira/filter.svg").size(14)))))
+        // Opens the filter popover; filled while a filter is on, with the number of filters.
+        .child(h_flex().id("filter").flex_none().h(28).min_w(28).px(7).gap(4).items_center().justify_center().rounded(7).border_1().cursor_pointer()
+          .border_color(this.filterOpen ? t.accent : t.border).text_color(filtered ? t.foreground : t.muted)
+          .when(filtered, (s) => s.bg(t.selected)).when(!filtered, (s) => s.hover((st) => st.bg(t.hover)))
+          .tooltip(filterTip)
+          .on_click((_e, cx) => {
+            // A press on the button while open already closed it (mouse down outside the popover): don't reopen.
+            if (Date.now() - (this.filterClosedAt ?? 0) < 300) return;
+            this.filterOpen = !this.filterOpen; this.menu = null; cx.notify();
+          })
+          .child(svg("mods/jira/filter.svg").size(14))
+          .when(filtered, (e) => e.child(div().text_size(10).child(String((this.current ? 1 : 0) + picked.size)))))))
       .child(div().flex_1().min_h(0).relative()
         .child(v_flex().id("jira-list").absolute().inset_0().overflow_y_scroll().p(6).gap(1)
           .when(form, (e) => e.child(this.formView(t)))
@@ -465,6 +537,7 @@ export default class Jira extends View {
               .child(this.groupHeader(`${project} backlog`, backlog.length, t))
               .children(backlog.map((issue) => this.issueRow(issue, t, "backlog"))))))
         .child(Scrollbar.vertical("jira-list").absolute().inset_0()))
+      .when(this.filterOpen && !form, (e) => e.child(this.filterView(t, statuses)))
       .when(Boolean(this.menu), (e) => e.child(this.menuView(t)));
   }
 }
