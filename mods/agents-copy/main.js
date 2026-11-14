@@ -119,6 +119,14 @@ function icon(p, size, color) {
   return p.tint ? svg(p.icon).size(size).flex_none().text_color(color) : image(p.icon).w(size).h(size).flex_none();
 }
 
+// The card's status glyph: spinner (working), pulsing "?" (blocked), dot (unseen done), nothing (idle).
+function glyph(t, status, spinner) {
+  if (status === "working") return svg(spinner).size(13).flex_none().text_color(t.working).spin(900);
+  if (status === "blocked") return div().flex_none().size(16).rounded(8).bg(t.blocked).text_color(t.background).text_size(11).font_bold().flex().items_center().justify_center().loop("opacity", { from: 1, to: 0.55, period: 1400 }).child("?");
+  if (status === "done") return div().flex_none().size(8).rounded(4).bg(t.accent).tooltip("Not seen yet");
+  return null;
+}
+
 // The board is a separate mod that may be absent: say so instead of failing silently.
 function openBoard() {
   let ok = true;
@@ -692,28 +700,6 @@ export default class Agents extends View {
           cx.notify();
         })).child(p);
 
-      // Idle with nothing urgent below: one dimmed line, no report, no dot.
-      if (a.status === "idle" && !(urgency.get(a.address) > RANK.idle) && subs.length === 0) {
-        const dimPic = icon(a.program, 16, t.dim);
-        return hover(h_flex()
-          .id(`ag-${a.address}`)
-          .px(8)
-          .h(26)
-          .flex_none()
-          .mb(2)
-          .rounded(7)
-          .items_center()
-          .gap(7)
-          .text_size(12)
-          .when(a.focused, (el) => el.bg(t.selected))
-          .cursor_pointer()
-          .hover((s) => s.bg(t.hover)))
-          .when(Boolean(dimPic), (el) => el.child(picFold(dimPic)))
-          .child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(more ? `${name} / ${more}` : name))
-          .when(Boolean(machine), (el) => el.child(div().text_size(10).text_color(t.dim).child(machine)))
-          .when(Boolean(timeOrPin), (el) => el.child(timeOrPin));
-      }
-
       const blocked = a.status === "blocked";
       const term = termBy.get(a.address);
       const tabInfo = tabs.get(a.tab);
@@ -729,14 +715,16 @@ export default class Agents extends View {
       const pr = prFor(a);
       return hover(v_flex()
         .id(`ag-${a.address}`)
-        .p(8)
+        .py(8)
+        .px(9)
         .gap(4)
         .flex_none()
         .mb(5)
         .rounded(7)
         .border(1)
-        .border_color(blocked ? t.blocked + "55" : t.border)
+        .border_color(blocked ? t.blocked + "66" : t.border)
         .bg(blocked ? t.blocked + "14" : a.focused ? t.selected : t.raised)
+        .when(a.status === "idle", (el) => el.opacity(0.55))
         .cursor_pointer()
         .hover((s) => s.bg(blocked ? t.blocked + "22" : t.hover)))
         .child(h_flex()
@@ -744,14 +732,13 @@ export default class Agents extends View {
           .items_center()
           .when(Boolean(pic), (el) => el.child(picFold(pic)))
           .child(h_flex().flex_1().min_w(0).gap(5).items_center()
-            .child(div().min_w(0).max_w(tabTxt ? 120 : 200).truncate().text_color(t.foreground).when(a.status === "done", (el) => el.font_semibold()).when(a.status !== "done", (el) => el.font_medium()).child(lead))
+            .child(div().min_w(0).max_w(tabTxt ? 120 : 200).truncate().text_color(t.foreground).font_semibold().child(lead))
             .when(Boolean(tabTxt), (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`/ ${tabTxt}`))))
           .when(Boolean(machine), (el) => el.child(div().text_size(10).text_color(t.dim).child(machine)))
           .when(subs.length > 0, (el) => el.child(fold(a, subs)))
-          .when(a.status === "working", (el) => el.child(this.status(t, a)))
-          .when(a.status === "done", (el) => el.child(div().flex_none().size(7).rounded(4).bg(t.accent)))
+          .when(a.status === "working" || a.status === "blocked" || a.status === "done", (el) => el.child(glyph(t, a.status, "mods/agents-copy/spinner.svg")))
           .when(Boolean(timeOrPin), (el) => el.child(timeOrPin)))
-        .when(Boolean(report), (el) => el.child(div().pl(23).min_w(0).truncate().text_size(12).text_color(blocked ? t.blocked : t.dim).child(report)))
+        .when(Boolean(report), (el) => el.child(div().pl(23).min_w(0).max_h(34).overflow_hidden().text_size(12).line_height("17px").text_color(blocked ? t.blocked : t.muted).child(report)))
         .when(Boolean(pr), (el) => el.child(h_flex().pl(23).child(prChip(a, pr))))
         .when(subs.length > 0 && !this.folded.has(a.address), (el) => el.children(subs.map((x) => this.subRow(t, x, shown, byPriority))));
     };

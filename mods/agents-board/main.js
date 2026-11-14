@@ -12,7 +12,6 @@ const PR_FILTERS = [
   { id: "failing", label: "Checks failing" },
   { id: "none", label: "No PR" },
 ];
-const MONO = "Menlo";
 const COLS = [
   { key: "blocked", title: "Needs you", hint: "oldest waiting first", color: "blocked" },
   { key: "working", title: "Working", hint: "longest running first", color: "working" },
@@ -39,6 +38,14 @@ function duration(ms) {
 function icon(p, size, color) {
   if (!p?.icon) return null;
   return p.tint ? svg(p.icon).size(size).flex_none().text_color(color) : image(p.icon).w(size).h(size).flex_none();
+}
+
+// The card's status glyph: spinner (working), pulsing "?" (blocked), dot (unseen done), nothing (idle).
+function glyph(t, status) {
+  if (status === "working") return svg(ICONS + "spinner.svg").size(13).flex_none().text_color(t.working).spin(900);
+  if (status === "blocked") return div().flex_none().size(16).rounded(8).bg(t.blocked).text_color(t.background).text_size(11).font_bold().flex().items_center().justify_center().loop("opacity", { from: 1, to: 0.55, period: 1400 }).child("?");
+  if (status === "done") return div().flex_none().size(8).rounded(4).bg(t.accent).tooltip("Not seen yet");
+  return null;
 }
 
 export default class Board extends View {
@@ -200,7 +207,6 @@ export default class Board extends View {
         report,
         tabShown,
         program: prog,
-        branch: p?.branch ?? sp?.branch ?? null,
         sub: term?.parent ? (parentAgent?.tab_name ?? par?.name ?? "") : null,
         pr: prFor(a),
       };
@@ -303,15 +309,16 @@ export default class Board extends View {
       return v_flex()
         .id(`card-${a.address}`)
         .flex_none()
-        .gap(7)
-        .p(10)
-        .rounded(10)
-        .bg(t.surface)
+        .gap(4)
+        .py(8)
+        .px(9)
+        .rounded(7)
+        .bg(blocked ? t.blocked + "14" : t.raised)
         .border_1()
-        .border_color(on ? t.accent : blocked ? t.blocked + "88" : t.border)
+        .border_color(on ? t.accent : blocked ? t.blocked + "66" : t.border)
         .cursor_pointer()
         .when(a.status === "idle", (el) => el.opacity(0.55))
-        .hover((s) => s.bg(t.hover))
+        .hover((s) => s.bg(blocked ? t.blocked + "22" : t.hover))
         .on_click((_e, cx) => this.go(a, cx))
         .child(
           h_flex()
@@ -322,7 +329,7 @@ export default class Board extends View {
             .when(Boolean(a.space_name && r.tabShown), (el) => el.child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.dim).child(`/ ${r.tabShown}`)))
             .when(r.sub !== null, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("↳ sub-agent")))
             .child(div().flex_1())
-            .when(a.status === "done", (el) => el.child(div().flex_none().size(7).rounded(4).bg(t.accent).tooltip("Not seen yet")))
+            .when(a.status === "working" || a.status === "blocked" || a.status === "done", (el) => el.child(glyph(t, a.status)))
             .child(div().flex_none().text_size(11).text_color(blocked ? t.blocked : t.dim).child(timeText(r))),
         )
         .when(r.sub, (el) => el.child(div().truncate().text_size(11).text_color(t.dim).child(`↳ sub-agent of ${r.sub}`)))
@@ -332,16 +339,18 @@ export default class Board extends View {
               .min_w(0)
               .max_h(34)
               .overflow_hidden()
+              .pl(23)
               .text_size(12)
+              .line_height("17px")
               .text_color(blocked ? t.blocked : t.muted)
-              .child(r.report.length > 160 ? r.report.slice(0, 160) + "…" : r.report),
+              .child(r.report),
           ),
         )
-        .when(Boolean(r.branch), (el) => el.child(div().min_w(0).truncate().font_family(MONO).text_size(11).text_color(t.dim).child(r.branch)))
         .child(
           h_flex()
             .gap(6)
             .items_center()
+            .pl(23)
             .when(Boolean(r.pr), (el) => el.child(prPill(r)))
             .child(div().flex_1())
             .child(button(`peek-${a.address}`, "Peek", () => this.peek(a)))
