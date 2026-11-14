@@ -1,18 +1,15 @@
-// "Asking" detection: an agent that finished its turn on a choice menu or a question needs the person,
-// though herdr-core reports it as done/idle. One screen read per (address, turn), never on a timer.
+// "Asking" detection: an agent that finished its turn on a choice menu needs the person, though
+// herdr-core reports it as done/idle. One screen read per (address, turn, status, title), never on a timer:
+// done -> idle (the person looked) or a new terminal title means the screen may have changed.
 // Pure helpers at module scope; the tracker's state lives in the instance the view creates in init().
 
 const MENU = [/Enter to confirm/, /Esc to cancel/, /^\s*[❯>]\s*\d+\.\s/m, /\(y\/n\)|\[y\/N\]|\[Y\/n\]/i];
 const BORDER = /^\s*[─━]{10,}\s*$/;
-const BOX_ONLY = /^[\s─━│┃╭╮╰╯┌┐└┘]*$/;
-const PROMPT_ONLY = /^\s*[❯>]\s*$/;
-const FOOTER = /auto mode|shift\+tab|esc to interrupt|ctrl\+[a-z] to|↻|bypass permissions|accept edits|plan mode|\? for shortcuts/i;
-const QUESTION_END = /[?？][\s"'’”)\]*_`]*$/;
 const MENU_LINES = 14;
 const MAX_ENTRIES = 200;
 const DONE_STATES = new Set(["done", "idle"]);
 
-// True when the screen text shows a choice menu, a yes/no prompt, or a reply that ends in a question.
+// True when the screen text shows a choice menu or a yes/no prompt (a reply ending in "?" does not count).
 export function isAsking(text) {
   if (!text) return false;
   const lines = text.split("\n");
@@ -22,13 +19,7 @@ export function isAsking(text) {
   const end = borders.length === 2 ? borders[1] : borders.length === 1 ? borders[0] : lines.length;
   // A menu is drawn right above the input box: only the last few lines count, so text that merely quotes one doesn't.
   const near = lines.slice(0, end).filter((l) => l.trim()).slice(-MENU_LINES).join("\n");
-  if (MENU.some((re) => re.test(near))) return true;
-  for (let i = end - 1; i >= 0; i--) {
-    const l = lines[i];
-    if (!l.trim() || BOX_ONLY.test(l) || PROMPT_ONLY.test(l) || FOOTER.test(l)) continue;
-    return QUESTION_END.test(l.trim());
-  }
-  return false;
+  return MENU.some((re) => re.test(near));
 }
 
 export class AskingTracker {
@@ -36,9 +27,9 @@ export class AskingTracker {
   constructor(hc, isLive) {
     this.hc = hc;
     this.isLive = isLive;
-    this.seen = new Map(); // address -> { turn, asking }
-    this.cur = new Map(); // address -> { turn, status } from the last sync
-    this.want = new Map(); // address -> turn, queued for a read
+    this.seen = new Map(); // address -> { key, asking }
+    this.cur = new Map(); // address -> { key, status } from the last sync
+    this.want = new Map(); // address -> key, queued for a read
     this.running = false;
   }
 
@@ -46,7 +37,7 @@ export class AskingTracker {
   is(address) {
     const e = this.seen.get(address);
     const c = this.cur.get(address);
-    return Boolean(e && e.asking && c && e.turn === c.turn && DONE_STATES.has(c.status));
+    return Boolean(e && e.asking && c && e.key === c.key && DONE_STATES.has(c.status));
   }
 
   // Looks at the agents once per render/tick: queues a read for each done/idle agent whose turn wasn't read.
@@ -58,7 +49,9 @@ export class AskingTracker {
     for (const a of list) {
       gone.delete(a.address);
       const turn = turns.get(a.address);
-      this.cur.set(a.address, { turn, status: a.status });
+      // The key changes with a new turn, done -> idle (looked at) or a new terminal title: each means a fresh read.
+      const key = `${turn}|${a.status}|${a.title ?? ""}`;
+      this.cur.set(a.address, { key, status: a.status });
       if (!DONE_STATES.has(a.status)) {
         // Working or blocked: nothing to remember, the next finish is a new turn.
         this.seen.delete(a.address);
@@ -66,7 +59,7 @@ export class AskingTracker {
         continue;
       }
       if (turn == null) continue;
-      if (this.seen.get(a.address)?.turn !== turn && this.want.get(a.address) !== turn) this.want.set(a.address, turn);
+      if (this.seen.get(a.address)?.key !== key && this.want.get(a.address) !== key) this.want.set(a.address, key);
     }
     for (const k of gone) {
       this.seen.delete(k);
@@ -84,7 +77,7 @@ export class AskingTracker {
     cx.spawn(async (cx) => {
       try {
         while (this.isLive() && this.want.size) {
-          const [address, turn] = this.want.entries().next().value;
+          const [address, key] = this.want.entries().next().value;
           this.want.delete(address);
           const before = this.is(address);
           let asking = false;
@@ -97,7 +90,7 @@ export class AskingTracker {
           if (!this.isLive()) return;
           // The agent may have left or started working meanwhile: only a still-listed done/idle agent keeps the answer.
           if (!this.cur.has(address) || !DONE_STATES.has(this.cur.get(address).status)) continue;
-          this.seen.set(address, { turn, asking });
+          this.seen.set(address, { key, asking });
           if (this.is(address) !== before) cx.notify();
         }
       } finally {

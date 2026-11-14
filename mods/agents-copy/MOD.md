@@ -18,12 +18,12 @@ Lists agents like the shipped `agents` panel, in Priority or Grouped by space, w
 
 - PR chip: a pill after the row text with `#<n>` and a check glyph (red failing, green passing, yellow pending, grey none). Click opens the PR in the browser (`gh pr view --web`). No chip without an open PR, for agents on other machines, or in rail mode.
 - Filter (funnel button in the header): one space or all, and PR: Any / Has PR / Checks failing / No PR. An active filter shows a chip with a clear button and an accent-colored icon. It applies to both views and to the order used by agent.next/prev.
-- Asking: an agent that finished (done or idle) on a choice menu or a question counts as blocked: Needs you group, red tint, pulsing `?`, ordered and reminded like a blocked one (its time counts from when it was detected). It stays so until its turn changes or it starts working.
+- Asking: an agent that finished (done or idle) on a choice menu counts as blocked: Needs you group, red tint, pulsing `?`, ordered and reminded like a blocked one (its time counts from when it was detected). It stays so until the screen is re-read without a menu (turn, done-to-idle or title change) or it starts working.
 - Reminders: while an agent stays blocked (or asking), a repeat warning toast and the `blocked` sound come every 2, 5 (default) or 10 minutes (or off), set in the sort popup. Herdr's own first toast and sound are not duplicated. Not sent for the agent you are looking at in an active window. Several due at once give one toast naming the count, focusing the longest-waiting.
 
 ## Files
 - main.js: the view, popups, gh lookups, reminders.
-- asking.js: the asking detector and its per-turn read queue.
+- asking.js: the asking detector and its read queue.
 - check.svg, columns.svg, chevron-down.svg, chevron-right.svg, clock.svg, filter.svg, layers.svg, pin.svg, pin-off.svg, spinner.svg, x.svg: icons.
 - gpui-kit.d.ts, jsconfig.json: editor typings only.
 
@@ -33,7 +33,7 @@ Lists agents like the shipped `agents` panel, in Priority or Grouped by space, w
 - Reads `sidebar.width` / `sidebar.collapsed` (app and layout contract) for the rail toggle.
 
 ## Notes
-Asking detection: Claude Code reports `blocked` only for tool-permission prompts, so a menu of its own ("Enter to confirm", "Esc to cancel", a `❯ 1.` selector, `(y/n)`) or a reply ending in `?` shows as done/idle. For each done/idle agent whose `(address, turn)` was not read yet, the mod runs `hc read <address>` (the screen only) once, one read at a time, and matches the last 14 lines above the input box for a menu, else checks whether the last reply line (box lines, the prompt and the status footer skipped) ends with `?`. The answer is kept per address for that turn (map capped at 200, dropped for agents that are gone, cleared when the agent works or is blocked). At most one read per agent per turn; nothing on a timer; a redraw only when an agent's asking state changes. It is a heuristic: a question not at the end of the reply is missed.
+Asking detection: Claude Code reports `blocked` only for tool-permission prompts, so a menu of its own ("Enter to confirm", "Esc to cancel", a `❯ 1.` selector, `(y/n)`) shows as done/idle. Only choice menus count; a reply that merely ends in `?` does not. For each done/idle agent the mod runs `hc read <address>` (the screen only) and matches the last 14 lines above the input box for a menu. It reads again when the key `(address, turn, status, title)` changes: a new turn, done turning idle (the person looked at it, e.g. after dismissing a menu), or a new terminal title. The answer is kept per address (map capped at 200, dropped for agents that are gone, cleared when the agent works or is blocked). One read at a time; nothing on a timer; a redraw only when an agent's asking state changes.
 
 The columns button in the header (hidden in rail mode) opens the `agents-board` mod with `mod.open`. If that mod isn't installed it shows a warning toast; everything else works without it.
 
