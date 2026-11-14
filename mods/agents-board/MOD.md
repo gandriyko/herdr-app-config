@@ -1,0 +1,35 @@
+---
+name: agents-board
+summary: Kanban of agents (Needs you, Working, Done) in a dialog opened with Cmd+Shift+A, with PR and checks pills, space and PR filters, search and Peek / Go / Answer buttons.
+source: https://github.com/gandriyko/herdr-app-config/tree/main/mods/agents-board
+install: copy the folder mods/agents-board into ~/.config/herdr-app/mods/agents-board, then add "cmd-shift-a": "mod.open:agents-board" to the global section of keys.json
+place: none
+needs: [gh, git]
+shared_keys: [agents-board.filter]
+reads_keys: []
+commands: [mod.open, pane.focus, agent.focus, terminal.peek]
+---
+
+## What it does
+A dialog (1180 x 740) with three columns. `mod.open` again, Esc or the close button closes it.
+
+- Needs you: blocked agents, oldest waiting first, with a red-tinted card and an Answer button.
+- Working: longest running first, with the elapsed time.
+- Done: agents that finished while unseen first (newest first, accent dot), then seen (idle) agents as dimmed cards, newest first. The column count is all cards shown.
+- Card: program icon and name, space / tab, branch, the agent's report (else its title), a PR pill (`#n` and a checks glyph, click opens the PR in the browser), Peek, Go. A click anywhere on the card is Go. Go and Answer focus the agent's pane and close the board. Sub-agents show "sub-agent of <tab>".
+- Header: summary ("2 need you · 3 working · 1 unseen · 4 seen", zero parts left out, "No agents" when none), search (program, space, tab, report), close.
+- Filters: space chips with their agent counts (idle included), and PR: Any / Has PR / Checks failing / No PR.
+- Keys: up/down between cards, left/right between columns (while the search is empty), Enter = Go, Space = Peek (while the search is empty).
+
+## Files
+- main.js: the view.
+- prs.js: PR lookup helpers (state is kept by the view instance).
+- check.svg, x.svg, spinner.svg, search.svg, chevron-down.svg, chevron-right.svg: icons.
+
+## Settings and data
+- Shared `agents-board.filter` ({ space, pr }). A space that is gone counts as All. Search is not saved.
+
+## Notes
+Everything is live from `agents()`, `terminals()`, `spaces()` and `panes()`; the view redraws when they change. A 30 s timer only refreshes the durations and the PR lookup.
+
+PR lookups: each cwd is resolved once to its git common dir (cache capped at 200), so worktrees share one `gh pr list --state open --limit 100 --json number,headRefName,statusCheckRollup` call (15 s timeout). One gh call at a time; gh is asked only for feature branches: the default branch (`git symbolic-ref --quiet --short refs/remotes/origin/HEAD`, re-read every 30 min; without it `main` and `master`), a null branch and a detached HEAD are never asked, and a repo with none of them left gets no gh call. A feature branch not asked about yet is asked at once, then the repo every 5 min while none of them has an open PR, every 60 s while one has (5 min after a failure, keeping the last good answer). If gh is missing or not logged in, pills disappear and it retries every 10 minutes. At most 30 repos are cached. Agents on other machines have no PR. The view redraws only when the PR map changes. When the dialog closes everything stops.

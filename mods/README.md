@@ -18,6 +18,8 @@ when one of them is absent.
 
 | Mod | What it does |
 | --- | --- |
+| [agents-board](agents-board/MOD.md) | Kanban of agents (Needs you, Working, Done) opened with ⌘⇧A, with PR and checks pills, space/PR filters, search and Peek / Go / Answer buttons. |
+| [agents-copy](agents-copy/MOD.md) | Sidebar agent list (clone of agents) with PR and checks chips, a space/PR filter and repeat reminders for agents still waiting. |
 | [branch-picker](branch-picker/MOD.md) | Overlay that lists local git branches in a tree and checks one out |
 | [changes-copy](changes-copy/MOD.md) | Changes panel (clone of changes) with list/tree views, side-by-side diff tab and AI commit messages |
 | [history](history/MOD.md) | Search and read past agent sessions (Claude, Codex, ...) via the human-history tool, with resume |
