@@ -2,7 +2,8 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
-import { agents, terminals, panes, spaces, run, theme, shared, setShared, openOverlay, closeOverlay, props, exec } from "herdr";
+import { agents, terminals, panes, spaces, run, theme, shared, setShared, openOverlay, closeOverlay, props, exec, hc } from "herdr";
+import { AskingTracker } from "./asking.js";
 import { CHECKS_WORD, newPrState, prMap, prOf, refreshPrs } from "./prs.js";
 
 const ICONS = "mods/agents-board/";
@@ -85,6 +86,8 @@ export default class Board extends View {
       return;
     }
     this.pr = newPrState();
+    // Agents finished on a menu or a question count as blocked; one screen read per turn.
+    this.asking = new AskingTracker(hc, () => this.live);
     this.prJson = "{}";
     this.placesKey = "";
     this.places = [];
@@ -302,8 +305,8 @@ export default class Board extends View {
     const t = theme();
     const now = Date.now();
     // Each host list once.
-    const list = agents();
     const terms = terminals();
+    const list = this.asking.apply(agents(), terms, cx);
     const spaceList = spaces();
     const paneList = panes();
 

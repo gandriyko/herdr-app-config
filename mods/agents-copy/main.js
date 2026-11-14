@@ -2,7 +2,8 @@
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout, exec, notify, playSound, settings } from "herdr";
+import { AskingTracker } from "./asking.js";
+import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, hc, openOverlay, closeOverlay, props, window, layout, exec, notify, playSound, settings } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -157,10 +158,13 @@ export default class Agents extends View {
     this.again = false;
     this.ghDownUntil = 0;
     this.blocked = new Map(); // address -> { since, last }
+    // Agents finished on a menu or a question count as blocked; one screen read per turn.
+    this.asking = new AskingTracker(hc, () => this.live);
     cx.timer.every(30000, (cx) => {
       if (!this.live) return;
-      this.trackBlocked(agents(), Date.now());
-      this.remind();
+      const list = this.asking.apply(agents(), terminals(), cx);
+      this.trackBlocked(list, Date.now());
+      this.remind(list);
       this.kick(cx);
       cx.notify();
     });
@@ -185,13 +189,13 @@ export default class Agents extends View {
   }
 
   // Repeats the "needs you" nudge for agents still blocked; one toast per tick.
-  remind() {
+  remind(list) {
     const mins = remindMinutes();
     if (!mins || !this.blocked.size) return;
     const now = Date.now();
     const looking = window()?.active ? focused()?.terminal : null;
     const due = [];
-    for (const a of agents()) {
+    for (const a of list) {
       const e = this.blocked.get(a.address);
       if (!e || a.status !== "blocked") continue;
       if (a.address === looking) {
@@ -506,12 +510,12 @@ export default class Agents extends View {
     if (props()?.filterMenu) return this.filterMenu(t);
     const collapsed = narrow();
     const sort = sortOf();
-    let list = agents();
+    const all = terminals();
+    let list = this.asking.apply(agents(), all, cx);
     const allPanes = panes();
     const spaceList = spaces();
     this.trackBlocked(list, Date.now());
     this.listed = new Map(list.map((a) => [a.address, a.status]));
-    const all = terminals();
     this.migratePins(all);
     const termBy = new Map(all.map((k) => [k.address, k]));
     const shown = focused()?.agent;
