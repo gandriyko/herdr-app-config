@@ -1,6 +1,6 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, TextView, InputState, Input, TextareaState, Textarea } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, theme, notify, playSound, props, openOverlay, closeOverlay, shared, setShared } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, theme, notify, playSound, props, openOverlay, closeOverlay, shared, setShared, run, knownAgents } from "herdr";
 import { migrate, modelFor, settingsFor, projectKey, projectName, languageLine, runModel, describe } from "./ai.js";
 
 // My open pull requests in the repo of the focused folder, via the `gh` CLI. Click opens the PR in a popup
@@ -92,7 +92,7 @@ function approval(pr) {
     : pr.reviewDecision === "APPROVED" || states.includes("APPROVED") ? "approved" : "";
 }
 
-const FIELDS ="number,title,headRefName,isDraft,reviewDecision,url,statusCheckRollup,reviewRequests,reviews,body,author";
+const FIELDS ="number,title,headRefName,isDraft,reviewDecision,url,statusCheckRollup,reviewRequests,reviews,body,author,isCrossRepository";
 // `all`: every open PR of the repo; else mine, then those waiting for my review (a second gh call), by number.
 async function list(cwd, on, all) {
   if (all) return listBy(cwd, on, []);
@@ -156,13 +156,113 @@ async function prRules(root, on) {
 // "owner/name" from a git remote URL (https or ssh), or null.
 const repoName = (url) => /[:/]([^/:]+\/[^/]+?)(?:\.git)?\/?$/.exec(url)?.[1] ?? null;
 
+// "Work in a worktree": one worktree per PR branch, next to the main checkout (<parent>/<repo>-<branch slug>,
+// the same scheme as other mods use), with an agent started there.
+const worktreeSlug = (branch) => branch.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+const worktreePath = (main, branch) => `${main.replace(/\/[^/]+$/, "")}/${main.split("/").pop()}-${worktreeSlug(branch)}`;
+// Space name: "#123 First words of the title" (whole words, about 30 chars of title).
+const spaceName = (n, title) => {
+  let s = "";
+  for (const w of (title ?? "").trim().split(/\s+/).filter(Boolean)) { if (s && (s + " " + w).length > 30) break; s = s ? s + " " + w : w; }
+  return s ? `#${n} ${s.slice(0, 40)}` : `#${n}`;
+};
+// The agent's first message. One line: a newline could send it early.
+// ponytail: body capped at 3000 chars; the setup steps are left to the agent and the repo's own docs.
+const worktreeTask = ({ pr, body, path, branch, main, fork }) => {
+  const text = (body ?? "").replace(/<!--[\s\S]*?-->/g, " ").replace(/\s+/g, " ").trim();
+  const cut = text.length > 3000 ? text.slice(0, 3000) + "…" : text;
+  return `PR #${pr.number}: ${(pr.title ?? "").replace(/\s+/g, " ")} — Description: ${cut || "(none)"} — ` +
+    `You are in a git worktree ${path} on branch ${branch}, the head of PR #${pr.number} (${pr.url}); the main checkout is ${main}. ` +
+    `First prepare this worktree as the repo's own docs say (CLAUDE.md, AGENTS.md, .claude/, README): copy the gitignored files it needs from the main checkout ` +
+    `(env files, certificates, local config), install dependencies, and list what you copied; don't change the main checkout. ` +
+    `Then read the PR's review comments and unresolved threads with gh and address them; ask before pushing.` +
+    (fork ? " This PR comes from a fork: don't push unless I ask." : "");
+};
+const lastLine = (r) => (r.stderr || r.stdout || "").trim().split("\n").pop();
+
 export default class Prs extends View {
+  // Installed agents per machine (knownAgents), cached; the one a worktree starts is claude if installed, else the first.
+  async loadAgents(on, cx) {
+    const k = on ?? "";
+    if (this.agents.has(k)) return this.agents.get(k);
+    let list = [];
+    try { list = (await knownAgents({ on })).filter((a) => a.installed); } catch {}
+    const a = list.find((x) => x.key === "claude") ?? list[0];
+    const pick = { argv: a?.run ?? ["claude"], name: a?.name ?? a?.key ?? "claude" };
+    if (list.length) { this.agents.set(k, pick); cx.notify(); }
+    return pick;
+  }
+
+  // One click: worktree on the PR's branch (or the existing one) and an agent there with the PR as prompt.
+  startWorktree(pr, cx) {
+    if (this.starting.has(pr.url)) return;
+    this.starting.add(pr.url); cx.notify();
+    const { cwd, on } = pr.repo ?? {};
+    const fail = (m) => notify({ title: "Pull requests", body: `#${pr.number}: ${m}`, level: "error" });
+    cx.spawn(async (cx) => {
+      try {
+        const rev = await exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, on, timeout: 30000 });
+        if (rev.code !== 0) return fail(lastLine(rev));
+        const main = rev.stdout.trim().replace(/\/\.git\/?$/, "");
+        const git = (args, timeout = 30000) => exec("git", args, { cwd: main, on, timeout });
+        const head = pr.headRefName, fork = Boolean(pr.isCrossRepository);
+        // A fork's branch name may clash with a local one: a local name of its own.
+        const branch = fork ? `pr-${pr.number}-${worktreeSlug(head)}` : head;
+        const path = worktreePath(main, branch);
+        const agent = await this.loadAgents(on, cx);
+        const start = async (dir) => {
+          let body = pr.body;
+          const v = await exec("gh", ["pr", "view", String(pr.number), "--json", "body"], { cwd, on, timeout: 60000 }).catch(() => null);
+          try { body = JSON.parse(v.stdout).body ?? body; } catch {}
+          run("space.new", { name: spaceName(pr.number, pr.title), folder: dir, machine: on ?? "", argv: agent.argv,
+            task: worktreeTask({ pr, body, path: dir, branch, main, fork }) });
+        };
+        const list = await git(["worktree", "list", "--porcelain"]);
+        if (list.code !== 0) return fail(lastLine(list));
+        // Idempotent: the branch already has a worktree (its path is in the line above its "branch" line).
+        let existing = null, cur = null;
+        for (const line of list.stdout.split("\n")) {
+          if (line.startsWith("worktree ")) cur = line.slice(9);
+          else if (line === `branch refs/heads/${branch}`) existing = cur;
+        }
+        if (existing) {
+          const sp = spaces().find((s) => s.folder === existing && (s.machine ?? "") === (on ?? ""));
+          if (sp) run("space.select", { id: sp.id }); else await start(existing);
+          return;
+        }
+        const local = await git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]);
+        let added;
+        if (local.code === 0) {
+          await git(["fetch", "origin", fork ? `pull/${pr.number}/head` : head], 120000).catch(() => null); // failure is fine: the local branch is used as is
+          added = await git(["worktree", "add", path, branch]);
+        } else if (!fork) {
+          const f = await git(["fetch", "origin", head], 120000);
+          if (f.code !== 0) return fail(lastLine(f));
+          added = await git(["worktree", "add", "--track", "-b", branch, path, `origin/${head}`]);
+        } else {
+          const f = await git(["fetch", "origin", `pull/${pr.number}/head`], 120000);
+          if (f.code !== 0) return fail(lastLine(f));
+          added = await git(["worktree", "add", "-b", branch, path, "FETCH_HEAD"]);
+        }
+        if (added.code !== 0) return fail(lastLine(added));
+        await start(path);
+      } catch (e) { fail(String(e.message ?? e)); }
+      finally { this.starting.delete(pr.url); cx.notify(); }
+    });
+  }
+
+  // The button of a row and of the popup: spinner while starting, else the session icon.
+  worktreeTip(pr) { return `Work on #${pr.number} in a worktree (${this.agents.get(pr.repo?.on ?? "")?.name ?? "claude"})`; }
+
   init(_props, cx) {
+    this.starting = new Set(); // PR urls whose worktree is being made
+    this.agents = new Map(); // machine -> { argv, name } (see loadAgents)
     // Opened as a popup for one PR (click on a row): its description, approvals, comments and reviews.
     if (props()?.pr) { this.detailPr = props().pr; this.cpOpen = new Set(); this.loadDetail(cx); return; }
     // Opened as a dialog from the header's + : a new pull request for the branch of that folder.
     if (props()?.create) { this.initCreate(cx); return; }
     this.started = Date.now();
+    this.loadAgents(null, cx);
     // Search: by title, description, branch or number; the list is cut as you type.
     this.query = "";
     this.search = InputState.new({ placeholder: "Search pull requests: title, description" });
@@ -518,6 +618,7 @@ export default class Prs extends View {
           .text_size(12).font_medium().text_color(t.background).cursor_pointer().hover((s) => s.opacity(0.85))
           .on_click(() => exec("open", [pr.url])).child("Open"))
         .child(btn("copy", "Copy link", (_e, cx) => cx.write_to_clipboard(pr.url)))
+        .child(btn("worktree", this.starting.has(pr.url) ? "Starting…" : "Work in worktree", (_e, cx) => this.startWorktree(pr, cx)))
         .child(div().id("close").size(26).flex().items_center().justify_center().rounded(6).text_color(t.dim).cursor_pointer()
           .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click(() => closeOverlay(props()?.overlay)).child("✕")))
       .child(v_flex().id("pr-body").flex_1().min_h(0).overflow_y_scrollbar().px(16).py(14).gap(14)
@@ -627,6 +728,11 @@ export default class Prs extends View {
           .text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(`Copy ${taskKey}`)
           .on_click((_e, cx) => { cx.stop_propagation(); cx.write_to_clipboard(taskKey); })
           .child(svg("mods/prs/copy.svg").size(12))))
+        // One click: a worktree on the PR's branch with an agent started there (see startWorktree).
+        .child(div().id(`wt-${pr.number}`).flex_none().size(18).flex().items_center().justify_center().rounded(4)
+          .text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(this.worktreeTip(pr))
+          .on_click((_e, cx) => { cx.stop_propagation(); this.startWorktree(pr, cx); })
+          .child(this.starting.has(pr.url) ? svg("mods/prs/spinner.svg").size(12).spin(900) : svg("mods/prs/session.svg").size(12)))
         // Draft: a purple "draft pull request" icon (theme's ansi5, a colour no other mark here uses).
         .when(pr.isDraft, (e) => e.child(div().id(`draft-${pr.number}`).flex_none().size(15).flex().items_center().justify_center().tooltip("Draft: not ready for review")
           .child(svg("mods/prs/draft.svg").size(14).text_color(t.ansi5)))))
