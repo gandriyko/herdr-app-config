@@ -724,7 +724,7 @@ export default class Agents extends View {
       // Line 1 names the tab only when a person named it and it says something new.
       const tabName = tabInfo?.named ? (tabInfo.name ?? "").trim() : "";
       let lead = full && a.space_name ? a.space_name : null;
-      let tabTxt = tabName && tabName.toLowerCase() !== report.trim().toLowerCase() ? tabName : null;
+      let tabTxt = tabName && tabName.toLowerCase() !== report.trim().toLowerCase() && tabName.toLowerCase() !== prog.trim().toLowerCase() ? tabName : null;
       if (!lead) { lead = tabTxt ?? (prog || label(a)); if (tabTxt) tabTxt = null; }
       const pr = prFor(a);
       return hover(v_flex()

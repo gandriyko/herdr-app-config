@@ -191,7 +191,7 @@ export default class Board extends View {
       if (report.toLowerCase() === prog.trim().toLowerCase()) report = "";
       // The tab shows on line 1 only when a person named it and it says something new.
       const tabName = tb?.named ? (tb.name ?? "").trim() : "";
-      const tabShown = tabName && tabName.toLowerCase() !== report.toLowerCase() ? tabName : null;
+      const tabShown = tabName && tabName.toLowerCase() !== report.toLowerCase() && tabName.toLowerCase() !== prog.trim().toLowerCase() ? tabName : null;
       const par = term?.parent ? termBy.get(term.parent) : null;
       const parentAgent = term?.parent ? agentBy.get(term.parent) : null;
       return {
