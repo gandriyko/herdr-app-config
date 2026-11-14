@@ -177,7 +177,7 @@ export default class Board extends View {
         .cursor_pointer()
         .tooltip(tip)
         .hover((s) => s.bg(t.hover).text_color(t.foreground))
-        .on_mouse_down((_e, cx) => cx.stop_propagation())
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_click((_e, cx) => {
           cx.stop_propagation();
           onClick();
