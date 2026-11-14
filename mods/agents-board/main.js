@@ -437,6 +437,7 @@ export default class Board extends View {
       const blocked = a.status === "blocked";
       const on = this.sel === a.address;
       const pic = icon(a.program, 16, t.foreground);
+      const g = glyph(t, a.status);
       return v_flex()
         .id(`card-${a.address}`)
         .flex_none()
@@ -454,30 +455,38 @@ export default class Board extends View {
         .child(
           h_flex()
             .gap(7)
-            .items_center()
-            .when(Boolean(pic), (el) => el.child(pic))
-            .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(a.space_name || r.tabShown || r.program))
-            .when(Boolean(a.space_name && r.tabShown), (el) => el.child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.dim).child(`/ ${r.tabShown}`)))
-            .when(r.sub !== null, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("↳ sub-agent")))
-            .child(div().flex_1())
-            .child(((g) => div().flex_none().w(16).h(16).flex().items_center().justify_center().when(Boolean(g), (el) => el.child(g)))(glyph(t, a.status)))
-            .child(div().flex_none().w(34).flex().justify_end().whitespace_nowrap().overflow_hidden().text_size(11).text_color(blocked ? t.blocked : t.dim).child(timeText(r))),
-        )
-        .when(r.sub, (el) => el.child(div().truncate().text_size(11).text_color(t.dim).child(`↳ sub-agent of ${r.sub}`)))
-        .when(Boolean(r.report), (el) =>
-          el.child(
-            div()
-              .min_w(0)
-              .max_h(34)
-              .overflow_hidden()
-              .pl(23)
-              .text_size(12)
-              .line_height("17px")
-              .text_color(blocked ? t.blocked : t.muted)
-              .child(r.report),
-          ),
-        )
-        .when(Boolean(r.pr), (el) => el.child(h_flex().items_center().pl(23).child(prPill(r))));
+            .items_start()
+            .child(
+              v_flex().flex_none().w(16).gap(6).items_center()
+                .when(Boolean(pic), (el) => el.child(pic))
+                .child(div().flex_none().w(16).h(16).flex().items_center().justify_center().when(Boolean(g), (el) => el.child(g))),
+            )
+            .child(
+              v_flex().flex_1().min_w(0).gap(4)
+                .child(
+                  h_flex()
+                    .gap(7)
+                    .items_center()
+                    .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(a.space_name || r.tabShown || r.program))
+                    .when(Boolean(a.space_name && r.tabShown), (el) => el.child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.dim).child(`/ ${r.tabShown}`)))
+                    .when(r.sub !== null, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("↳ sub-agent")))
+                    .child(div().flex_1())
+                    .child(div().flex_none().flex().justify_end().whitespace_nowrap().overflow_hidden().text_size(11).text_color(blocked ? t.blocked : t.dim).child(timeText(r))),
+                )
+                .when(r.sub, (el) => el.child(div().truncate().text_size(11).text_color(t.dim).child(`↳ sub-agent of ${r.sub}`)))
+                .child(
+                  div()
+                    .min_w(0)
+                    .max_h(34)
+                    .overflow_hidden()
+                    .text_size(12)
+                    .line_height("17px")
+                    .text_color(r.report ? (blocked ? t.blocked : t.muted) : t.dim)
+                    .child(r.report || r.tabShown || r.program || " "),
+                )
+                .when(Boolean(r.pr), (el) => el.child(h_flex().items_center().child(prPill(r)))),
+            ),
+        );
     };
 
     const column = (def, i) => {

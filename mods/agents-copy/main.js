@@ -692,7 +692,7 @@ export default class Agents extends View {
           cx.notify();
         })
         .on_click(() => run("pane.focus", { pane: a.pane }));
-      const timeOrPin = this.hovered === a.address ? pin : Boolean(when) ? div().flex_none().w(34).flex().justify_end().whitespace_nowrap().overflow_hidden().text_size(11).text_color(a.status === "blocked" ? t.blocked : t.dim).child(duration(now - when)) : null;
+      const timeOrPin = this.hovered === a.address ? pin : Boolean(when) ? div().flex_none().flex().justify_end().whitespace_nowrap().overflow_hidden().text_size(11).text_color(a.status === "blocked" ? t.blocked : t.dim).child(duration(now - when)) : null;
       const picFold = (p) => div().id(`agent-fold-${a.address}`)
         .when(subs.length > 0, (el) => el.on_click((_e, cx) => {
           cx.stop_propagation();
@@ -713,6 +713,7 @@ export default class Agents extends View {
       let tabTxt = tabName && tabName.toLowerCase() !== report.trim().toLowerCase() && tabName.toLowerCase() !== prog.trim().toLowerCase() ? tabName : null;
       if (!lead) { lead = tabTxt ?? (prog || label(a)); if (tabTxt) tabTxt = null; }
       const pr = prFor(a);
+      const g = glyph(t, a.status, "mods/agents-copy/spinner.svg");
       return hover(v_flex()
         .id(`ag-${a.address}`)
         .py(8)
@@ -729,17 +730,22 @@ export default class Agents extends View {
         .hover((s) => s.bg(blocked ? t.blocked + "22" : t.hover)))
         .child(h_flex()
           .gap(7)
-          .items_center()
-          .when(Boolean(pic), (el) => el.child(picFold(pic)))
-          .child(h_flex().flex_1().min_w(0).gap(5).items_center()
-            .child(div().min_w(0).max_w(tabTxt ? 120 : 200).truncate().text_color(t.foreground).font_semibold().child(lead))
-            .when(Boolean(tabTxt), (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`/ ${tabTxt}`))))
-          .when(Boolean(machine), (el) => el.child(div().text_size(10).text_color(t.dim).child(machine)))
-          .when(subs.length > 0, (el) => el.child(fold(a, subs)))
-          .child(((g) => div().flex_none().w(16).h(16).flex().items_center().justify_center().when(Boolean(g), (el) => el.child(g)))(glyph(t, a.status, "mods/agents-copy/spinner.svg")))
-          .when(Boolean(timeOrPin), (el) => el.child(timeOrPin)))
-        .when(Boolean(report), (el) => el.child(div().pl(23).min_w(0).max_h(34).overflow_hidden().text_size(12).line_height("17px").text_color(blocked ? t.blocked : t.muted).child(report)))
-        .when(Boolean(pr), (el) => el.child(h_flex().pl(23).child(prChip(a, pr))))
+          .items_start()
+          .child(v_flex().flex_none().w(16).gap(6).items_center()
+            .when(Boolean(pic), (el) => el.child(picFold(pic)))
+            .child(div().flex_none().w(16).h(16).flex().items_center().justify_center().when(Boolean(g), (el) => el.child(g))))
+          .child(v_flex().flex_1().min_w(0).gap(4)
+            .child(h_flex()
+              .gap(7)
+              .items_center()
+              .child(h_flex().flex_1().min_w(0).gap(5).items_center()
+                .child(div().min_w(0).max_w(tabTxt ? 120 : 200).truncate().text_color(t.foreground).font_semibold().child(lead))
+                .when(Boolean(tabTxt), (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`/ ${tabTxt}`))))
+              .when(Boolean(machine), (el) => el.child(div().text_size(10).text_color(t.dim).child(machine)))
+              .when(subs.length > 0, (el) => el.child(fold(a, subs)))
+              .when(Boolean(timeOrPin), (el) => el.child(timeOrPin)))
+            .child(div().min_w(0).max_h(34).overflow_hidden().text_size(12).line_height("17px").text_color(report ? (blocked ? t.blocked : t.muted) : t.dim).child(report || (tabInfo?.name ?? "").trim() || prog || label(a)))
+            .when(Boolean(pr), (el) => el.child(h_flex().child(prChip(a, pr))))))
         .when(subs.length > 0 && !this.folded.has(a.address), (el) => el.children(subs.map((x) => this.subRow(t, x, shown, byPriority))));
     };
 
