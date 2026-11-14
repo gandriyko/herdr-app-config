@@ -587,18 +587,17 @@ export default class Board extends View {
             .border_color(t.border)
             .bg(t.background)
             .on_key_down((e, cx) => {
+              // Only Esc and Tab are intercepted; every other key (text, Enter) reaches the Input,
+              // which emits "submit" on Enter. Stopping other keys would block text input.
               if (e.key === "escape") {
                 this.closeReply(cx);
-              } else if (e.key === "tab") {
-                if (!rp.input.value() && rp.suggestion) {
-                  rp.input.set_value(rp.suggestion);
-                  const n = rp.suggestion.length;
-                  rp.input.set_selected_range({ start: n, end: n });
-                }
-              } else if (e.key === "enter") {
-                this.submitReply(cx);
+                cx.stop_propagation();
+              } else if (e.key === "tab" && !rp.input.value() && rp.suggestion) {
+                rp.input.set_value(rp.suggestion);
+                const n = rp.suggestion.length;
+                rp.input.set_selected_range({ start: n, end: n });
+                cx.stop_propagation();
               }
-              cx.stop_propagation(); // the board's own keys stay out of the box
             })
             .child(Input.new(rp.input).flex_1().h_full().text_size(12.5).text_color(t.foreground))
             .when(rp.sending, (el) => el.child(svg(ICONS + "spinner.svg").size(13).flex_none().text_color(t.working).spin(900)));
