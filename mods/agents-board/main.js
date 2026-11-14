@@ -10,7 +10,7 @@ const ICONS = "mods/agents-board/";
 const PR_FILTERS = [
   { id: "any", label: "Any" },
   { id: "with", label: "Has PR" },
-  { id: "failing", label: "Checks failing" },
+  { id: "failing", label: "Failing" },
   { id: "none", label: "No PR" },
 ];
 const COLS = [
@@ -529,11 +529,11 @@ export default class Board extends View {
       h_flex()
         .id(id)
         .flex_none()
-        .h(24)
-        .px(9)
+        .h(30)
+        .px(11)
         .gap(5)
         .items_center()
-        .rounded(12)
+        .rounded(8)
         .text_size(12)
         .cursor_pointer()
         .when(on, (el) => el.bg(t.selected).text_color(t.foreground).font_medium())
@@ -634,7 +634,39 @@ export default class Board extends View {
               .children(spaceChips.map((c) => chip(`sp-${c.id}`, c.label, flSpace === c.id, () => setFilter({ space: c.id }), c.n))),
           )
           .child(div().flex_1())
-          .child(h_flex().gap(3).flex_none().children(PR_FILTERS.map((f) => chip(`pf-${f.id}`, f.id === "any" ? "PR: Any" : f.label, fl.pr === f.id, () => setFilter({ pr: f.id }))))),
+          .child(
+            h_flex()
+              .flex_none()
+              .gap(8)
+              .items_center()
+              .child(div().text_size(11.5).text_color(t.dim).child("PR"))
+              .child(
+                h_flex()
+                  .h(30)
+                  .p(2)
+                  .gap(2)
+                  .items_center()
+                  .rounded(8)
+                  .border_1()
+                  .border_color(t.border)
+                  .children(
+                    PR_FILTERS.map((f) =>
+                      h_flex()
+                        .id(`pf-${f.id}`)
+                        .h_full()
+                        .px(10)
+                        .items_center()
+                        .rounded(6)
+                        .text_size(12)
+                        .cursor_pointer()
+                        .when(fl.pr === f.id, (el) => el.bg(t.selected).text_color(t.foreground).font_medium())
+                        .when(fl.pr !== f.id, (el) => el.text_color(t.muted).hover((s) => s.bg(t.hover)))
+                        .on_click(() => setFilter({ pr: f.id }))
+                        .child(f.label),
+                    ),
+                  ),
+              ),
+          ),
       )
       .child(h_flex().flex_1().min_h(0).gap(14).children(COLS.map(column)))
       .child(div().id("edge-w").absolute().left(0).top(14).bottom(14).w(5).cursor_ew_resize().on_mouse_down("left", start("x")))
