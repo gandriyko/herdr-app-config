@@ -158,6 +158,8 @@ export default class DiffView extends View {
     this.req = props()?.path ? props() : shared("wb.diff.request") ?? null;
     this.mode = "diff"; // "diff": hunks with context; "file": whole files, changes highlighted
     this.files = []; this.rows = []; this.heads = []; this.targets = []; this.scrollY = 0; this.viewH = 400;
+    // Paths of files folded to their header (not remembered across tabs; pruned to the shown files on load).
+    this.collapsed = new Set();
     // Remembered: hunks or whole files, wrap long lines (rows get as tall as they need, `cols` characters a line) and the layout.
     this.wrap = false; this.layout = "unified";
     try {
@@ -190,7 +192,7 @@ export default class DiffView extends View {
     this.applied = req.ts; this.req = req;
     const key = keyOf(req, this.mode);
     if (key === this.loadingKey) { this.target = req.path; return; }
-    if (key === this.loadedKey) { this.scrollToFile(req.path); return; }
+    if (key === this.loadedKey) { this.unfold(req.path); this.scrollToFile(req.path); return; }
     cx.timer.after(0, (acx) => this.load(req, acx));
   }
 
@@ -242,6 +244,8 @@ export default class DiffView extends View {
         }
         if (gen !== this.gen) return;
         this.files = files; this.loadedKey = this.loadingKey; this.loadingKey = null;
+        // The file asked for is always shown open; folds of files no longer listed are dropped.
+        this.collapsed = new Set(files.map((f) => f.path).filter((p) => p !== this.target && this.collapsed.has(p)));
         this.build();
         this.scrollToFile(this.target);
         this.loading = false;
@@ -262,6 +266,7 @@ export default class DiffView extends View {
     this.files.forEach((f, fi) => {
       heads.push(rows.length);
       rows.push({ kind: "F", fi });
+      if (this.collapsed.has(f.path)) return;
       if (f.note) { rows.push({ kind: "N", fi, text: f.note }); return; }
       const out = [];
       const ctx = (from, to, off) => { for (let k = from; k < to; k++) out.push({ t: " ", o: k + off, n: k, text: f.text?.[k - 1] ?? "" }); };
@@ -324,6 +329,29 @@ export default class DiffView extends View {
   scrollToFile(path) {
     const fi = this.files.findIndex((f) => f.path === path);
     if (fi >= 0) this.scrollY = this.yOf(this.heads[fi]);
+  }
+
+  // Open a folded file (a click on it in the Changes panel must show its rows).
+  unfold(path) { if (this.collapsed.delete(path)) this.build(); }
+
+  // Fold or open one file from its header. A pinned header (scrolled past) moves the view back to the file's top.
+  toggleFile(fi, cx) {
+    const p = this.files[fi]?.path;
+    if (p === undefined) return;
+    if (!this.collapsed.delete(p)) this.collapsed.add(p);
+    this.build();
+    this.scrollY = Math.min(this.scrollY, this.yOf(this.heads[fi]));
+    cx.notify();
+  }
+
+  // Fold every file to its header, or open them all; the file on top stays on top.
+  foldAll(fold, cx) {
+    const fi = this.rows[this.indexAt(this.scrollY)]?.fi ?? -1;
+    const delta = fi >= 0 ? this.scrollY - this.yOf(this.heads[fi]) : 0;
+    this.collapsed = fold ? new Set(this.files.map((f) => f.path)) : new Set();
+    this.build();
+    if (fi >= 0) this.scrollY = this.yOf(this.heads[fi]) + (fold ? 0 : delta);
+    cx.notify();
   }
 
   // Reveal hidden lines at separator `hi` of file `fi`: "down" below the previous hunk, "up" above the next,
@@ -453,11 +481,13 @@ export default class DiffView extends View {
       .child(this.code(c ? c.text : "", lang, t, on && r.words ? { ranges: r.words[left ? 0 : 1], bg: left ? t.delWord : t.addWord } : null));
   }
 
-  // A file header: status, name, folder, added/removed counts. A click scrolls to the file's top.
+  // A file header: fold chevron, status, name, folder, added/removed counts. A click folds or opens the file.
   fileHead(fi, t) {
-    const f = this.files[fi], slash = f.path.lastIndexOf("/");
+    const f = this.files[fi], slash = f.path.lastIndexOf("/"), folded = this.collapsed.has(f.path);
     return h_flex().id(`head-${fi}`).size_full().px(12).gap(8).items_center().bg(t.raised).border_y(1).border_color(t.border).cursor_pointer()
-      .on_click((_e, cx) => { this.scrollY = this.yOf(this.heads[fi]); cx.notify(); })
+      .tooltip(folded ? "Show this file's changes" : "Fold this file")
+      .on_click((_e, cx) => this.toggleFile(fi, cx))
+      .child(svg(`mods/wb-diff/icons/${folded ? "chevron-right" : "chevron-down"}.svg`).size(12).flex_none().text_color(t.muted))
       .child(div().w(12).flex_none().text_size(11).font_semibold().text_color(t[STATUS[f.status] ?? "ansi3"] ?? t.muted).child(f.status ?? "M"))
       .child(div().flex_none().max_w(360).truncate().font_semibold().text_size(13).child(f.path.slice(slash + 1)))
       .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(slash > 0 ? f.path.slice(0, slash) : ""))
@@ -573,6 +603,9 @@ export default class DiffView extends View {
         .child(group([cell("wrap", "wrap", "Wrap long lines", this.wrap, true, toggleWrap)]))
         .child(group([cell("layout-split", "split", "Side by side", split, true, setLayout("split")),
           cell("layout-unified", "unified", "Unified", !split, true, setLayout("unified"))]))
+        .when(nf > 1, (e) => e.child(group([
+          cell("fold-all", "collapse-all", "Fold all files", false, this.collapsed.size < nf, (cx) => this.foldAll(true, cx)),
+          cell("unfold-all", "expand-files", "Show all files", false, this.collapsed.size > 0, (cx) => this.foldAll(false, cx))])))
         .when(!whole, (e) => e
           .child(div().flex_none().text_size(11).text_color(t.dim).child(this.targets.length ? (passed ? `change ${passed} of ${this.targets.length}` : `${this.targets.length} ${this.targets.length === 1 ? "change" : "changes"}`) : ""))
           .child(group([cell("mode-diff", "diff", "Changed hunks only", this.mode === "diff", true, setMode("diff")),
