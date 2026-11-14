@@ -18,6 +18,16 @@ const COLS = [
   { key: "done", title: "Done", color: "done" },
 ];
 
+const SIZE_DEFAULT = { w: 0.82, h: 0.85 };
+const clampFrac = (v, d) => (Number.isFinite(v) ? Math.min(0.98, Math.max(0.4, v)) : d);
+// The stored size as shares of the window (shared `agents-board.size`).
+const sizeOf = () => {
+  const z = shared("agents-board.size");
+  return { w: clampFrac(z?.w, SIZE_DEFAULT.w), h: clampFrac(z?.h, SIZE_DEFAULT.h) };
+};
+// Shares to pixels for a window of W x H: at least 640 x 420 (never more than the window).
+const toPx = (z, W, H) => ({ w: Math.round(Math.min(W, Math.max(640, z.w * W))), h: Math.round(Math.min(H, Math.max(420, z.h * H))) });
+
 const filterOf = () => {
   const f = shared("agents-board.filter");
   return { space: typeof f?.space === "string" ? f.space : null, pr: PR_FILTERS.some((x) => x.id === f?.pr) ? f.pr : "any" };
@@ -84,6 +94,8 @@ export default class Board extends View {
     this.sel = store.get("sel") || null; // address of the selected card (remembered across openings)
     this.cols = []; // addresses per column, set by render, for the keys
     this.done = false;
+    this.win = null; // the window's size (the overlay covers it)
+    this.drag = null; // { mode, size } while the panel is being resized
     this.scrolls = COLS.map(() => ScrollHandle.new());
     this.handle = cx.focus_handle();
     this.input = InputState.new({ placeholder: "Search agents" });
@@ -214,10 +226,12 @@ export default class Board extends View {
     store.set("sel", a.address);
     this.close(cx);
     try {
+      const z = sizeOf();
+      const px = this.win ? toPx(z, this.win.width, this.win.height) : null;
       openOverlay({
         kind: "dialog",
-        width: 1180,
-        height: 740,
+        width: px ? px.w : z.w,
+        height: px ? px.h : z.h,
         layout: {
           id: "peek", type: "column",
           children: [
@@ -234,6 +248,30 @@ export default class Board extends View {
       if (a.pane) run("pane.focus", { pane: a.pane });
       else run("agent.focus", { terminal: a.address });
     }
+  }
+
+  // Resizing: the panel stays centered, so its width is twice the pointer's distance from the center.
+  dragTo(e, cx) {
+    const d = this.drag;
+    const win = this.win;
+    if (!d || !win) return;
+    const cur = d.size;
+    let { w, h } = cur;
+    if (d.mode.includes("x")) w = (2 * Math.abs(e.position.x - win.width / 2)) / win.width;
+    if (d.mode.includes("y")) h = (2 * Math.abs(e.position.y - win.height / 2)) / win.height;
+    w = clampFrac(w, cur.w);
+    h = clampFrac(h, cur.h);
+    if (Math.abs(w - cur.w) < 0.001 && Math.abs(h - cur.h) < 0.001) return;
+    d.size = { w, h };
+    cx.notify();
+  }
+
+  endDrag(cx) {
+    const d = this.drag;
+    if (!d) return;
+    this.drag = null;
+    setShared("agents-board.size", { w: +d.size.w.toFixed(4), h: +d.size.h.toFixed(4) });
+    cx.notify();
   }
 
   // Moves the selection with an arrow key.
@@ -493,14 +531,33 @@ export default class Board extends View {
         .child(div().max_w(160).truncate().child(label))
         .when(n != null, (el) => el.child(div().text_size(11).text_color(t.dim).child(String(n))));
 
-    
-    return v_flex()
+    const z = this.drag ? this.drag.size : sizeOf();
+    const px = this.win ? toPx(z, this.win.width, this.win.height) : null;
+    const start = (mode) => (e, cx) => {
+      cx.stop_propagation();
+      if (e.click_count >= 2 && mode === "xy") {
+        this.drag = null;
+        setShared("agents-board.size", { ...SIZE_DEFAULT });
+        return cx.notify();
+      }
+      this.drag = { mode, size: sizeOf() };
+    };
+    const panel = v_flex()
       .id("agents-board")
       .track_focus(this.handle)
-      .size_full()
+      .relative()
+      .w(px ? px.w : 0)
+      .h(px ? px.h : 0)
+      .flex_none()
+      .overflow_hidden()
+      .rounded(12)
+      .border_1()
+      .border_color(t.border)
+      .shadow_xl()
       .p(18)
       .gap(12)
       .bg(t.canvas)
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .text_size(13)
       .on_key_down((e, cx) => {
         const k = e.key;
@@ -568,6 +625,41 @@ export default class Board extends View {
           .child(div().flex_1())
           .child(h_flex().gap(3).flex_none().children(PR_FILTERS.map((f) => chip(`pf-${f.id}`, f.id === "any" ? "PR: Any" : f.label, fl.pr === f.id, () => setFilter({ pr: f.id }))))),
       )
-      .child(h_flex().flex_1().min_h(0).gap(14).children(COLS.map(column)));
+      .child(h_flex().flex_1().min_h(0).gap(14).children(COLS.map(column)))
+      .child(div().id("edge-w").absolute().left(0).top(14).bottom(14).w(5).cursor_ew_resize().on_mouse_down("left", start("x")))
+      .child(div().id("edge-e").absolute().right(0).top(14).bottom(14).w(5).cursor_ew_resize().on_mouse_down("left", start("x")))
+      .child(div().id("edge-s").absolute().bottom(0).left(14).right(14).h(5).cursor_ns_resize().on_mouse_down("left", start("y")))
+      .child(
+        div()
+          .id("grip")
+          .absolute()
+          .right(2)
+          .bottom(2)
+          .size(14)
+          .cursor_nwse_resize()
+          .text_color(t.dim)
+          .hover((s) => s.text_color(t.foreground))
+          .tooltip("Drag to resize, double-click to reset")
+          .on_mouse_down("left", start("xy"))
+          .child(svg(ICONS + "grip.svg").size(14)),
+      );
+
+    // The overlay covers the window: a dim backdrop (a click on it closes) with the panel centered.
+    return div()
+      .id("board-root")
+      .size_full()
+      .flex()
+      .items_center()
+      .justify_center()
+      .bg("#00000066")
+      .on_size_change((sz, cx) => {
+        if (this.win && this.win.width === sz.width && this.win.height === sz.height) return;
+        this.win = { width: sz.width, height: sz.height };
+        cx.notify();
+      })
+      .on_mouse_move((e, cx) => this.dragTo(e, cx))
+      .on_mouse_up("left", (_e, cx) => this.endDrag(cx))
+      .on_mouse_down("left", (_e, cx) => this.close(cx))
+      .child(panel);
   }
 }

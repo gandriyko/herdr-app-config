@@ -5,18 +5,18 @@ source: https://github.com/gandriyko/herdr-app-config/tree/main/mods/agents-boar
 install: copy the folder mods/agents-board into ~/.config/herdr-app/mods/agents-board, then add "cmd-shift-a": "mod.open:agents-board" to the global section of keys.json
 place: none
 needs: [gh, git]
-shared_keys: [agents-board.filter]
+shared_keys: [agents-board.filter, agents-board.size]
 reads_keys: []
 commands: [mod.open, pane.focus, agent.focus, terminal.peek]
 ---
 
 ## What it does
-A dialog (1180 x 740) with three columns. `mod.open` again, Esc or the close button closes it.
+A frameless full-window overlay: a dim backdrop (a click on it closes the board) and a centered panel that the mod draws (default 82% x 85% of the window, at least 640 x 420 px) with three columns. Drag the bottom-right grip (or the left, right or bottom edge) to resize; the panel stays centered, so its width is twice the pointer's distance from the center. Double-click the grip to reset. The size is saved on mouse up as shares of the window, so it follows the window to another monitor. `mod.open` again, Esc or the close button closes it.
 
 - Needs you: blocked agents, oldest waiting first, with a red-tinted card.
 - Working: longest running first, with the elapsed time.
 - Done: agents that finished while unseen first (newest first, accent dot), then seen (idle) agents as dimmed cards, newest first. The column count is all cards shown.
-- Card: the same shape as the sidebar's. Line 1: program icon, space name (`/ tab` only when the person named the tab and it differs from line 2 and the program name), status glyph (spinner working, pulsing red `?` blocked, accent dot unseen done, none idle), time. Line 2: the agent's report (else its title, else the tab name), wraps up to 2 lines. Line 3: a PR pill (`#n` and a checks glyph, click opens the PR in the browser) (only when there is one). No branch, no buttons. A click on the card (or Enter) closes the board and opens the agent in a 1180 x 740 dialog: a 34 px bar (this same mod with `peekBar` props) over the agent's terminal. The bar shows icon, space / tab, status glyph and word, and the buttons `← Board`, `↗` (go to the agent's pane, board stays closed) and `✕`. Any other close of the peek (`← Board`, `✕`, a click beside it) reopens the board, with the card you came from highlighted (`sel` in localStorage); the board only returns if the layout is the one the peek opened in. If the dialog cannot open it falls back to `terminal.peek`, then to focusing the pane. Sub-agents show "sub-agent of <tab>".
+- Card: the same shape as the sidebar's. Line 1: program icon, space name (`/ tab` only when the person named the tab and it differs from line 2 and the program name), status glyph (spinner working, pulsing red `?` blocked, accent dot unseen done, none idle), time. Line 2: the agent's report (else its title, else the tab name), wraps up to 2 lines. Line 3: a PR pill (`#n` and a checks glyph, click opens the PR in the browser) (only when there is one). No branch, no buttons. A click on the card (or Enter) closes the board and opens the agent in a dialog of the same size: a 34 px bar (this same mod with `peekBar` props) over the agent's terminal. The bar shows icon, space / tab, status glyph and word, and the buttons `← Board`, `↗` (go to the agent's pane, board stays closed) and `✕`. Any other close of the peek (`← Board`, `✕`, a click beside it) reopens the board, with the card you came from highlighted (`sel` in localStorage); the board only returns if the layout is the one the peek opened in. If the dialog cannot open it falls back to `terminal.peek`, then to focusing the pane. Sub-agents show "sub-agent of <tab>".
 - Header: summary ("2 need you · 3 working · 1 unseen · 4 seen", zero parts left out, "No agents" when none), search (program, space, tab, report), close.
 - Filters: space chips with their agent counts (idle included), and PR: Any / Has PR / Checks failing / No PR.
 - Keys: up/down between cards, left/right between columns (while the search is empty), Enter = peek the selected card.
@@ -24,9 +24,11 @@ A dialog (1180 x 740) with three columns. `mod.open` again, Esc or the close but
 ## Files
 - main.js: the view.
 - prs.js: PR lookup helpers (state is kept by the view instance).
+- grip.svg: resize grip.
 - check.svg, x.svg, spinner.svg, search.svg, chevron-down.svg, chevron-right.svg: icons.
 
 ## Settings and data
+- Shared `agents-board.size` ({ w, h }): shares of the window, each clamped to 0.4-0.98, default { w: 0.82, h: 0.85 }. The peek dialog uses it too.
 - Shared `agents-board.filter` ({ space, pr }). A space that is gone counts as All. Search is not saved.
 
 ## Notes

@@ -1,1 +1,1 @@
-{ "place": "none", "title": "Agents board", "overlay": { "width": 1180, "height": 740 } }
+{ "place": "none", "title": "Agents board", "overlay": { "width": 1, "height": 1, "frame": "none" } }
