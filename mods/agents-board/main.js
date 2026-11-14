@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
-import { agents, terminals, panes, spaces, run, theme, shared, setShared, closeOverlay, props, exec } from "herdr";
+import { agents, terminals, panes, spaces, run, theme, shared, setShared, openOverlay, closeOverlay, props, exec } from "herdr";
 import { CHECKS_WORD, newPrState, prMap, prOf, refreshPrs } from "./prs.js";
 
 const ICONS = "mods/agents-board/";
@@ -13,9 +13,9 @@ const PR_FILTERS = [
   { id: "none", label: "No PR" },
 ];
 const COLS = [
-  { key: "blocked", title: "Needs you", hint: "oldest waiting first", color: "blocked" },
-  { key: "working", title: "Working", hint: "longest running first", color: "working" },
-  { key: "done", title: "Done", hint: "unseen first, newest first", color: "done" },
+  { key: "blocked", title: "Needs you", color: "blocked" },
+  { key: "working", title: "Working", color: "working" },
+  { key: "done", title: "Done", color: "done" },
 ];
 
 const filterOf = () => {
@@ -48,9 +48,32 @@ function glyph(t, status) {
   return null;
 }
 
+const WORDS = { working: "working", blocked: "needs you", done: "finished", idle: "idle" };
+const store = {
+  get: (k) => {
+    try {
+      return localStorage.getItem(k);
+    } catch {
+      return null;
+    }
+  },
+  set: (k, v) => {
+    try {
+      localStorage.setItem(k, v);
+    } catch {}
+  },
+};
+
 export default class Board extends View {
   init(_props, cx) {
     this.live = true;
+    if (props()?.peekBar) {
+      // The bar over a peeked agent: no board state, timers or PR polling.
+      this.layoutName = shared("layout");
+      this.going = false;
+      this.back = false;
+      return;
+    }
     this.pr = newPrState();
     this.prJson = "{}";
     this.placesKey = "";
@@ -58,7 +81,7 @@ export default class Board extends View {
     this.busy = false;
     this.again = false;
     this.q = "";
-    this.sel = null; // address of the selected card
+    this.sel = store.get("sel") || null; // address of the selected card (remembered across openings)
     this.cols = []; // addresses per column, set by render, for the keys
     this.done = false;
     this.scrolls = COLS.map(() => ScrollHandle.new());
@@ -81,8 +104,80 @@ export default class Board extends View {
 
   close(cx) {
     this.live = false;
+    if (props()?.peekBar) return this.barClose();
     for (const s of this.scrolls) s.release();
     closeOverlay(props().overlay);
+  }
+
+  // The peek bar closes (any way except the go button): the board comes back, once, and only
+  // in the layout the peek was opened in.
+  barClose() {
+    if (this.going || this.back) return;
+    this.back = true;
+    if (shared("layout") !== this.layoutName) return;
+    try {
+      run("mod.open", { name: "agents-board" });
+    } catch (_e) {}
+  }
+
+  barLeave(go) {
+    const { terminal, pane, overlay } = props();
+    if (go) this.going = true;
+    closeOverlay(overlay);
+    if (go) {
+      if (pane) run("pane.focus", { pane });
+      else run("agent.focus", { terminal });
+    } else this.barClose();
+  }
+
+  bar() {
+    const t = theme();
+    const { terminal, pane } = props();
+    const a = agents().find((x) => x.address === terminal);
+    const k = terminals().find((x) => x.address === terminal);
+    const tb = spaces().flatMap((s) => s.tabs).find((x) => x.id === a?.tab);
+    const prog = (a?.program?.name ?? k?.program?.name ?? "agent").trim();
+    const report = clean(k?.report) || clean(a?.title) || (tb?.name ?? "").trim();
+    const tabName = tb?.named ? (tb.name ?? "").trim() : "";
+    const tabShown = tabName && tabName.toLowerCase() !== report.toLowerCase() && tabName.toLowerCase() !== prog.toLowerCase() ? tabName : null;
+    const st = a?.status ?? k?.status ?? null;
+    const pic = icon(a?.program ?? k?.program, 16, t.foreground);
+    const btn = (id, label, tip, onClick) =>
+      div()
+        .id(id)
+        .flex_none()
+        .px(8)
+        .py(2)
+        .rounded(5)
+        .text_size(12)
+        .text_color(t.muted)
+        .cursor_pointer()
+        .tooltip(tip)
+        .hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .on_mouse_down((_e, cx) => cx.stop_propagation())
+        .on_click((_e, cx) => {
+          cx.stop_propagation();
+          onClick();
+        })
+        .child(label);
+    return h_flex()
+      .size_full()
+      .px(12)
+      .gap(8)
+      .items_center()
+      .bg(t.surface)
+      .border_b(1)
+      .border_color(t.border)
+      .text_size(12)
+      .when(Boolean(pic), (el) => el.child(pic))
+      .child(div().min_w(0).truncate().font_semibold().text_size(13).text_color(t.foreground).child(a?.space_name || tabShown || prog))
+      .when(Boolean(a?.space_name && tabShown), (el) => el.child(div().min_w(0).truncate().text_color(t.dim).child(`/ ${tabShown}`)))
+      .when(Boolean(glyph(t, st)), (el) => el.child(glyph(t, st)))
+      .when(Boolean(st), (el) => el.child(div().flex_none().text_color(t[st] ?? t.dim).child(WORDS[st] ?? st)))
+      .child(div().flex_1())
+      .child(btn("bar-board", "← Board", "Back to the board", () => this.barLeave(false)))
+      .child(btn("bar-go", "↗", "Go to agent", () => this.barLeave(true)))
+      .child(btn("bar-close", "✕", "Close (back to the board)", () => this.barLeave(false)));
   }
 
   kick(cx) {
@@ -116,10 +211,26 @@ export default class Board extends View {
   peek(a, cx) {
     if (!a || this.done) return;
     this.done = true;
+    store.set("sel", a.address);
     this.close(cx);
     try {
-      run("terminal.peek", { terminal: a.address });
+      openOverlay({
+        kind: "dialog",
+        width: 1180,
+        height: 740,
+        layout: {
+          id: "peek", type: "column",
+          children: [
+            { id: "bar", type: "block", size: { px: 34 }, content: { mod: "agents-board", props: { peekBar: true, terminal: a.address, pane: a.pane } } },
+            { id: "term", type: "block", content: { terminal: a.address } },
+          ],
+        },
+      });
     } catch (_e) {
+      try {
+        run("terminal.peek", { terminal: a.address });
+        return;
+      } catch (_e2) {}
       if (a.pane) run("pane.focus", { pane: a.pane });
       else run("agent.focus", { terminal: a.address });
     }
@@ -149,6 +260,7 @@ export default class Board extends View {
   }
 
   render(cx) {
+    if (props()?.peekBar) return this.bar();
     const t = theme();
     const now = Date.now();
     // Each host list once.
@@ -349,8 +461,7 @@ export default class Board extends View {
             .child(div().flex_none().size(9).rounded(5).bg(t[def.color]))
             .child(div().text_size(13).font_semibold().text_color(t.foreground).child(def.title))
             .child(div().text_size(12).text_color(t.dim).child(String(rows.length)))
-            .child(div().flex_1())
-            .child(div().text_size(11).text_color(t.dim).child(def.hint)),
+
         )
         .child(
           v_flex()

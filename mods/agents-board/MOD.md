@@ -1,6 +1,6 @@
 ---
 name: agents-board
-summary: Kanban of agents (Needs you, Working, Done) in a dialog opened with Cmd+Shift+A, with PR and checks pills, space and PR filters, search. A click on a card peeks the agent.
+summary: Kanban of agents (Needs you, Working, Done) in a dialog opened with Cmd+Shift+A, with PR and checks pills, space and PR filters, search. A click on a card peeks the agent in the board's own window; closing the peek returns to the board.
 source: https://github.com/gandriyko/herdr-app-config/tree/main/mods/agents-board
 install: copy the folder mods/agents-board into ~/.config/herdr-app/mods/agents-board, then add "cmd-shift-a": "mod.open:agents-board" to the global section of keys.json
 place: none
@@ -16,7 +16,7 @@ A dialog (1180 x 740) with three columns. `mod.open` again, Esc or the close but
 - Needs you: blocked agents, oldest waiting first, with a red-tinted card.
 - Working: longest running first, with the elapsed time.
 - Done: agents that finished while unseen first (newest first, accent dot), then seen (idle) agents as dimmed cards, newest first. The column count is all cards shown.
-- Card: the same shape as the sidebar's. Line 1: program icon, space name (`/ tab` only when the person named the tab and it differs from line 2 and the program name), status glyph (spinner working, pulsing red `?` blocked, accent dot unseen done, none idle), time. Line 2: the agent's report (else its title, else the tab name), wraps up to 2 lines. Line 3: a PR pill (`#n` and a checks glyph, click opens the PR in the browser) (only when there is one). No branch, no buttons. A click on the card closes the board and peeks the agent (`terminal.peek`; the peek has its own button to go to the pane); if peek fails it focuses the agent's pane. Sub-agents show "sub-agent of <tab>".
+- Card: the same shape as the sidebar's. Line 1: program icon, space name (`/ tab` only when the person named the tab and it differs from line 2 and the program name), status glyph (spinner working, pulsing red `?` blocked, accent dot unseen done, none idle), time. Line 2: the agent's report (else its title, else the tab name), wraps up to 2 lines. Line 3: a PR pill (`#n` and a checks glyph, click opens the PR in the browser) (only when there is one). No branch, no buttons. A click on the card (or Enter) closes the board and opens the agent in a 1180 x 740 dialog: a 34 px bar (this same mod with `peekBar` props) over the agent's terminal. The bar shows icon, space / tab, status glyph and word, and the buttons `← Board`, `↗` (go to the agent's pane, board stays closed) and `✕`. Any other close of the peek (`← Board`, `✕`, a click beside it) reopens the board, with the card you came from highlighted (`sel` in localStorage); the board only returns if the layout is the one the peek opened in. If the dialog cannot open it falls back to `terminal.peek`, then to focusing the pane. Sub-agents show "sub-agent of <tab>".
 - Header: summary ("2 need you · 3 working · 1 unseen · 4 seen", zero parts left out, "No agents" when none), search (program, space, tab, report), close.
 - Filters: space chips with their agent counts (idle included), and PR: Any / Has PR / Checks failing / No PR.
 - Keys: up/down between cards, left/right between columns (while the search is empty), Enter = peek the selected card.
@@ -30,6 +30,8 @@ A dialog (1180 x 740) with three columns. `mod.open` again, Esc or the close but
 - Shared `agents-board.filter` ({ space, pr }). A space that is gone counts as All. Search is not saved.
 
 ## Notes
+The peek bar instance (`props().peekBar`) keeps no board state, timers or PR polling. Esc goes to the peeked terminal (a layout dialog), so close the peek with the bar or a click beside it. Column headers are dot, title and count, with no sort hints.
+
 Everything is live from `agents()`, `terminals()`, `spaces()` and `panes()`; the view redraws when they change. A 30 s timer only refreshes the durations and the PR lookup.
 
 PR lookups: each cwd is resolved once to its git common dir (cache capped at 200), so worktrees share one `gh pr list --state open --limit 100 --json number,headRefName,statusCheckRollup` call (15 s timeout). One gh call at a time; gh is asked only for feature branches: the default branch (`git symbolic-ref --quiet --short refs/remotes/origin/HEAD`, re-read every 30 min; without it `main` and `master`), a null branch and a detached HEAD are never asked, and a repo with none of them left gets no gh call. A feature branch not asked about yet is asked at once, then the repo every 5 min while none of them has an open PR, every 60 s while one has (5 min after a failure, keeping the last good answer). If gh is missing or not logged in, pills disappear and it retries every 10 minutes. At most 30 repos are cached. Agents on other machines have no PR. The view redraws only when the PR map changes. When the dialog closes everything stops.
