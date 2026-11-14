@@ -4,7 +4,8 @@ import { exec, theme, shared, setShared, spaces, panes, focused, run, knownAgent
 import { Buffer } from "buffer";
 
 // My open Jira issues grouped by sprint, plus the project's backlog. Click opens the issue in Jira;
-// right-click: Copy task ID, Start agent session. The row's terminal button starts that session too; which agent
+// right-click: Copy task ID, Start agent session. The row's terminal button opens that session dialog too (new worktree, new
+// or existing, or a new branch here; the agent gets the issue text); which agent
 // (Herdr's knownAgents(), e.g. Claude Code or Codex) is picked in the settings form and saved in "jira.settings".agent.
 // Settings (site, project) live in Herdr's shared state ("jira.settings"); the email and API token
 // in the macOS Keychain (service herdr-jira, account = email). Nothing personal is in this repo.
@@ -77,15 +78,96 @@ const tabName = (key, summary) => {
 const worktreeSlug = (branch) => branch.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
 const worktreePath = (main, branch) => `${main.replace(/\/[^/]+$/, "")}/${main.split("/").pop()}-${worktreeSlug(branch)}`;
 
+// An issue description (Atlassian Document Format) as one line of plain text, at most 3000 chars.
+// Block boundaries and hard breaks become spaces; mentions and links keep their visible text or url.
+function adfWalk(node) {
+  if (!node || typeof node !== "object") return "";
+  if (node.type === "text") return node.text ?? "";
+  if (node.type === "hardBreak") return " ";
+  if (node.type === "mention") return node.attrs?.text ?? "";
+  if (node.type === "inlineCard" || node.type === "blockCard") return node.attrs?.url ?? "";
+  const inner = (node.content ?? []).map(adfWalk).join("");
+  // Whitespace after each block so adjacent paragraphs, list items and cells don't run together.
+  return /^(paragraph|listItem|heading|codeBlock|blockquote|tableRow|tableCell|tableHeader|bulletList|orderedList|rule)$/.test(node.type) ? inner + " " : inner;
+}
+function adfText(node) {
+  const text = adfWalk(node).replace(/\s+/g, " ").trim();
+  return text.length > 3000 ? text.slice(0, 2999).trimEnd() + "…" : text;
+}
+
+// The issue's description as text, or "" when it can't be had (not configured, no network, no description): a start never waits on it.
+async function describeIssue(settings, key) {
+  try {
+    const creds = await credentials();
+    if (!creds || !settings.site) return "";
+    const issue = await jira(settings.base ?? settings.site, creds.auth, `/rest/api/3/issue/${encodeURIComponent(key)}?fields=description`);
+    return adfText(issue.fields?.description);
+  } catch { return ""; }
+}
+// Herdr's fetch has no timeout: give up on `p` after `ms` and use `fallback`.
+const withTimeout = (cx, p, ms, fallback) => Promise.race([p, new Promise((resolve) => cx.timer.after(ms, () => resolve(fallback)))]);
+
 // The agent's first message. One line: a newline could send it early.
 // ponytail: the setup steps are left to the agent and the repo's own docs (which env files, certificates, deps).
-const worktreeTask = ({ key, summary, path, branch, base, main }) =>
-  `${key}: ${summary} — You are in a new git worktree ${path} on branch ${branch}, created from origin/${base}; the main checkout is ${main}. ` +
+const about = (description) => (description ? ` — Task description: ${description}` : "");
+const worktreeTask = ({ key, summary, description, path, branch, base, main, fresh }) =>
+  `${key}: ${summary}${about(description)} — You are in ${fresh ? "a new" : "an existing"} git worktree ${path} on branch ${branch}${fresh ? `, created from origin/${base}` : ""}; the main checkout is ${main}. ` +
   `First prepare this worktree as the repo's own docs say (CLAUDE.md, AGENTS.md, .claude/, README): copy the gitignored files it needs from the main checkout ` +
-  `(env files, certificates, local config), install dependencies, and list what you copied; don't change the main checkout. Then work on ${key}.`;
-const branchTask = ({ key, summary, branch, base }) =>
-  `${key}: ${summary} — First run git fetch origin, then create and switch to branch ${branch} from origin/${base}, following the repo's own rules ` +
+  `(env files, certificates, local config) unless they are already there, install dependencies, and list what you copied; don't change the main checkout. Then work on ${key}.`;
+const branchTask = ({ key, summary, description, branch, base }) =>
+  `${key}: ${summary}${about(description)} — First run git fetch origin, then create and switch to branch ${branch} from origin/${base}, following the repo's own rules ` +
   `(CLAUDE.md, AGENTS.md, .claude/). If the working tree has uncommitted changes, stop and ask me what to do with them. Then work on ${key}.`;
+
+const lastLine = (r) => (r.stderr || r.stdout).trim().split("\n").pop();
+
+// The main checkout and origin's default branch for a folder, or null when it isn't a git repo.
+async function gitInfo(folder, on) {
+  const git = (args) => exec("git", args, { cwd: folder, on, timeout: 15000 }).catch(() => null);
+  const common = await git(["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+  if (common?.code !== 0) return null;
+  const head = await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
+  return { main: common.stdout.trim().replace(/\/\.git\/?$/, ""), base: head?.code === 0 ? head.stdout.trim().replace(/^origin\//, "") : "master" };
+}
+
+// The agent's command; one no longer installed starts by its key, so the error shows.
+async function agentArgv(want, on) {
+  const agent = await knownAgents({ on }).then((all) => all.find((a) => a.key === want && a.installed), () => null);
+  return agent?.run ?? [want];
+}
+
+// A worktree for `branch` and an agent there with the task; idempotent. A worktree that already has the branch is
+// reused (its space is selected if open, else a new space); a local branch without one gets `worktree add <path> <branch>`;
+// else fetch origin/<base> and `worktree add -b`. Returns an error string, or null.
+async function openWorktree({ main, on, branch, base, key, summary, description, argv }) {
+  const git = (args, timeout = 30000) => exec("git", args, { cwd: main, on, timeout });
+  const listed = await git(["worktree", "list", "--porcelain"]);
+  if (listed.code !== 0) return `git worktree list: ${lastLine(listed)}`;
+  let path = null, fresh = true;
+  for (const block of listed.stdout.split(/\n\s*\n/)) {
+    const lines = block.split("\n");
+    if (lines.includes(`branch refs/heads/${branch}`)) { path = lines.find((l) => l.startsWith("worktree "))?.slice(9) ?? null; break; }
+  }
+  if (path) {
+    fresh = false;
+    const open = spaces().find((s) => s.folder === path && (s.machine || null) === (on || null));
+    if (open) { run("space.select", { id: open.id }); return null; }
+  } else {
+    path = worktreePath(main, branch);
+    const local = await git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]);
+    if (local.code === 0) {
+      const added = await git(["worktree", "add", path, branch]);
+      if (added.code !== 0) return `git worktree add: ${lastLine(added)}`;
+    } else {
+      const fetched = await git(["fetch", "origin", base], 120000);
+      if (fetched.code !== 0) return `git fetch origin ${base}: ${lastLine(fetched)}`;
+      const added = await git(["worktree", "add", "-b", branch, path, `origin/${base}`]);
+      if (added.code !== 0) return `git worktree add: ${lastLine(added)}`;
+    }
+  }
+  run("space.new", { name: tabName(key, summary), folder: path, machine: on ?? "", argv,
+    task: worktreeTask({ key, summary, description, path, branch, base, main, fresh }) });
+  return null;
+}
 
 // A saved JSON list of strings, or [] (missing or broken).
 const parseList = (text) => {
@@ -274,13 +356,21 @@ export default class Jira extends View {
         : div().text_size(11).text_color(this.agentsError ? t.ansi1 : t.dim).child(this.agentsError ?? "No installed agents found"));
   }
 
-  // Opens the "Start session" dialog for an issue, for the focused folder (else the space's) and its machine.
-  openStart(key) {
+  // The focused folder (else the space's) and the machine of the active space: where a session for an issue starts.
+  startPlace() {
     const space = spaces().find((s) => s.active), f = focused();
     const pane = f?.pane ? panes().find((p) => p.pane === f.pane) : null;
-    const summary = [...this.groups.flatMap((g) => g.issues), ...this.backlog].find((i) => i.key === key)?.fields.summary ?? "";
+    return { folder: pane?.cwd || f?.cwd || space?.folder || null, on: space?.machine ?? null };
+  }
+
+  summaryOf(key) {
+    return [...this.groups.flatMap((g) => g.issues), ...this.backlog].find((i) => i.key === key)?.fields.summary ?? "";
+  }
+
+  // Opens the "Start session" dialog for an issue, for the focused folder (else the space's) and its machine.
+  openStart(key) {
     openOverlay({ mod: "jira", kind: "dialog", width: 580, height: 360,
-      props: { start: { key, summary, folder: pane?.cwd || f?.cwd || space?.folder || null, on: space?.machine ?? null } } });
+      props: { start: { key, summary: this.summaryOf(key), ...this.startPlace() } } });
   }
 
   // The dialog: new worktree (the mod creates it from origin/<base>, then a new space runs the agent there and the
@@ -293,15 +383,12 @@ export default class Jira extends View {
     this.stBase = InputState.new({ value: "", placeholder: "base branch, e.g. master" });
     for (const i of [this.stBranch, this.stBase]) i.on("submit", (_e, cx) => this.start(cx));
     cx.spawn(async (cx) => {
-      const git = (args) => exec("git", args, { cwd: s.folder, on: s.on, timeout: 15000 }).catch(() => null);
-      const common = s.folder ? await git(["rev-parse", "--path-format=absolute", "--git-common-dir"]) : null;
-      if (common?.code === 0) {
+      const info = s.folder ? await gitInfo(s.folder, s.on) : null;
+      if (info) {
         // The main checkout (not a worktree's folder) and the remote's default branch.
-        const main = common.stdout.trim().replace(/\/\.git\/?$/, "");
-        const head = await git(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]);
         const home = await exec("sh", ["-c", 'printf %s "$HOME"'], { on: s.on }).catch(() => null);
-        this.st.git = { main, repo: main.split("/").pop(), home: home?.stdout.trim() || "~" };
-        this.stBase.set_value(head?.code === 0 ? head.stdout.trim().replace(/^origin\//, "") : "master");
+        this.st.git = { main: info.main, repo: info.main.split("/").pop(), home: home?.stdout.trim() || "~" };
+        this.stBase.set_value(info.base);
       } else this.st.git = false;
       cx.notify();
     });
@@ -318,19 +405,15 @@ export default class Jira extends View {
     st.busy = true; st.error = null; cx.notify();
     cx.spawn(async (cx) => {
       try {
-        const agent = await knownAgents({ on: st.on }).then((all) => all.find((a) => a.key === want && a.installed), () => null);
-        const argv = agent?.run ?? [want];
+        const [argv, description] = await Promise.all([
+          agentArgv(want, st.on),
+          withTimeout(cx, describeIssue(this.settings(), st.key), 15000, ""),
+        ]);
         if (st.git && st.mode === "worktree") {
-          const git = (args, timeout = 30000) => exec("git", args, { cwd: st.git.main, on: st.on, timeout });
-          const path = worktreePath(st.git.main, branch);
-          const fetched = await git(["fetch", "origin", base], 120000);
-          if (fetched.code !== 0) return fail(`git fetch origin ${base}: ${(fetched.stderr || fetched.stdout).trim().split("\n").pop()}`);
-          const added = await git(["worktree", "add", "-b", branch, path, `origin/${base}`]);
-          if (added.code !== 0) return fail(`git worktree add: ${(added.stderr || added.stdout).trim().split("\n").pop()}`);
-          run("space.new", { name: tabName(st.key, st.summary), folder: path, machine: st.on ?? "", argv,
-            task: worktreeTask({ key: st.key, summary: st.summary, path, branch, base, main: st.git.main }) });
+          const error = await openWorktree({ main: st.git.main, on: st.on, branch, base, key: st.key, summary: st.summary, description, argv });
+          if (error) return fail(error);
         } else {
-          const task = st.git ? branchTask({ key: st.key, summary: st.summary, branch, base }) : `${st.key}: ${st.summary}`;
+          const task = st.git ? branchTask({ key: st.key, summary: st.summary, description, branch, base }) : `${st.key}: ${st.summary}${about(description)}`;
           run("tab.new", { name: tabName(st.key, st.summary), argv, task, ...(st.folder ? { folder: st.folder } : {}) });
         }
         closeOverlay(props().overlay);
