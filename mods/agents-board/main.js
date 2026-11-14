@@ -638,10 +638,13 @@ export default class Board extends View {
             h_flex()
               .flex_none()
               .gap(8)
+              .pr(40) // close button (28) + header gap (12): control ends where the search input ends
               .items_center()
               .child(div().text_size(11.5).text_color(t.dim).child("PR"))
               .child(
                 h_flex()
+                  .w(260) // same width as the search input
+                  .flex_none()
                   .h(30)
                   .p(2)
                   .gap(2)
@@ -654,8 +657,9 @@ export default class Board extends View {
                       h_flex()
                         .id(`pf-${f.id}`)
                         .h_full()
-                        .px(10)
+                        .flex_1()
                         .items_center()
+                        .justify_center()
                         .rounded(6)
                         .text_size(12)
                         .cursor_pointer()
