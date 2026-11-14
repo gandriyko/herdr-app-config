@@ -4,6 +4,7 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
 import { agents, terminals, panes, spaces, run, theme, shared, setShared, openOverlay, closeOverlay, props, exec, hc } from "herdr";
 import { AskingTracker } from "./asking.js";
+import { parseOptions, parseSuggestion, sameOptions } from "./reply.js";
 import { CHECKS_WORD, newPrState, prMap, prOf, refreshPrs } from "./prs.js";
 
 const ICONS = "mods/agents-board/";
@@ -107,6 +108,12 @@ export default class Board extends View {
       cx.notify();
     });
     this.input.on("submit", (_e, cx) => this.peek(this.byAddr?.get(this.sel), cx));
+    this.searchFocus = false;
+    this.input.on("focus", () => (this.searchFocus = true));
+    this.input.on("blur", () => (this.searchFocus = false));
+    this.reply = null; // { address, suggestion, options, sending, error, input } while a reply area is open
+    this.replyFocus = false;
+    this.replySeq = 0;
     this.input.focus();
     cx.timer.after(400, () => this.live && this.input.focus());
     // Only the "4m" / "7m" texts and the PR refresh need time to pass.
@@ -120,6 +127,7 @@ export default class Board extends View {
   close(cx) {
     this.live = false;
     if (props()?.peekBar) return this.barClose();
+    this.dropReply();
     for (const s of this.scrolls) s.release();
     closeOverlay(props().overlay);
   }
@@ -193,6 +201,109 @@ export default class Board extends View {
       .child(btn("bar-board", "← Board", "Back to the board", () => this.barLeave(false)))
       .child(btn("bar-go", "↗", "Go to agent", () => this.barLeave(true)))
       .child(btn("bar-close", "✕", "Close (back to the board)", () => this.barLeave(false)));
+  }
+
+  // Drops the reply area and its input (no screen text is kept anywhere).
+  dropReply() {
+    this.replySeq++;
+    this.replyFocus = false;
+    const r = this.reply;
+    this.reply = null;
+    try {
+      r?.input?.release();
+    } catch (_e) {}
+  }
+
+  closeReply(cx) {
+    if (!this.reply) return;
+    this.dropReply();
+    if (this.live) this.handle.focus(); // keys (arrows, r) go to the board again
+    cx.notify();
+  }
+
+  async readScreen(address) {
+    const r = await hc(["read", address]);
+    return r?.code === 0 ? r.stdout : "";
+  }
+
+  // Reads the screen once and opens the reply area: buttons for a choice menu, else a text input.
+  openReply(a, cx) {
+    if (!a || !this.live || a.status === "working") return;
+    if (this.reply?.address === a.address) return this.closeReply(cx);
+    this.dropReply();
+    const seq = this.replySeq;
+    cx.spawn(async (cx) => {
+      let text = "";
+      try {
+        text = await this.readScreen(a.address);
+      } catch (_e) {}
+      if (!this.live || seq !== this.replySeq) return;
+      const options = parseOptions(text);
+      const suggestion = options.length ? null : parseSuggestion(text);
+      const reply = { address: a.address, suggestion, options, sending: false, error: null, input: null };
+      if (!options.length) {
+        const input = InputState.new({ placeholder: suggestion || "Reply to agent…" });
+        reply.input = input;
+        input.on("focus", () => (this.replyFocus = true));
+        input.on("blur", () => (this.replyFocus = false));
+        input.on("submit", (_e, cx) => this.submitReply(cx));
+      }
+      this.reply = reply;
+      this.sel = a.address;
+      cx.notify();
+      reply.input?.focus();
+    });
+  }
+
+  // Enter in the box: the typed text, else Claude's suggestion.
+  submitReply(cx) {
+    const r = this.reply;
+    if (!r || r.sending) return;
+    const text = r.input?.value().trim() || r.suggestion;
+    if (!text) return;
+    this.runReply(["send", r.address, text], r, cx);
+  }
+
+  // Runs one hc command for the open reply; success closes the area, failure shows the first line of stderr.
+  runReply(args, r, cx, after) {
+    r.sending = true;
+    r.error = null;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      let err = null;
+      try {
+        const res = await hc(args);
+        if (res?.code !== 0) err = String(res?.stderr || res?.stdout || "Failed").trim().split("\n")[0] || "Failed";
+      } catch (e) {
+        err = String(e?.message ?? e).split("\n")[0];
+      }
+      if (!this.live || this.reply !== r) return;
+      if (err) {
+        r.sending = false;
+        r.error = err;
+        return cx.notify();
+      }
+      if (after) return after(cx);
+      this.closeReply(cx);
+    });
+  }
+
+  // A menu button: press its number, then (after the screen settled) Enter if the same menu is still there.
+  pickOption(n, cx) {
+    const r = this.reply;
+    if (!r || r.sending) return;
+    const menu = r.options;
+    this.runReply(["keys", r.address, String(n)], r, cx, (cx) => {
+      cx.timer.after(600, (cx) => {
+        if (!this.live || this.reply !== r) return;
+        cx.spawn(async (cx) => {
+          try {
+            if (sameOptions(parseOptions(await this.readScreen(r.address)), menu)) await hc(["keys", r.address, "enter"]);
+          } catch (_e) {}
+          if (this.live && this.reply === r) this.closeReply(cx);
+        });
+      });
+    });
   }
 
   kick(cx) {
@@ -386,6 +497,8 @@ export default class Board extends View {
     this.cols = columns.map((c) => c.map((r) => r.a.address));
     this.byAddr = agentBy;
     if (this.sel && !agentBy.has(this.sel)) this.sel = null;
+    // The card left the list (gone, filtered out, or the agent started working): its reply area goes too.
+    if (this.reply && (!this.cols.some((c) => c.includes(this.reply.address)) || agentBy.get(this.reply.address)?.status === "working")) this.dropReply();
 
     // Summary counts what is there at all, not what the filter leaves.
     const cnt = (s) => all.filter((r) => r.a.status === s).length;
@@ -435,6 +548,69 @@ export default class Board extends View {
       return duration(now - r.at);
     };
 
+    const replyArea = (rp) => {
+      const body = rp.options.length
+        ? h_flex()
+            .gap(6)
+            .flex_wrap()
+            .children(
+              rp.options.map((o) =>
+                div()
+                  .id(`opt-${o.n}`)
+                  .px(9)
+                  .h(26)
+                  .flex()
+                  .items_center()
+                  .rounded(6)
+                  .border_1()
+                  .border_color(t.border)
+                  .bg(t.background)
+                  .text_size(12)
+                  .text_color(rp.sending ? t.dim : t.foreground)
+                  .cursor_pointer()
+                  .hover((s) => s.bg(t.hover))
+                  .on_click((_e, cx) => {
+                    cx.stop_propagation();
+                    this.pickOption(o.n, cx);
+                  })
+                  .child(`${o.n} · ${o.label}`),
+              ),
+            )
+        : h_flex()
+            .w_full()
+            .h(30)
+            .px(9)
+            .gap(7)
+            .items_center()
+            .rounded(6)
+            .border_1()
+            .border_color(t.border)
+            .bg(t.background)
+            .on_key_down((e, cx) => {
+              if (e.key === "escape") {
+                this.closeReply(cx);
+              } else if (e.key === "tab") {
+                if (!rp.input.value() && rp.suggestion) {
+                  rp.input.set_value(rp.suggestion);
+                  const n = rp.suggestion.length;
+                  rp.input.set_selected_range({ start: n, end: n });
+                }
+              } else if (e.key === "enter") {
+                this.submitReply(cx);
+              }
+              cx.stop_propagation(); // the board's own keys stay out of the box
+            })
+            .child(Input.new(rp.input).flex_1().h_full().text_size(12.5).text_color(t.foreground))
+            .when(rp.sending, (el) => el.child(svg(ICONS + "spinner.svg").size(13).flex_none().text_color(t.working).spin(900)));
+      return v_flex()
+        .id(`reply-area-${rp.address}`)
+        .gap(4)
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click((_e, cx) => cx.stop_propagation())
+        .child(body)
+        .when(Boolean(rp.error), (el) => el.child(div().text_size(11).text_color(t.blocked).child(rp.error)));
+    };
+
     const card = (r) => {
       const a = r.a;
       const blocked = a.status === "blocked";
@@ -479,15 +655,44 @@ export default class Board extends View {
                 )
                 .when(r.sub, (el) => el.child(div().truncate().text_size(11).text_color(t.dim).child(`↳ sub-agent of ${r.sub}`)))
                 .child(
-                  div()
-                    .min_w(0)
-                    .max_h(34)
-                    .overflow_hidden()
-                    .text_size(12)
-                    .line_height("17px")
-                    .text_color(r.report ? (blocked ? t.blocked : t.muted) : t.dim)
-                    .child(r.report || r.program || " "),
-                ),
+                  h_flex()
+                    .gap(6)
+                    .items_start()
+                    .child(
+                      div()
+                        .flex_1()
+                        .min_w(0)
+                        .max_h(34)
+                        .overflow_hidden()
+                        .text_size(12)
+                        .line_height("17px")
+                        .text_color(r.report ? (blocked ? t.blocked : t.muted) : t.dim)
+                        .child(r.report || r.program || " "),
+                    )
+                    .when(a.status !== "working", (el) =>
+                      el.child(
+                        div()
+                          .id(`reply-${a.address}`)
+                          .flex_none()
+                          .size(18)
+                          .rounded(5)
+                          .flex()
+                          .items_center()
+                          .justify_center()
+                          .cursor_pointer()
+                          .text_color(this.reply?.address === a.address ? t.foreground : t.muted)
+                          .hover((s) => s.bg(t.hover).text_color(t.foreground))
+                          .tooltip("Reply")
+                          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+                          .on_click((_e, cx) => {
+                            cx.stop_propagation();
+                            this.openReply(a, cx);
+                          })
+                          .child(svg(ICONS + "reply.svg").size(16)),
+                      ),
+                    ),
+                )
+                .when(this.reply?.address === a.address, (el) => el.child(replyArea(this.reply))),
             ),
         );
     };
@@ -572,7 +777,13 @@ export default class Board extends View {
       .text_size(13)
       .on_key_down((e, cx) => {
         const k = e.key;
-        if (k === "escape") return this.close(cx);
+        if (this.replyFocus) return; // typing in a reply box: its own handler owns the keys
+        if (k === "escape") return this.reply ? this.closeReply(cx) : this.close(cx);
+        if (k === "r" && !this.searchFocus && !e.modifiers.platform && !e.modifiers.control) {
+          const a = agentBy.get(this.sel);
+          if (a && a.status !== "working") this.openReply(a, cx);
+          return cx.stop_propagation();
+        }
         const empty = !this.input.value();
         if (k === "up" || k === "down" || (empty && (k === "left" || k === "right"))) this.move(k, cx);
         else if (k === "enter") this.peek(agentBy.get(this.sel), cx);
