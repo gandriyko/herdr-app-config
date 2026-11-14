@@ -68,7 +68,7 @@ export default class Board extends View {
       this.q = this.input.value().trim().toLowerCase();
       cx.notify();
     });
-    this.input.on("submit", (_e, cx) => this.go(this.byAddr?.get(this.sel), cx));
+    this.input.on("submit", (_e, cx) => this.peek(this.byAddr?.get(this.sel), cx));
     this.input.focus();
     cx.timer.after(400, () => this.live && this.input.focus());
     // Only the "4m" / "waiting 7m" texts and the PR refresh need time to pass.
@@ -111,16 +111,18 @@ export default class Board extends View {
     });
   }
 
-  go(a, cx) {
+  // Closes the board (the peek is an overlay and would sit under it), then peeks the agent;
+  // falls back to focusing its pane when peek is not available.
+  peek(a, cx) {
     if (!a || this.done) return;
     this.done = true;
-    if (a.pane) run("pane.focus", { pane: a.pane });
-    else run("agent.focus", { terminal: a.address });
     this.close(cx);
-  }
-
-  peek(a) {
-    if (a) run("terminal.peek", { terminal: a.address });
+    try {
+      run("terminal.peek", { terminal: a.address });
+    } catch (_e) {
+      if (a.pane) run("pane.focus", { pane: a.pane });
+      else run("agent.focus", { terminal: a.address });
+    }
   }
 
   // Moves the selection with an arrow key.
@@ -275,26 +277,6 @@ export default class Board extends View {
         .when(pr.c === "pending", (el) => el.child(svg(ICONS + "spinner.svg").size(11).flex_none().spin(900)));
     };
 
-    const button = (id, label, onClick, tint) =>
-      div()
-        .id(id)
-        .flex_none()
-        .h(24)
-        .px(10)
-        .rounded(6)
-        .flex()
-        .items_center()
-        .text_size(12)
-        .font_medium()
-        .cursor_pointer()
-        .when(tint, (el) => el.bg(tint).text_color(t.accent_foreground ?? "#ffffff").hover((s) => s.opacity(0.85)))
-        .when(!tint, (el) => el.bg(t.hover).text_color(t.foreground).hover((s) => s.bg(t.selected)))
-        .on_click((_e, cx) => {
-          cx.stop_propagation();
-          onClick(cx);
-        })
-        .child(label);
-
     const timeText = (r) => {
       if (r.at == null) return "";
       const d = duration(now - r.at);
@@ -319,7 +301,7 @@ export default class Board extends View {
         .cursor_pointer()
         .when(a.status === "idle", (el) => el.opacity(0.55))
         .hover((s) => s.bg(blocked ? t.blocked + "22" : t.hover))
-        .on_click((_e, cx) => this.go(a, cx))
+        .on_click((_e, cx) => this.peek(a, cx))
         .child(
           h_flex()
             .gap(7)
@@ -346,16 +328,7 @@ export default class Board extends View {
               .child(r.report),
           ),
         )
-        .child(
-          h_flex()
-            .gap(6)
-            .items_center()
-            .pl(23)
-            .when(Boolean(r.pr), (el) => el.child(prPill(r)))
-            .child(div().flex_1())
-            .child(button(`peek-${a.address}`, "Peek", () => this.peek(a)))
-            .child(blocked ? button(`go-${a.address}`, "Answer", (cx) => this.go(a, cx), t.blocked) : button(`go-${a.address}`, "Go", (cx) => this.go(a, cx))),
-        );
+        .when(Boolean(r.pr), (el) => el.child(h_flex().items_center().pl(23).child(prPill(r))));
     };
 
     const column = (def, i) => {
@@ -423,8 +396,7 @@ export default class Board extends View {
         if (k === "escape") return this.close(cx);
         const empty = !this.input.value();
         if (k === "up" || k === "down" || (empty && (k === "left" || k === "right"))) this.move(k, cx);
-        else if (k === "enter") this.go(agentBy.get(this.sel), cx);
-        else if (k === "space" && empty && this.sel) this.peek(agentBy.get(this.sel));
+        else if (k === "enter") this.peek(agentBy.get(this.sel), cx);
         else return;
         cx.stop_propagation();
       })

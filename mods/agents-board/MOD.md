@@ -1,6 +1,6 @@
 ---
 name: agents-board
-summary: Kanban of agents (Needs you, Working, Done) in a dialog opened with Cmd+Shift+A, with PR and checks pills, space and PR filters, search and Peek / Go / Answer buttons.
+summary: Kanban of agents (Needs you, Working, Done) in a dialog opened with Cmd+Shift+A, with PR and checks pills, space and PR filters, search. A click on a card peeks the agent.
 source: https://github.com/gandriyko/herdr-app-config/tree/main/mods/agents-board
 install: copy the folder mods/agents-board into ~/.config/herdr-app/mods/agents-board, then add "cmd-shift-a": "mod.open:agents-board" to the global section of keys.json
 place: none
@@ -13,13 +13,13 @@ commands: [mod.open, pane.focus, agent.focus, terminal.peek]
 ## What it does
 A dialog (1180 x 740) with three columns. `mod.open` again, Esc or the close button closes it.
 
-- Needs you: blocked agents, oldest waiting first, with a red-tinted card and an Answer button.
+- Needs you: blocked agents, oldest waiting first, with a red-tinted card.
 - Working: longest running first, with the elapsed time.
 - Done: agents that finished while unseen first (newest first, accent dot), then seen (idle) agents as dimmed cards, newest first. The column count is all cards shown.
-- Card: the same shape as the sidebar's. Line 1: program icon, space name (`/ tab` only when the person named the tab and it differs from line 2 and the program name), status glyph (spinner working, pulsing red `?` blocked, accent dot unseen done, none idle), time. Line 2: the agent's report (else its title, else the tab name), wraps up to 2 lines. Line 3: a PR pill (`#n` and a checks glyph, click opens the PR in the browser), then Peek and Go (Answer when blocked). No branch. A click anywhere on the card is Go. Go and Answer focus the agent's pane and close the board. Sub-agents show "sub-agent of <tab>".
+- Card: the same shape as the sidebar's. Line 1: program icon, space name (`/ tab` only when the person named the tab and it differs from line 2 and the program name), status glyph (spinner working, pulsing red `?` blocked, accent dot unseen done, none idle), time. Line 2: the agent's report (else its title, else the tab name), wraps up to 2 lines. Line 3: a PR pill (`#n` and a checks glyph, click opens the PR in the browser) (only when there is one). No branch, no buttons. A click on the card closes the board and peeks the agent (`terminal.peek`; the peek has its own button to go to the pane); if peek fails it focuses the agent's pane. Sub-agents show "sub-agent of <tab>".
 - Header: summary ("2 need you · 3 working · 1 unseen · 4 seen", zero parts left out, "No agents" when none), search (program, space, tab, report), close.
 - Filters: space chips with their agent counts (idle included), and PR: Any / Has PR / Checks failing / No PR.
-- Keys: up/down between cards, left/right between columns (while the search is empty), Enter = Go, Space = Peek (while the search is empty).
+- Keys: up/down between cards, left/right between columns (while the search is empty), Enter = peek the selected card.
 
 ## Files
 - main.js: the view.
