@@ -408,13 +408,13 @@ export default class Board extends View {
       return h_flex()
         .id(`pr-${r.a.address}`)
         .flex_none()
-        .h(20)
-        .px(6)
-        .gap(4)
-        .rounded(6)
+        .h(16)
+        .px(5)
+        .gap(3)
+        .rounded(4)
         .items_center()
         .bg(color + "26")
-        .text_size(11)
+        .text_size(10.5)
         .font_medium()
         .text_color(color)
         .cursor_pointer()
@@ -425,9 +425,9 @@ export default class Board extends View {
           exec("gh", ["pr", "view", String(pr.n), "--web"], { cwd, timeout: 10000 }).catch(() => {});
         })
         .child(`#${pr.n}`)
-        .when(pr.c === "pass", (el) => el.child(svg(ICONS + "check.svg").size(11).flex_none()))
-        .when(pr.c === "fail", (el) => el.child(svg(ICONS + "x.svg").size(11).flex_none()))
-        .when(pr.c === "pending", (el) => el.child(svg(ICONS + "spinner.svg").size(11).flex_none().spin(900)));
+        .when(pr.c === "pass", (el) => el.child(svg(ICONS + "check.svg").size(10).flex_none()))
+        .when(pr.c === "fail", (el) => el.child(svg(ICONS + "x.svg").size(10).flex_none()))
+        .when(pr.c === "pending", (el) => el.child(svg(ICONS + "spinner.svg").size(10).flex_none().spin(900)));
     };
 
     const timeText = (r) => {
@@ -471,8 +471,9 @@ export default class Board extends View {
                     .gap(7)
                     .items_center()
                     .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(a.space_name || r.tabShown || r.program))
-                    .when(Boolean(a.space_name && r.tabShown), (el) => el.child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.dim).child(`/ ${r.tabShown}`)))
+                    .when(Boolean(a.space_name && r.tabShown), (el) => el.child(div().min_w(0).truncate().text_size(12).text_color(t.dim).child(`/ ${r.tabShown}`)))
                     .when(r.sub !== null, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("↳ sub-agent")))
+                    .when(Boolean(r.pr), (el) => el.child(prPill(r)))
                     .child(div().flex_1())
                     .child(div().flex_none().flex().justify_end().whitespace_nowrap().overflow_hidden().text_size(11).text_color(blocked ? t.blocked : t.dim).child(timeText(r))),
                 )
@@ -486,8 +487,7 @@ export default class Board extends View {
                     .line_height("17px")
                     .text_color(r.report ? (blocked ? t.blocked : t.muted) : t.dim)
                     .child(r.report || r.program || " "),
-                )
-                .when(Boolean(r.pr), (el) => el.child(h_flex().items_center().child(prPill(r)))),
+                ),
             ),
         );
     };

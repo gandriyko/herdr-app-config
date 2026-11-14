@@ -626,10 +626,10 @@ export default class Agents extends View {
       return h_flex()
         .id(`pr-${a.address}`)
         .flex_none()
-        .h(18)
+        .h(16)
         .px(5)
         .gap(3)
-        .rounded(5)
+        .rounded(4)
         .items_center()
         .bg(color + "26")
         .text_size(10.5)
@@ -744,12 +744,12 @@ export default class Agents extends View {
               .items_center()
               .child(h_flex().flex_1().min_w(0).gap(5).items_center()
                 .child(div().min_w(0).max_w(tabTxt ? 120 : 200).truncate().text_color(t.foreground).font_semibold().child(lead))
-                .when(Boolean(tabTxt), (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`/ ${tabTxt}`))))
+                .when(Boolean(tabTxt), (el) => el.child(div().min_w(0).truncate().text_color(t.dim).child(`/ ${tabTxt}`)))
+                .when(Boolean(pr), (el) => el.child(prChip(a, pr))))
               .when(Boolean(machine), (el) => el.child(div().text_size(10).text_color(t.dim).child(machine)))
               .when(subs.length > 0, (el) => el.child(fold(a, subs)))
               .when(Boolean(timeOrPin), (el) => el.child(timeOrPin)))
-            .child(div().min_w(0).max_h(34).overflow_hidden().text_size(12).line_height("17px").text_color(report ? (blocked ? t.blocked : t.muted) : t.dim).child(report || prog || label(a)))
-            .when(Boolean(pr), (el) => el.child(h_flex().child(prChip(a, pr))))))
+            .child(div().min_w(0).max_h(34).overflow_hidden().text_size(12).line_height("17px").text_color(report ? (blocked ? t.blocked : t.muted) : t.dim).child(report || prog || label(a)))))
         .when(subs.length > 0 && !this.folded.has(a.address), (el) => el.children(subs.map((x) => this.subRow(t, x, shown, byPriority))));
     };
 
