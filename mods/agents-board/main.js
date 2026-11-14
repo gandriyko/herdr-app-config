@@ -214,6 +214,18 @@ export default class Board extends View {
     } catch (_e) {}
   }
 
+  // A press outside the reply area closes it; the click that follows (peek a card, close the board,
+  // toggle the same reply button) is swallowed for a moment so it only dismisses.
+  dismissReply(cx) {
+    if (!this.reply) return;
+    this.dismiss = { at: Date.now(), address: this.reply.address };
+    this.closeReply(cx);
+  }
+
+  justDismissed() {
+    return Boolean(this.dismiss && Date.now() - this.dismiss.at < 400);
+  }
+
   closeReply(cx) {
     if (!this.reply) return;
     this.dropReply();
@@ -230,6 +242,7 @@ export default class Board extends View {
   openReply(a, cx) {
     if (!a || !this.live || a.status === "working") return;
     if (this.reply?.address === a.address) return this.closeReply(cx);
+    if (this.justDismissed() && this.dismiss.address === a.address) return; // the press that closed it
     this.dropReply();
     const seq = this.replySeq;
     cx.spawn(async (cx) => {
@@ -605,6 +618,7 @@ export default class Board extends View {
         .id(`reply-area-${rp.address}`)
         .gap(4)
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_mouse_down_out((_e, cx) => this.dismissReply(cx))
         .on_click((_e, cx) => cx.stop_propagation())
         .when(Boolean(rp.question), (el) =>
           el.child(
@@ -644,7 +658,7 @@ export default class Board extends View {
         .cursor_pointer()
         .when(a.status === "idle", (el) => el.opacity(0.55))
         .hover((s) => s.bg(blocked ? t.blocked + "22" : t.hover))
-        .on_click((_e, cx) => this.peek(a, cx))
+        .on_click((_e, cx) => (this.justDismissed() ? null : this.peek(a, cx)))
         .child(
           h_flex()
             .gap(7)
@@ -931,7 +945,7 @@ export default class Board extends View {
       })
       .on_mouse_move((e, cx) => this.dragTo(e, cx))
       .on_mouse_up("left", (_e, cx) => this.endDrag(cx))
-      .on_mouse_down("left", (_e, cx) => this.close(cx))
+      .on_mouse_down("left", (_e, cx) => (this.justDismissed() ? null : this.close(cx)))
       .child(panel);
   }
 }
