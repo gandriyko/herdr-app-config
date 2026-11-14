@@ -106,7 +106,7 @@ export default class Board extends View {
     this.input.on("submit", (_e, cx) => this.peek(this.byAddr?.get(this.sel), cx));
     this.input.focus();
     cx.timer.after(400, () => this.live && this.input.focus());
-    // Only the "4m" / "waiting 7m" texts and the PR refresh need time to pass.
+    // Only the "4m" / "7m" texts and the PR refresh need time to pass.
     cx.timer.every(30000, (cx) => {
       if (!this.live) return;
       this.kick(cx);
@@ -429,8 +429,7 @@ export default class Board extends View {
 
     const timeText = (r) => {
       if (r.at == null) return "";
-      const d = duration(now - r.at);
-      return r.a.status === "blocked" ? `waiting ${d}` : d;
+      return duration(now - r.at);
     };
 
     const card = (r) => {
@@ -462,7 +461,7 @@ export default class Board extends View {
             .when(r.sub !== null, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("↳ sub-agent")))
             .child(div().flex_1())
             .child(((g) => div().flex_none().w(16).h(16).flex().items_center().justify_center().when(Boolean(g), (el) => el.child(g)))(glyph(t, a.status)))
-            .child(div().flex_none().w(30).flex().justify_end().text_size(11).text_color(blocked ? t.blocked : t.dim).child(timeText(r))),
+            .child(div().flex_none().w(34).flex().justify_end().whitespace_nowrap().overflow_hidden().text_size(11).text_color(blocked ? t.blocked : t.dim).child(timeText(r))),
         )
         .when(r.sub, (el) => el.child(div().truncate().text_size(11).text_color(t.dim).child(`↳ sub-agent of ${r.sub}`)))
         .when(Boolean(r.report), (el) =>

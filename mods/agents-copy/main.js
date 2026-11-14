@@ -692,7 +692,7 @@ export default class Agents extends View {
           cx.notify();
         })
         .on_click(() => run("pane.focus", { pane: a.pane }));
-      const timeOrPin = this.hovered === a.address ? pin : Boolean(when) ? div().flex_none().w(30).flex().justify_end().text_size(11).text_color(a.status === "blocked" ? t.blocked : t.dim).child(duration(now - when)) : null;
+      const timeOrPin = this.hovered === a.address ? pin : Boolean(when) ? div().flex_none().w(34).flex().justify_end().whitespace_nowrap().overflow_hidden().text_size(11).text_color(a.status === "blocked" ? t.blocked : t.dim).child(duration(now - when)) : null;
       const picFold = (p) => div().id(`agent-fold-${a.address}`)
         .when(subs.length > 0, (el) => el.on_click((_e, cx) => {
           cx.stop_propagation();
