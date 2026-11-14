@@ -716,7 +716,16 @@ export default class Agents extends View {
 
       const blocked = a.status === "blocked";
       const term = termBy.get(a.address);
-      const report = reportText(term?.report) || reportText(a.title);
+      const tabInfo = tabs.get(a.tab);
+      const prog = a.program?.name ?? "";
+      // Line 2: the report, else the agent's title, else the tab name; never the bare program name.
+      let report = reportText(term?.report) || reportText(a.title) || (tabInfo?.name ?? "").trim();
+      if (report.toLowerCase() === prog.trim().toLowerCase()) report = "";
+      // Line 1 names the tab only when a person named it and it says something new.
+      const tabName = tabInfo?.named ? (tabInfo.name ?? "").trim() : "";
+      let lead = full && a.space_name ? a.space_name : null;
+      let tabTxt = tabName && tabName.toLowerCase() !== report.trim().toLowerCase() ? tabName : null;
+      if (!lead) { lead = tabTxt ?? (prog || label(a)); if (tabTxt) tabTxt = null; }
       const pr = prFor(a);
       return hover(v_flex()
         .id(`ag-${a.address}`)
@@ -735,14 +744,14 @@ export default class Agents extends View {
           .items_center()
           .when(Boolean(pic), (el) => el.child(picFold(pic)))
           .child(h_flex().flex_1().min_w(0).gap(5).items_center()
-            .child(div().min_w(0).max_w(full && more ? 120 : 200).truncate().text_color(t.foreground).when(a.status === "done", (el) => el.font_semibold()).when(a.status !== "done", (el) => el.font_medium()).child(name))
-            .when(full && Boolean(more), (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`/ ${more}`))))
+            .child(div().min_w(0).max_w(tabTxt ? 120 : 200).truncate().text_color(t.foreground).when(a.status === "done", (el) => el.font_semibold()).when(a.status !== "done", (el) => el.font_medium()).child(lead))
+            .when(Boolean(tabTxt), (el) => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`/ ${tabTxt}`))))
           .when(Boolean(machine), (el) => el.child(div().text_size(10).text_color(t.dim).child(machine)))
           .when(subs.length > 0, (el) => el.child(fold(a, subs)))
           .when(a.status === "working", (el) => el.child(this.status(t, a)))
           .when(a.status === "done", (el) => el.child(div().flex_none().size(7).rounded(4).bg(t.accent)))
           .when(Boolean(timeOrPin), (el) => el.child(timeOrPin)))
-        .when(Boolean(report), (el) => el.child(div().pl(23).min_w(0).truncate().font_family(MONO).text_size(11).text_color(blocked ? t.blocked : t.dim).child(report)))
+        .when(Boolean(report), (el) => el.child(div().pl(23).min_w(0).truncate().text_size(12).text_color(blocked ? t.blocked : t.dim).child(report)))
         .when(Boolean(pr), (el) => el.child(h_flex().pl(23).child(prChip(a, pr))))
         .when(subs.length > 0 && !this.folded.has(a.address), (el) => el.children(subs.map((x) => this.subRow(t, x, shown, byPriority))));
     };

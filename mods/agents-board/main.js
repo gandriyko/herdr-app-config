@@ -185,14 +185,21 @@ export default class Board extends View {
       const p = paneBy.get(a.pane);
       const sp = spaceBy.get(a.space);
       const at = a.status === "working" ? tb?.working_since : tb?.changed_at;
-      const report = clean(term?.report) || clean(a.title);
+      const prog = a.program?.name ?? "agent";
+      // Line 2: the report, else the agent's title, else the tab name; never the bare program name.
+      let report = clean(term?.report) || clean(a.title) || (tb?.name ?? "").trim();
+      if (report.toLowerCase() === prog.trim().toLowerCase()) report = "";
+      // The tab shows on line 1 only when a person named it and it says something new.
+      const tabName = tb?.named ? (tb.name ?? "").trim() : "";
+      const tabShown = tabName && tabName.toLowerCase() !== report.toLowerCase() ? tabName : null;
       const par = term?.parent ? termBy.get(term.parent) : null;
       const parentAgent = term?.parent ? agentBy.get(term.parent) : null;
       return {
         a,
         at: at ?? null,
         report,
-        program: a.program?.name ?? "agent",
+        tabShown,
+        program: prog,
         branch: p?.branch ?? sp?.branch ?? null,
         sub: term?.parent ? (parentAgent?.tab_name ?? par?.name ?? "") : null,
         pr: prFor(a),
@@ -311,36 +318,26 @@ export default class Board extends View {
             .gap(7)
             .items_center()
             .when(Boolean(pic), (el) => el.child(pic))
-            .child(div().truncate().text_size(13).font_semibold().text_color(t.foreground).child(r.program))
+            .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(a.space_name || r.tabShown || r.program))
+            .when(Boolean(a.space_name && r.tabShown), (el) => el.child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.dim).child(`/ ${r.tabShown}`)))
             .when(r.sub !== null, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("↳ sub-agent")))
             .child(div().flex_1())
             .when(a.status === "done", (el) => el.child(div().flex_none().size(7).rounded(4).bg(t.accent).tooltip("Not seen yet")))
             .child(div().flex_none().text_size(11).text_color(blocked ? t.blocked : t.dim).child(timeText(r))),
         )
         .when(r.sub, (el) => el.child(div().truncate().text_size(11).text_color(t.dim).child(`↳ sub-agent of ${r.sub}`)))
-        .child(
-          h_flex()
-            .gap(8)
-            .items_center()
-            .child(div().min_w(0).truncate().text_size(12).text_color(t.muted).child(`${a.space_name} / ${a.tab_name}`))
-            .child(div().flex_1())
-            .when(Boolean(r.branch), (el) => el.child(div().min_w(0).truncate().font_family(MONO).text_size(11).text_color(t.dim).child(r.branch))),
-        )
         .when(Boolean(r.report), (el) =>
           el.child(
             div()
-              .px(8)
-              .py(5)
-              .rounded(6)
-              .bg(t.background)
-              .max_h(46)
+              .min_w(0)
+              .max_h(34)
               .overflow_hidden()
-              .font_family(MONO)
-              .text_size(11.5)
+              .text_size(12)
               .text_color(blocked ? t.blocked : t.muted)
               .child(r.report.length > 160 ? r.report.slice(0, 160) + "…" : r.report),
           ),
         )
+        .when(Boolean(r.branch), (el) => el.child(div().min_w(0).truncate().font_family(MONO).text_size(11).text_color(t.dim).child(r.branch)))
         .child(
           h_flex()
             .gap(6)

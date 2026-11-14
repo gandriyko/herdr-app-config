@@ -16,7 +16,7 @@ A dialog (1180 x 740) with three columns. `mod.open` again, Esc or the close but
 - Needs you: blocked agents, oldest waiting first, with a red-tinted card and an Answer button.
 - Working: longest running first, with the elapsed time.
 - Done: agents that finished while unseen first (newest first, accent dot), then seen (idle) agents as dimmed cards, newest first. The column count is all cards shown.
-- Card: program icon and name, space / tab, branch, the agent's report (else its title), a PR pill (`#n` and a checks glyph, click opens the PR in the browser), Peek, Go. A click anywhere on the card is Go. Go and Answer focus the agent's pane and close the board. Sub-agents show "sub-agent of <tab>".
+- Card: program icon, space name (`/ tab` only when the person named the tab and it differs from line 2), time, the agent's report (else its title, else the tab name; up to 2 lines), branch, a PR pill (`#n` and a checks glyph, click opens the PR in the browser), Peek, Go. A click anywhere on the card is Go. Go and Answer focus the agent's pane and close the board. Sub-agents show "sub-agent of <tab>".
 - Header: summary ("2 need you · 3 working · 1 unseen · 4 seen", zero parts left out, "No agents" when none), search (program, space, tab, report), close.
 - Filters: space chips with their agent counts (idle included), and PR: Any / Has PR / Checks failing / No PR.
 - Keys: up/down between cards, left/right between columns (while the search is empty), Enter = Go, Space = Peek (while the search is empty).

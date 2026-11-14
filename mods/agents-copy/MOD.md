@@ -13,7 +13,7 @@ commands: [pane.focus, terminal.pin, terminal.peek, layout.resize, mod.open agen
 ## What it does
 Lists agents like the shipped `agents` panel, in Priority or Grouped by space, with sub-agent trees, pins and a narrow rail mode. Cloned from agents 0.1.15.
 
-- Rows: each non-idle agent is a small card. Line 1: program icon, space name (semibold while unseen/done), dim `/ tab`, an accent dot when done, time in state, hover pin button. Line 2: the agent's report (terminal `report`, else its title) in one monospace line. Line 3: the PR pill. Blocked cards are red-tinted. Sub-agents sit inside their parent's card.
+- Rows: each non-idle agent is a small card. Line 1: program icon, space name (semibold while unseen/done), dim `/ tab` only when the person named the tab and it differs from line 2, an accent dot when done, time in state, hover pin button. Line 2: the agent's report (terminal `report`, else its title, else the tab name; left out if it is just the program name) in one truncated line. Line 3: the PR pill. Blocked cards are red-tinted. Sub-agents sit inside their parent's card.
 - Priority view: groups Needs you, Working, Done (colored dot, title, count). Idle agents are single dimmed lines (icon, `space / tab`, time) at the end of Done. Grouped view uses the same cards under the space headers.
 
 - PR chip: a pill after the row text with `#<n>` and a check glyph (red failing, green passing, yellow pending, grey none). Click opens the PR in the browser (`gh pr view --web`). No chip without an open PR, for agents on other machines, or in rail mode.
