@@ -943,7 +943,7 @@ export default class Board extends View {
       const lines = rp.lines ?? [];
       if (rp.stick && lines.length) {
         rp.stick = false;
-        const last = lines.length - 1;
+        const last = lines.length; // the spacer after the last line, so the last (maybe re-wrapped) row shows whole
         this.pvScroll.scroll_to_item(last);
         for (const ms of [50, 250]) {
           cx.timer.after(ms, (cx) => {
@@ -954,12 +954,12 @@ export default class Board extends View {
         }
       }
       // The outer box clips and keeps its own height, so the text never draws over the input below.
-      return div().w_full().flex_none().max_h(240).overflow_hidden().rounded(6).bg(t.background).mb(4).child(
+      return div().w_full().flex_none().max_h(240).overflow_hidden().rounded(6).bg(t.background).border_1().border_color(t.border).mb(8).child(
        v_flex()
         .id(`reply-text-${rp.address}`)
         .w_full()
-        .max_h(240)
-        .overflow_y_scrollbar()
+        .max_h(238)
+        .overflow_y_scroll() // not _scrollbar(): its wrapper ignores max_h, so the list grew to full height and the outer clip hid the end
         .track_scroll(this.pvScroll)
         .p(8)
         .font_family(settings().font_family ?? "JetBrains Mono")
@@ -967,7 +967,8 @@ export default class Board extends View {
         .line_height("15px")
         .text_color(t.muted)
         .when(!lines.length, (el) => el.child(div().text_color(t.dim).child(rp.mode === "failed" ? "Could not read the screen" : rp.loaded ? "Empty screen" : "Loading…")))
-        .children(lines.map((l) => (RULE.test(l) ? div().h(1).my(4).bg(t.border) : div().child(l || " ")))),
+        .children(lines.map((l) => (RULE.test(l) ? div().h(1).my(4).bg(t.border) : div().child(l || " "))))
+        .child(div().h(8).flex_none()),
       );
     };
 
