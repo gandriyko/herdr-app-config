@@ -68,7 +68,7 @@
       },
       "min": 44,
       "max": 480,
-      "background": "#0b102466",
+      "background": "chrome",
       "resizable": false
     },
     {
@@ -191,7 +191,7 @@
       "resizable": false
     }
   ],
-  "background": "#00000000",
+  "background": "canvas",
   "terminal_padding": [
     14,
     12
@@ -204,6 +204,5 @@
   "traffic_lights": [
     12,
     16
-  ],
-  "window_blur": true
+  ]
 }
