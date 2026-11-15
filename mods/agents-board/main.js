@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
-import { agents, terminals, panes, spaces, run, theme, shared, setShared, openOverlay, closeOverlay, props, exec, hc } from "herdr";
+import { agents, terminals, panes, spaces, focused, run, theme, shared, setShared, openOverlay, closeOverlay, props, exec, hc } from "herdr";
 import { AskingTracker } from "./asking.js";
 import { isSelectMenu, parseOptions, parseQuestion, parseSuggestion, sameOptions } from "./reply.js";
 import { CHECKS_WORD, newPrState, prMap, prOf, refreshPrs } from "./prs.js";
@@ -438,6 +438,13 @@ export default class Board extends View {
     this.done = true;
     store.set("sel", a.address);
     this.close(cx);
+    // Its pane already on screen (this tab, not hidden by a zoomed one): focus it. A peek would draw the same
+    // terminal a second time, under the dialog, on every line the agent prints.
+    const f = focused(), ps = panes(), p = a.pane && ps.find((x) => x.pane === a.pane);
+    if (p && p.terminal === a.address && p.tab === f?.tab && !ps.some((x) => x.tab === p.tab && x.zoomed && x.pane !== p.pane)) {
+      run("pane.focus", { pane: p.pane });
+      return;
+    }
     try {
       const z = sizeOf();
       const px = this.win ? toPx(z, this.win.width, this.win.height) : null;

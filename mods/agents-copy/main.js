@@ -449,13 +449,14 @@ export default class Agents extends View {
   }
 
   // Live sub-agents of `addr`, depth first, each with the tree lines in front of it.
-  tree(all, addr, lead = []) {
-    const kids = all.filter((k) => k.parent === addr && k.state === "live");
+  // `kidsBy`: parent address -> its live terminals, built once per render.
+  tree(kidsBy, addr, lead = []) {
+    const kids = kidsBy.get(addr) ?? [];
     return kids.flatMap((k, i) => {
       const last = i === kids.length - 1;
       return [
         { t: k, lines: [...lead, last ? "└" : "├"] },
-        ...this.tree(all, k.address, [...lead, last ? "" : "│"]),
+        ...this.tree(kidsBy, k.address, [...lead, last ? "" : "│"]),
       ];
     });
   }
@@ -519,7 +520,12 @@ export default class Agents extends View {
     this.track(list, now);
     // A kept sub-agent (one with a pane) is in agents() too: where a tree shows
     // it, it gets no row of its own, unless it's pinned.
-    const nested = new Set(collapsed ? [] : list.flatMap((a) => this.tree(all, a.address).map((s) => s.t.address)));
+    // One pass over the terminals, and each agent's tree once per render (it's needed three times below).
+    const kidsBy = new Map();
+    for (const k of all) if (k.parent && k.state === "live") kidsBy.set(k.parent, [...(kidsBy.get(k.parent) ?? []), k]);
+    const trees = new Map();
+    const treeOf = (addr) => trees.get(addr) ?? trees.set(addr, this.tree(kidsBy, addr)).get(addr);
+    const nested = new Set(collapsed ? [] : list.flatMap((a) => treeOf(a.address).map((s) => s.t.address)));
     list = list.filter((a) => a.pinned || !nested.has(a.address));
 
     // Where each agent is (its pane's folder and branch, else its space's) for PR chips and the filter.
@@ -557,16 +563,21 @@ export default class Agents extends View {
     const tabCounts = new Map();
     for (const a of list) tabCounts.set(a.tab, (tabCounts.get(a.tab) ?? 0) + 1);
     const byPriority = sort.id === "priority";
-    const urgency = new Map(list.map((a) => [a.address, Math.max(this.rank(a), ...this.tree(all, a.address).map((s) => RANK[kidStatus(s.t, this.listed)] ?? 0))]));
+    const urgency = new Map(list.map((a) => [a.address, Math.max(this.rank(a), ...treeOf(a.address).map((s) => RANK[kidStatus(s.t, this.listed)] ?? 0))]));
     const rankOf = (a) => urgency.get(a.address);
     if (byPriority) list = [...list].sort((x, y) => SECTION_ORDER[sectionOf(rankOf(x) || RANK.idle)] - SECTION_ORDER[sectionOf(rankOf(y) || RANK.idle)] || rankOf(y) - rankOf(x) || this.since(y) - this.since(x) || y.seq - x.seq);
     const pinned = list.filter((a) => a.pinned);
     const rest = list.filter((a) => !a.pinned);
     list = [...pinned, ...rest];
-    setAgentOrder(list.map((a) => a.address));
+    // Only when the order changed: the host keeps it (in memory) between calls.
+    const order = list.map((a) => a.address);
+    if (order.join("\n") !== this.order) {
+      this.order = order.join("\n");
+      setAgentOrder(order);
+    }
 
     const withKids = (a, i) => {
-      const subs = collapsed ? [] : this.tree(all, a.address);
+      const subs = collapsed ? [] : treeOf(a.address);
       return [row(a, i, subs)];
     };
 
@@ -687,9 +698,10 @@ export default class Agents extends View {
       const name = full ? a.space_name || label(a) : more ?? (/^\d+$/.test(label(a)) ? a.program?.name || label(a) : label(a));
       const hover = (el) => el
         .on_hover((on, cx) => {
+          const was = this.hovered;
           if (on) this.hovered = a.address;
           else if (this.hovered === a.address) this.hovered = null;
-          cx.notify();
+          if (this.hovered !== was) cx.notify();
         })
         .on_click(() => run("pane.focus", { pane: a.pane }));
       const timeOrPin = this.hovered === a.address ? pin : Boolean(when) ? div().flex_none().flex().justify_end().whitespace_nowrap().overflow_hidden().text_size(11).text_color(a.status === "blocked" ? t.blocked : t.dim).child(duration(now - when)) : null;
