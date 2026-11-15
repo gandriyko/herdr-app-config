@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
-import { agents, terminals, panes, spaces, focused, run, theme, shared, setShared, openOverlay, closeOverlay, props, exec, hc } from "herdr";
+import { agents, terminals, panes, spaces, run, theme, settings, shared, setShared, closeOverlay, props, exec, hc } from "herdr";
 import { AskingTracker } from "./asking.js";
 import { isSelectMenu, parseOptions, parseQuestion, parseSuggestion, sameOptions } from "./reply.js";
 import { CHECKS_WORD, newPrState, prMap, prOf, refreshPrs } from "./prs.js";
@@ -60,7 +60,8 @@ function glyph(t, status) {
   return null;
 }
 
-const WORDS = { working: "working", blocked: "needs you", done: "finished", idle: "idle" };
+const RULE = /^[\s─━═\-_]*[─━═]{3,}[\s─━═\-_]*$/;
+const termByAddr = (terms, address) => terms.find((x) => x.address === address);
 const store = {
   get: (k) => {
     try {
@@ -79,13 +80,6 @@ const store = {
 export default class Board extends View {
   init(_props, cx) {
     this.live = true;
-    if (props()?.peekBar) {
-      // The bar over a peeked agent: no board state, timers or PR polling.
-      this.layoutName = shared("layout");
-      this.going = false;
-      this.back = false;
-      return;
-    }
     this.pr = newPrState();
     // Agents finished on a menu or a question count as blocked; one screen read per turn.
     this.asking = new AskingTracker(hc, () => this.live);
@@ -95,9 +89,22 @@ export default class Board extends View {
     this.busy = false;
     this.again = false;
     this.q = "";
-    this.sel = store.get("sel") || null; // address of the selected card (remembered across openings)
-    this.cols = []; // addresses per column, set by render, for the keys
+    this.sel = null; // address of the selected card
+    this.cols = []; // addresses per column in visual order (parent, then its open children), set by render, for the keys
+    this.colIdx = []; // per column, the index of the top-level card holding each address (for scrolling)
+    this.collapsed = new Set(); // parent addresses whose children are folded
+    try {
+      const c = JSON.parse(store.get("collapsed") || "[]");
+      if (Array.isArray(c)) for (const x of c.slice(0, 200)) if (typeof x === "string") this.collapsed.add(x);
+    } catch (_e) {}
+    this.treeKey = null; // the parent links the cache below was built from
+    this.parentOf = new Map(); // child address -> parent address (both agents, no cycles)
+    this.kidsOf = new Map(); // parent address -> child addresses
     this.done = false;
+    this.going = false; // a paneless agent is being given a pane
+    this.notice = null; // a one-line error under the header
+    this.preview = null; // { address, text, error, key, want, busy, again, stick } while the screen preview is open
+    this.pvScroll = ScrollHandle.new();
     this.win = null; // the window's size (the overlay covers it)
     this.drag = null; // { mode, size } while the panel is being resized
     this.scrolls = COLS.map(() => ScrollHandle.new());
@@ -107,7 +114,7 @@ export default class Board extends View {
       this.q = this.input.value().trim().toLowerCase();
       cx.notify();
     });
-    this.input.on("submit", (_e, cx) => this.peek(this.byAddr?.get(this.sel), cx));
+    this.input.on("submit", (_e, cx) => this.go(this.byAddr?.get(this.sel), cx));
     this.searchFocus = false;
     this.input.on("focus", () => (this.searchFocus = true));
     this.input.on("blur", () => (this.searchFocus = false));
@@ -126,81 +133,11 @@ export default class Board extends View {
 
   close(cx) {
     this.live = false;
-    if (props()?.peekBar) return this.barClose();
     this.dropReply();
+    this.preview = null;
+    this.pvScroll.release();
     for (const s of this.scrolls) s.release();
     closeOverlay(props().overlay);
-  }
-
-  // The peek bar closes (any way except the go button): the board comes back, once, and only
-  // in the layout the peek was opened in.
-  barClose() {
-    if (this.going || this.back) return;
-    this.back = true;
-    if (shared("layout") !== this.layoutName) return;
-    try {
-      run("mod.open", { name: "agents-board" });
-    } catch (_e) {}
-  }
-
-  barLeave(go) {
-    const { terminal, pane, overlay } = props();
-    if (go) this.going = true;
-    closeOverlay(overlay);
-    if (go) {
-      if (pane) run("pane.focus", { pane });
-      else run("agent.focus", { terminal });
-    } else this.barClose();
-  }
-
-  bar() {
-    const t = theme();
-    const { terminal, pane } = props();
-    const a = agents().find((x) => x.address === terminal);
-    const k = terminals().find((x) => x.address === terminal);
-    const tb = spaces().flatMap((s) => s.tabs).find((x) => x.id === a?.tab);
-    const prog = (a?.program?.name ?? k?.program?.name ?? "agent").trim();
-    const report = clean(k?.report) || clean(a?.title) || (tb?.name ?? "").trim();
-    const tabName = tb?.named ? (tb.name ?? "").trim() : "";
-    const tabShown = tabName && tabName.toLowerCase() !== report.toLowerCase() && tabName.toLowerCase() !== prog.toLowerCase() ? tabName : null;
-    const st = a?.status ?? k?.status ?? null;
-    const pic = icon(a?.program ?? k?.program, 16, t.foreground);
-    const btn = (id, label, tip, onClick) =>
-      div()
-        .id(id)
-        .flex_none()
-        .px(8)
-        .py(2)
-        .rounded(5)
-        .text_size(12)
-        .text_color(t.muted)
-        .cursor_pointer()
-        .tooltip(tip)
-        .hover((s) => s.bg(t.hover).text_color(t.foreground))
-        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-        .on_click((_e, cx) => {
-          cx.stop_propagation();
-          onClick();
-        })
-        .child(label);
-    return h_flex()
-      .size_full()
-      .px(12)
-      .gap(8)
-      .items_center()
-      .bg(t.surface)
-      .border_b(1)
-      .border_color(t.border)
-      .text_size(12)
-      .when(Boolean(pic), (el) => el.child(pic))
-      .child(div().min_w(0).truncate().font_semibold().text_size(13).text_color(t.foreground).child(a?.space_name || tabShown || prog))
-      .when(Boolean(a?.space_name && tabShown), (el) => el.child(div().min_w(0).truncate().text_color(t.dim).child(`/ ${tabShown}`)))
-      .when(Boolean(glyph(t, st)), (el) => el.child(glyph(t, st)))
-      .when(Boolean(st), (el) => el.child(div().flex_none().text_color(t[st] ?? t.dim).child(WORDS[st] ?? st)))
-      .child(div().flex_1())
-      .child(btn("bar-board", "← Board", "Back to the board", () => this.barLeave(false)))
-      .child(btn("bar-go", "↗", "Go to agent", () => this.barLeave(true)))
-      .child(btn("bar-close", "✕", "Close (back to the board)", () => this.barLeave(false)));
   }
 
   // Drops the reply area and its input (no screen text is kept anywhere).
@@ -214,7 +151,7 @@ export default class Board extends View {
     } catch (_e) {}
   }
 
-  // A press outside the reply area closes it; the click that follows (peek a card, close the board,
+  // A press outside the reply area closes it; the click that follows (go to a card, close the board,
   // toggle the same reply button) is swallowed for a moment so it only dismisses.
   dismissReply(cx) {
     if (!this.reply) return;
@@ -233,6 +170,73 @@ export default class Board extends View {
     cx.notify();
   }
 
+  // The screen preview: a click on the eye toggles it on a card; only one is open, and not with a reply area.
+  togglePreview(a, cx) {
+    if (!a || !this.live) return;
+    if (this.preview?.address === a.address) return this.closePreview(cx);
+    this.dropReply();
+    this.preview = { address: a.address, text: [], loaded: false, error: null, want: null, busy: false, again: false, stick: true };
+    this.sel = a.address;
+    this.preview.want = this.previewKey(a.address);
+    cx.notify();
+    this.loadPreview(cx); // at once, not on the next render
+  }
+
+  previewKey(address) {
+    return `${terminals().find((x) => x.address === address)?.turn}|${this.byAddr?.get(address)?.status}`;
+  }
+
+  closePreview(cx) {
+    if (!this.preview) return;
+    this.preview = null;
+    if (this.live) this.handle.focus();
+    cx.notify();
+  }
+
+  // Reads the last ~30 lines for the open preview. One read at a time; a change that arrives meanwhile reads once more.
+  loadPreview(cx) {
+    const pv = this.preview;
+    if (!pv || !this.live) return;
+    if (pv.busy) {
+      pv.again = true;
+      return;
+    }
+    pv.busy = true;
+    cx.spawn(async (cx) => {
+      try {
+        do {
+          pv.again = false;
+          let lines = null, err = null;
+          try {
+            const r = await hc(["read", pv.address, "--lines", "30"]);
+            if (r?.code === 0) {
+              lines = String(r.stdout).split("\n");
+              while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+              // Runs of blank lines become one (a mostly empty screen), leading blanks go; then the last 30.
+              lines = lines.filter((l, i) => l.trim() || (i > 0 && lines[i - 1].trim()));
+              while (lines.length && !lines[0].trim()) lines.shift();
+              lines = lines.slice(-30);
+            } else err = String(r?.stderr || r?.stdout || "Failed").trim().split("\n")[0] || "Failed";
+          } catch (e) {
+            err = String(e?.message ?? e).split("\n")[0];
+          }
+          if (!this.live || this.preview !== pv) return;
+          let changed = !pv.loaded || err !== pv.error;
+          if (lines && lines.join("\n") !== pv.text.join("\n")) {
+            pv.text = lines;
+            pv.stick = true;
+            changed = true;
+          }
+          pv.loaded = true;
+          pv.error = err;
+          if (changed) cx.notify();
+        } while (pv.again && this.live && this.preview === pv);
+      } finally {
+        pv.busy = false;
+      }
+    });
+  }
+
   async readScreen(address) {
     const r = await hc(["read", address]);
     return r?.code === 0 ? r.stdout : "";
@@ -242,6 +246,7 @@ export default class Board extends View {
   openReply(a, cx) {
     if (!a || !this.live || a.status === "working") return;
     if (this.reply?.address === a.address) return this.closeReply(cx);
+    this.preview = null;
     if (this.justDismissed() && this.dismiss.address === a.address) return; // the press that closed it
     this.dropReply();
     const seq = this.replySeq;
@@ -431,43 +436,40 @@ export default class Board extends View {
     });
   }
 
-  // Closes the board (the peek is an overlay and would sit under it), then peeks the agent;
-  // falls back to focusing its pane when peek is not available.
-  peek(a, cx) {
-    if (!a || this.done) return;
-    this.done = true;
-    store.set("sel", a.address);
-    this.close(cx);
-    // Its pane already on screen (this tab, not hidden by a zoomed one): focus it. A peek would draw the same
-    // terminal a second time, under the dialog, on every line the agent prints.
-    const f = focused(), ps = panes(), p = a.pane && ps.find((x) => x.pane === a.pane);
-    if (p && p.terminal === a.address && p.tab === f?.tab && !ps.some((x) => x.tab === p.tab && x.zoomed && x.pane !== p.pane)) {
-      run("pane.focus", { pane: p.pane });
+  // Closes the board and goes to the agent's terminal. A sub-agent without a pane first gets one
+  // (terminal.keep, which may apply a moment later), then it is focused.
+  go(a, cx) {
+    if (!a || this.done || this.going) return;
+    if (!a.paneless) {
+      this.done = true;
+      this.close(cx);
+      run("pane.focus", { terminal: a.address });
       return;
     }
+    this.going = true;
+    this.notice = null;
+    const fail = (msg) => {
+      this.going = false;
+      this.notice = msg;
+      if (this.live) cx.notify();
+    };
     try {
-      const z = sizeOf();
-      const px = this.win ? toPx(z, this.win.width, this.win.height) : null;
-      openOverlay({
-        kind: "dialog",
-        width: px ? px.w : z.w,
-        height: px ? px.h : z.h,
-        layout: {
-          id: "peek", type: "column",
-          children: [
-            { id: "bar", type: "block", size: { px: 34 }, content: { mod: "agents-board", props: { peekBar: true, terminal: a.address, pane: a.pane } } },
-            { id: "term", type: "block", content: { terminal: a.address } },
-          ],
-        },
-      });
-    } catch (_e) {
-      try {
-        run("terminal.peek", { terminal: a.address });
-        return;
-      } catch (_e2) {}
-      if (a.pane) run("pane.focus", { pane: a.pane });
-      else run("agent.focus", { terminal: a.address });
+      run("terminal.keep", { terminal: a.address });
+    } catch (e) {
+      return fail(`Could not open ${a.name}: ${String(e?.message ?? e).split("\n")[0]}`);
     }
+    // One-shot checks (no loop): the pane appears right away, or after the core confirms.
+    const attempt = (n) =>
+      cx.timer.after(n ? 1200 : 400, (cx) => {
+        if (!this.live) return;
+        if (panes().some((p) => p.terminal === a.address)) {
+          this.done = true;
+          this.close(cx);
+          run("pane.focus", { terminal: a.address });
+        } else if (n) fail(`${a.name} got no pane`);
+        else attempt(1);
+      });
+    attempt(0);
   }
 
   // Resizing: the panel stays centered, so its width is twice the pointer's distance from the center.
@@ -513,17 +515,51 @@ export default class Board extends View {
       }
     }
     this.sel = cols[ci][ri] ?? null;
-    this.scrolls[ci]?.scroll_to_item(ri);
+    this.scrolls[ci]?.scroll_to_item(this.colIdx[ci]?.[ri] ?? ri);
     cx.notify();
   }
 
   render(cx) {
-    if (props()?.peekBar) return this.bar();
     const t = theme();
     const now = Date.now();
     // Each host list once.
     const terms = terminals();
-    const list = this.asking.apply(agents(), terms, cx);
+    // A sub-agent without a pane is not in agents(): make an agent-like record from its terminal, with
+    // the space and tab of the listed agent its parent chain reaches. error counts as blocked, done as idle
+    // (it reports to its parent, so its done is never news; same as the agents mod).
+    const base = agents();
+    const baseBy = new Map(base.map((a) => [a.address, a]));
+    const loose = new Map(terms.filter((k) => k.state === "live" && k.status && !baseBy.has(k.address)).map((k) => [k.address, k]));
+    const extras = [];
+    for (const k of loose.values()) {
+      let root = null;
+      const seen = new Set([k.address]);
+      for (let p = k.parent, n = 0; p && n < 8 && !seen.has(p); p = (loose.get(p) ?? termByAddr(terms, p))?.parent, n++) {
+        seen.add(p);
+        if (baseBy.has(p)) {
+          root = baseBy.get(p);
+          break;
+        }
+        if (!loose.has(p)) break;
+      }
+      if (!root) continue;
+      extras.push({
+        address: k.address,
+        status: k.status === "error" ? "blocked" : ["working", "blocked"].includes(k.status) ? k.status : "idle",
+        program: k.program,
+        title: null,
+        name: k.name || k.template || k.program?.name || k.address,
+        pane: null,
+        space: root.space,
+        space_name: root.space_name,
+        tab: root.tab,
+        tab_name: root.tab_name,
+        pinned: root.pinned,
+        focused: false,
+        paneless: true,
+      });
+    }
+    const list = this.asking.apply(extras.length ? [...base, ...extras] : base, terms, cx);
     const spaceList = spaces();
     const paneList = panes();
 
@@ -544,6 +580,11 @@ export default class Board extends View {
     const placeOf = new Map();
     for (const a of list) {
       if (a.address.includes("/")) continue;
+      if (a.paneless) {
+        const c = termBy.get(a.address)?.cwd;
+        if (c) placeOf.set(a.address, { cwd: c, branch: null });
+        continue;
+      }
       const p = paneBy.get(a.pane);
       const sp = spaceBy.get(a.space);
       const cwd = p?.cwd || sp?.folder;
@@ -563,13 +604,13 @@ export default class Board extends View {
       const term = termBy.get(a.address);
       const p = paneBy.get(a.pane);
       const sp = spaceBy.get(a.space);
-      const at = a.status === "working" ? tb?.working_since : tb?.changed_at;
+      const at = a.paneless ? null : a.status === "working" ? tb?.working_since : tb?.changed_at;
       const prog = a.program?.name ?? "agent";
       // Line 2: the report, else the agent's title, else the tab name; never the bare program name.
-      let report = clean(term?.report) || clean(a.title) || (tb?.named ? (tb.name ?? "").trim() : "");
+      let report = clean(term?.report) || clean(a.title) || (a.paneless ? "" : tb?.named ? (tb.name ?? "").trim() : "");
       if (report.toLowerCase() === prog.trim().toLowerCase()) report = "";
       // The tab shows on line 1 only when a person named it and it says something new.
-      const tabName = tb?.named ? (tb.name ?? "").trim() : "";
+      const tabName = tb?.named && !a.paneless ? (tb.name ?? "").trim() : "";
       const tabShown = tabName && tabName.toLowerCase() !== report.toLowerCase() && tabName.toLowerCase() !== prog.trim().toLowerCase() ? tabName : null;
       const par = term?.parent ? termBy.get(term.parent) : null;
       const parentAgent = term?.parent ? agentBy.get(term.parent) : null;
@@ -585,6 +626,53 @@ export default class Board extends View {
     };
     const all = list.map(info);
 
+    // Parent -> children links between agents, rebuilt only when the links change.
+    const links = [];
+    for (const a of list) {
+      const p = termBy.get(a.address)?.parent;
+      if (p && p !== a.address && agentBy.has(p)) links.push(`${a.address}>${p}`);
+    }
+    const treeKey = links.join("|");
+    if (treeKey !== this.treeKey) {
+      this.treeKey = treeKey;
+      const parentOf = new Map();
+      for (const l of links) {
+        const i = l.lastIndexOf(">");
+        parentOf.set(l.slice(0, i), l.slice(i + 1));
+      }
+      // A cycle loses the link of its first member.
+      for (const c of [...parentOf.keys()]) {
+        const seen = new Set([c]);
+        for (let p = parentOf.get(c); p; p = parentOf.get(p)) {
+          if (p === c) {
+            parentOf.delete(c);
+            break;
+          }
+          if (seen.has(p)) break;
+          seen.add(p);
+        }
+      }
+      const kidsOf = new Map();
+      for (const a of list) {
+        const p = parentOf.get(a.address);
+        if (!p) continue;
+        if (!kidsOf.has(p)) kidsOf.set(p, []);
+        kidsOf.get(p).push(a.address);
+      }
+      this.parentOf = parentOf;
+      this.kidsOf = kidsOf;
+    }
+    if (list.length) {
+      let pruned = false;
+      for (const x of this.collapsed) {
+        if (!agentBy.has(x)) {
+          this.collapsed.delete(x);
+          pruned = true;
+        }
+      }
+      if (pruned) store.set("collapsed", JSON.stringify([...this.collapsed]));
+    }
+
     const matches = (r) => {
       if (flSpace && r.a.space !== flSpace) return false;
       if (fl.pr !== "any" && !(fl.pr === "with" ? r.pr : fl.pr === "failing" ? r.pr?.c === "fail" : !r.pr)) return false;
@@ -592,18 +680,108 @@ export default class Board extends View {
       return true;
     };
     const shown = all.filter(matches);
-    const byStatus = (s) => shown.filter((r) => r.a.status === s);
+    const shownBy = new Map(shown.map((r) => [r.a.address, r]));
+    // Nesting level: 0 = top-level card; a child is nested (level 1..3) when its parent card is shown.
+    const levels = new Map();
+    const levelOf = (addr) => {
+      if (levels.has(addr)) return levels.get(addr);
+      const p = this.parentOf.get(addr);
+      let l = 0;
+      if (p && shownBy.has(p)) {
+        const pl = levelOf(p);
+        if (pl < 3) l = pl + 1;
+      }
+      levels.set(addr, l);
+      return l;
+    };
+    const kidsMemo = new Map();
+    const kidsShown = (addr) => {
+      let k = kidsMemo.get(addr);
+      if (!k) {
+        k = (this.kidsOf.get(addr) || []).filter((c) => shownBy.has(c) && levelOf(c) > 0);
+        kidsMemo.set(addr, k);
+      }
+      return k;
+    };
+    const attnMemo = new Map();
+    const attention = (addr) => {
+      let v = attnMemo.get(addr);
+      if (v === undefined) {
+        v = kidsShown(addr).some((c) => shownBy.get(c).a.status === "blocked" || attention(c));
+        attnMemo.set(addr, v);
+      }
+      return v;
+    };
+    // A group (a top-level card with nested descendants) sits in the column of its most urgent status
+    // (blocked > working > done > idle); its time is that of the first member with that status that has one, else the parent's.
+    const RANK = { blocked: 4, working: 3, done: 2, idle: 1 };
+    const effMemo = new Map();
+    const effOf = (addr) => {
+      let v = effMemo.get(addr);
+      if (v) return v;
+      const r = shownBy.get(addr);
+      const members = [r];
+      const walkM = (ad) => {
+        for (const k of kidsShown(ad)) {
+          members.push(shownBy.get(k));
+          walkM(k);
+        }
+      };
+      walkM(addr);
+      let status = r.a.status;
+      for (const m of members) if ((RANK[m.a.status] ?? 0) > (RANK[status] ?? 0)) status = m.a.status;
+      const src = members.find((m) => m.a.status === status && m.at != null);
+      v = { status, at: src ? src.at : r.at };
+      effMemo.set(addr, v);
+      return v;
+    };
+    const entriesOf = (s) =>
+      shown
+        .filter((r) => levelOf(r.a.address) === 0)
+        .map((r) => ({ r, eff: effOf(r.a.address) }))
+        .filter((e) => e.eff.status === s);
     const late = Infinity;
+    const byAt = (x, y) => (x.eff.at ?? late) - (y.eff.at ?? late);
+    const byNew = (x, y) => (y.eff.at ?? 0) - (x.eff.at ?? 0);
     const columns = [
-      byStatus("blocked").sort((x, y) => (x.at ?? late) - (y.at ?? late)),
-      byStatus("working").sort((x, y) => (x.at ?? late) - (y.at ?? late)),
+      entriesOf("blocked").sort(byAt),
+      entriesOf("working").sort(byAt),
       // Unseen done first, then seen (idle, dimmed), each newest first.
-      [...byStatus("done").sort((x, y) => (y.at ?? 0) - (x.at ?? 0)), ...byStatus("idle").sort((x, y) => (y.at ?? 0) - (x.at ?? 0))],
+      [...entriesOf("done").sort(byNew), ...entriesOf("idle").sort(byNew)],
     ];
-    this.cols = columns.map((c) => c.map((r) => r.a.address));
+    // Visual order for the keys: a card, then its open children, depth first.
+    this.cols = [];
+    this.colIdx = [];
+    for (const c of columns) {
+      const addrs = [], idx = [], seen = new Set();
+      c.forEach((e, i) => {
+        const walk = (ad) => {
+          // Each address once per column, in first visual place.
+          if (!seen.has(ad)) {
+            seen.add(ad);
+            addrs.push(ad);
+            idx.push(i);
+          }
+          if (!this.collapsed.has(ad)) for (const k of kidsShown(ad)) walk(k);
+        };
+        walk(e.r.a.address);
+      });
+      this.cols.push(addrs);
+      this.colIdx.push(idx);
+    }
     this.byAddr = agentBy;
     if (this.sel && !agentBy.has(this.sel)) this.sel = null;
     // The card left the list (gone, filtered out, or the agent started working): its reply area goes too.
+    if (this.preview && !this.cols.some((c) => c.includes(this.preview.address))) this.preview = null;
+    if (this.preview) {
+      // Read once on open, then again only when this agent's turn or status changes.
+      const pv = this.preview;
+      const key = `${termBy.get(pv.address)?.turn}|${agentBy.get(pv.address)?.status}`;
+      if (key !== pv.want) {
+        pv.want = key;
+        this.loadPreview(cx);
+      }
+    }
     if (this.reply && (!this.cols.some((c) => c.includes(this.reply.address)) || agentBy.get(this.reply.address)?.status === "working")) this.dropReply();
 
     // Summary counts what is there at all, not what the filter leaves.
@@ -762,8 +940,57 @@ export default class Board extends View {
         .when(Boolean(rp.error), (el) => el.child(div().text_size(11).text_color(t.blocked).child(rp.error)));
     };
 
-    const card = (r) => {
+    const toggleFor = (addr, cx) => {
+      if (this.collapsed.has(addr)) this.collapsed.delete(addr);
+      else this.collapsed.add(addr);
+      store.set("collapsed", JSON.stringify([...this.collapsed]));
+      cx.notify();
+    };
+
+    const previewArea = (pv) => {
+      const lines = pv.text;
+      if (pv.stick && lines.length) {
+        pv.stick = false;
+        const last = lines.length - 1;
+        this.pvScroll.scroll_to_item(last);
+        // Once more after this frame's layout (wrapped lines are measured then).
+        cx.timer.after(50, (cx) => {
+          if (!this.live || this.preview !== pv) return;
+          this.pvScroll.scroll_to_item(last);
+          cx.notify();
+        });
+      }
+      return v_flex()
+        .id(`preview-${pv.address}`)
+        .w_full()
+        .gap(3)
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click((_e, cx) => cx.stop_propagation())
+        .child(
+          v_flex()
+            .id(`preview-text-${pv.address}`)
+            .w_full()
+            .max_h(240)
+            .overflow_y_scrollbar()
+            .track_scroll(this.pvScroll)
+            .p(8)
+            .rounded(6)
+            .bg(t.background)
+            .font_family(settings().font_family ?? "JetBrains Mono")
+            .text_size(11)
+            .line_height("15px")
+            .text_color(t.muted)
+            .when(!lines.length, (el) => el.child(div().text_color(t.dim).child(pv.loaded ? "Empty screen" : "Loading…")))
+            // Lines wrap at the box width (spaces kept); a line of only rule characters is one thin divider.
+            .children(lines.map((l) => (RULE.test(l) ? div().h(1).my(4).bg(t.border) : div().child(l || " ")))),
+        )
+        .when(Boolean(pv.error), (el) => el.child(div().text_size(11).text_color(t.blocked).child(pv.error)));
+    };
+
+    // opts: nested = drawn inside a parent; kids = number of nested descendants; open/attn = group state.
+    const card = (r, opts = {}) => {
       const a = r.a;
+      const sub = opts.nested ? null : r.sub;
       const blocked = a.status === "blocked";
       const on = this.sel === a.address;
       const pic = icon(a.program, 16, t.foreground);
@@ -781,7 +1008,7 @@ export default class Board extends View {
         .cursor_pointer()
         .when(a.status === "idle", (el) => el.opacity(0.55))
         .hover((s) => s.bg(blocked ? t.blocked + "22" : t.hover))
-        .on_click((_e, cx) => (this.justDismissed() ? null : this.peek(a, cx)))
+        .on_click((_e, cx) => (this.justDismissed() ? null : this.go(a, cx)))
         .child(
           h_flex()
             .gap(7)
@@ -797,14 +1024,13 @@ export default class Board extends View {
                   h_flex()
                     .gap(7)
                     .items_center()
-                    .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(a.space_name || r.tabShown || r.program))
+                    .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(a.paneless ? a.name : a.space_name || r.tabShown || r.program))
                     .when(Boolean(a.space_name && r.tabShown), (el) => el.child(div().min_w(0).truncate().text_size(12).text_color(t.dim).child(`/ ${r.tabShown}`)))
-                    .when(r.sub !== null, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("↳ sub-agent")))
                     .when(Boolean(r.pr), (el) => el.child(prPill(r)))
                     .child(div().flex_1())
                     .child(div().flex_none().flex().justify_end().whitespace_nowrap().overflow_hidden().text_size(11).text_color(blocked ? t.blocked : t.dim).child(timeText(r))),
                 )
-                .when(r.sub, (el) => el.child(div().truncate().text_size(11).text_color(t.dim).child(`↳ sub-agent of ${r.sub}`)))
+                .when(Boolean(sub), (el) => el.child(div().truncate().text_size(11).text_color(t.dim).child(`↳ sub-agent of ${sub}`)))
                 .child(
                   h_flex()
                     .gap(6)
@@ -819,6 +1045,26 @@ export default class Board extends View {
                         .line_height("17px")
                         .text_color(r.report ? (blocked ? t.blocked : t.muted) : t.dim)
                         .child(r.report || r.program || " "),
+                    )
+                    .child(
+                      div()
+                        .id(`eye-${a.address}`)
+                        .flex_none()
+                        .size(18)
+                        .rounded(5)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .text_color(this.preview?.address === a.address ? t.foreground : t.muted)
+                        .hover((s) => s.bg(t.hover).text_color(t.foreground))
+                        .tooltip("Show screen")
+                        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+                        .on_click((_e, cx) => {
+                          cx.stop_propagation();
+                          this.togglePreview(a, cx);
+                        })
+                        .child(svg(ICONS + "eye.svg").size(16)),
                     )
                     .when(a.status !== "working", (el) =>
                       el.child(
@@ -843,8 +1089,50 @@ export default class Board extends View {
                       ),
                     ),
                 )
-                .when(this.reply?.address === a.address, (el) => el.child(replyArea(this.reply))),
+                .when(opts.kids > 0, (el) =>
+                  el.child(
+                    h_flex()
+                      .id(`tg-${a.address}`)
+                      .flex_none()
+                      .self_start()
+                      .gap(4)
+                      .px(4)
+                      .py(1)
+                      .rounded(5)
+                      .items_center()
+                      .text_size(11)
+                      .text_color(t.muted)
+                      .cursor_pointer()
+                      .hover((s) => s.bg(t.hover).text_color(t.foreground))
+                      .tooltip(opts.open ? "Hide children" : "Show children")
+                      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+                      .on_click((_e, cx) => {
+                        cx.stop_propagation();
+                        toggleFor(a.address, cx);
+                      })
+                      .child(svg(ICONS + "branch.svg").size(12).flex_none())
+                      .child(`${opts.kids} ${opts.kids === 1 ? "child" : "children"}`)
+                      .when(opts.attn, (e) => e.child(div().flex_none().size(12).rounded(6).bg(t.blocked).text_color(t.background).text_size(9).font_bold().flex().items_center().justify_center().tooltip("A child needs you").child("?")))
+                      .child(svg(ICONS + (opts.open ? "chevron-down.svg" : "chevron-right.svg")).size(12).flex_none()),
+                  ),
+                )
+                .when(this.reply?.address === a.address, (el) => el.child(replyArea(this.reply)))
+                .when(this.preview?.address === a.address, (el) => el.child(previewArea(this.preview))),
             ),
+        );
+    };
+
+    // A card with its children under it, indented along a vertical line.
+    const node = (r, nested) => {
+      const ad = r.a.address;
+      const kids = kidsShown(ad);
+      const open = !this.collapsed.has(ad);
+      return v_flex()
+        .flex_none()
+        .gap(8)
+        .child(card(r, { nested, kids: kids.length, open, attn: kids.length > 0 && attention(ad) }))
+        .when(kids.length > 0 && open, (el) =>
+          el.child(v_flex().ml(8).pl(8).gap(8).border_l(1).border_color(t.border).children(kids.map((k) => node(shownBy.get(k), true)))),
         );
     };
 
@@ -877,7 +1165,7 @@ export default class Board extends View {
             .overflow_y_scrollbar()
             .track_scroll(body)
             .when(!rows.length, (el) => el.child(div().p(16).text_size(12).text_color(t.dim).child("Nothing here")))
-            .children(rows.map(card))
+            .children(rows.map((e) => node(e.r, false)))
         );
     };
 
@@ -929,7 +1217,12 @@ export default class Board extends View {
       .on_key_down((e, cx) => {
         const k = e.key;
         if (this.replyFocus) return; // typing in a reply box: its own handler owns the keys
-        if (k === "escape") return this.reply ? this.closeReply(cx) : this.close(cx);
+        if (k === "escape") return this.reply ? this.closeReply(cx) : this.preview ? this.closePreview(cx) : this.close(cx);
+        if ((k === "e" || k === "space" || k === " ") && !this.searchFocus && !e.modifiers.platform && !e.modifiers.control) {
+          const a = agentBy.get(this.sel);
+          if (a) this.togglePreview(a, cx);
+          return cx.stop_propagation();
+        }
         if (k === "r" && !this.searchFocus && !e.modifiers.platform && !e.modifiers.control) {
           const a = agentBy.get(this.sel);
           if (a && a.status !== "working") this.openReply(a, cx);
@@ -937,7 +1230,7 @@ export default class Board extends View {
         }
         const empty = !this.input.value();
         if (k === "up" || k === "down" || (empty && (k === "left" || k === "right"))) this.move(k, cx);
-        else if (k === "enter") this.peek(agentBy.get(this.sel), cx);
+        else if (k === "enter") this.go(agentBy.get(this.sel), cx);
         else return;
         cx.stop_propagation();
       })
@@ -981,6 +1274,7 @@ export default class Board extends View {
               .child(svg(ICONS + "x.svg").size(15)),
           ),
       )
+      .when(Boolean(this.notice), (el) => el.child(div().flex_none().text_size(12).text_color(t.blocked).child(this.notice)))
       .child(
         h_flex()
           .flex_none()
