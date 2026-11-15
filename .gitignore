@@ -11,6 +11,8 @@
 !backgrounds/**
 !layouts/
 !layouts/my-layout.*
+!skills/
+!skills/**
 !mods/
 !mods/AGENTS.md
 !mods/branch-picker/
