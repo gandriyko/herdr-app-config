@@ -112,8 +112,8 @@ export const sameOptions = (a, b) => a.length === b.length && a.every((o, i) => 
 const MARK = /^\s*[⏺●]\s?/;
 const STATUS = /^\s*[✻✶✳✢·*]\s.*\bdone\b/i;
 const BOX_CHARS = /[─━│┃┌┐└┘├┤┬┴┼╭╮╰╯═║]/g;
-const QUESTION_LINES = 12;
-const QUESTION_CHARS = 1200;
+const QUESTION_LINES = 60;
+const QUESTION_CHARS = 8000;
 
 const clean = (l) => l.replace(BOX_CHARS, "").replace(/ /g, " ").trimEnd();
 

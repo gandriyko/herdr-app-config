@@ -60,6 +60,24 @@ function glyph(t, status) {
   return null;
 }
 
+// The screen tail for programs without a reply marker: blank runs collapsed, last 30 lines.
+function tailLines(text) {
+  let lines = text.split("\n");
+  while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
+  lines = lines.filter((l, i) => l.trim() || (i > 0 && lines[i - 1].trim()));
+  while (lines.length && !lines[0].trim()) lines.shift();
+  return lines.slice(-30);
+}
+
+// What the reply area shows for a screen: { mode, lines, question, detail, tabs, suggestion, options, select }.
+function parseScreen(text) {
+  const options = parseOptions(text);
+  const q = parseQuestion(text);
+  const p = { mode: "menu", lines: null, question: q.question || "", detail: q.detail || "", tabs: q.tabs || null, options, select: options.length > 0 && isSelectMenu(text), suggestion: options.length ? null : parseSuggestion(text) };
+  if (options.length) return p;
+  if (p.question) return { ...p, mode: "reply", lines: p.question.split("\n"), question: "" };
+  return { ...p, mode: "screen", lines: tailLines(text) };
+}
 const RULE = /^[\s─━═\-_]*[─━═]{3,}[\s─━═\-_]*$/;
 const termByAddr = (terms, address) => terms.find((x) => x.address === address);
 const store = {
@@ -90,21 +108,16 @@ export default class Board extends View {
     this.again = false;
     this.q = "";
     this.sel = null; // address of the selected card
-    this.cols = []; // addresses per column in visual order (parent, then its open children), set by render, for the keys
+    this.cols = []; // addresses per column in visual order (parent, then its children), set by render, for the keys
     this.colIdx = []; // per column, the index of the top-level card holding each address (for scrolling)
-    this.collapsed = new Set(); // parent addresses whose children are folded
-    try {
-      const c = JSON.parse(store.get("collapsed") || "[]");
-      if (Array.isArray(c)) for (const x of c.slice(0, 200)) if (typeof x === "string") this.collapsed.add(x);
-    } catch (_e) {}
+    store.set("collapsed", ""); // an earlier version kept folded parents here
     this.treeKey = null; // the parent links the cache below was built from
     this.parentOf = new Map(); // child address -> parent address (both agents, no cycles)
     this.kidsOf = new Map(); // parent address -> child addresses
     this.done = false;
     this.going = false; // a paneless agent is being given a pane
     this.notice = null; // a one-line error under the header
-    this.preview = null; // { address, text, error, key, want, busy, again, stick } while the screen preview is open
-    this.pvScroll = ScrollHandle.new();
+    this.pvScroll = ScrollHandle.new(); // the reply area's text box
     this.win = null; // the window's size (the overlay covers it)
     this.drag = null; // { mode, size } while the panel is being resized
     this.scrolls = COLS.map(() => ScrollHandle.new());
@@ -118,7 +131,7 @@ export default class Board extends View {
     this.searchFocus = false;
     this.input.on("focus", () => (this.searchFocus = true));
     this.input.on("blur", () => (this.searchFocus = false));
-    this.reply = null; // { address, question, detail, tabs, suggestion, options, select, typing, sending, error, input } while a reply area is open
+    this.reply = null; // { address, mode, lines, question, detail, tabs, suggestion, options, select, typing, sending, error, input, want, busy, again, sig, loaded, stick } while a reply area is open
     this.replyFocus = false;
     this.replySeq = 0;
     this.input.focus();
@@ -134,7 +147,6 @@ export default class Board extends View {
   close(cx) {
     this.live = false;
     this.dropReply();
-    this.preview = null;
     this.pvScroll.release();
     for (const s of this.scrolls) s.release();
     closeOverlay(props().overlay);
@@ -170,98 +182,82 @@ export default class Board extends View {
     cx.notify();
   }
 
-  // The screen preview: a click on the eye toggles it on a card; only one is open, and not with a reply area.
-  togglePreview(a, cx) {
-    if (!a || !this.live) return;
-    if (this.preview?.address === a.address) return this.closePreview(cx);
-    this.dropReply();
-    this.preview = { address: a.address, text: [], loaded: false, error: null, want: null, busy: false, again: false, stick: true };
-    this.sel = a.address;
-    this.preview.want = this.previewKey(a.address);
-    cx.notify();
-    this.loadPreview(cx); // at once, not on the next render
-  }
-
-  previewKey(address) {
-    return `${terminals().find((x) => x.address === address)?.turn}|${this.byAddr?.get(address)?.status}`;
-  }
-
-  closePreview(cx) {
-    if (!this.preview) return;
-    this.preview = null;
-    if (this.live) this.handle.focus();
-    cx.notify();
-  }
-
-  // Reads the last ~30 lines for the open preview. One read at a time; a change that arrives meanwhile reads once more.
-  loadPreview(cx) {
-    const pv = this.preview;
-    if (!pv || !this.live) return;
-    if (pv.busy) {
-      pv.again = true;
-      return;
-    }
-    pv.busy = true;
-    cx.spawn(async (cx) => {
-      try {
-        do {
-          pv.again = false;
-          let lines = null, err = null;
-          try {
-            const r = await hc(["read", pv.address, "--lines", "30"]);
-            if (r?.code === 0) {
-              lines = String(r.stdout).split("\n");
-              while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
-              // Runs of blank lines become one (a mostly empty screen), leading blanks go; then the last 30.
-              lines = lines.filter((l, i) => l.trim() || (i > 0 && lines[i - 1].trim()));
-              while (lines.length && !lines[0].trim()) lines.shift();
-              lines = lines.slice(-30);
-            } else err = String(r?.stderr || r?.stdout || "Failed").trim().split("\n")[0] || "Failed";
-          } catch (e) {
-            err = String(e?.message ?? e).split("\n")[0];
-          }
-          if (!this.live || this.preview !== pv) return;
-          let changed = !pv.loaded || err !== pv.error;
-          if (lines && lines.join("\n") !== pv.text.join("\n")) {
-            pv.text = lines;
-            pv.stick = true;
-            changed = true;
-          }
-          pv.loaded = true;
-          pv.error = err;
-          if (changed) cx.notify();
-        } while (pv.again && this.live && this.preview === pv);
-      } finally {
-        pv.busy = false;
-      }
-    });
-  }
-
   async readScreen(address) {
     const r = await hc(["read", address]);
     return r?.code === 0 ? r.stdout : "";
   }
 
-  // Reads the screen once and opens the reply area: buttons for a choice menu, else a text input.
+  // Opens the reply area at once ("Loading…") and reads the screen; it reads again when the agent's
+  // turn or status changes while it is open.
   openReply(a, cx) {
-    if (!a || !this.live || a.status === "working") return;
+    if (!a || !this.live) return;
     if (this.reply?.address === a.address) return this.closeReply(cx);
-    this.preview = null;
     if (this.justDismissed() && this.dismiss.address === a.address) return; // the press that closed it
     this.dropReply();
-    const seq = this.replySeq;
+    const reply = {
+      address: a.address, sending: false, error: null, mode: "loading", lines: null, question: "", detail: "", tabs: null,
+      suggestion: null, options: [], select: false, typing: null, hint: "Reply to agent…", want: this.replyKey(a.address),
+      busy: false, again: false, sig: "", loaded: false, stick: true, input: null,
+    };
+    reply.input = this.makeInput(reply.hint);
+    this.reply = reply;
+    this.sel = a.address;
+    cx.notify();
+    reply.input.focus();
+    this.refreshReply(cx);
+  }
+
+  replyKey(address) {
+    return `${terminals().find((x) => x.address === address)?.turn}|${this.byAddr?.get(address)?.status}`;
+  }
+
+  // Reads the screen for the open reply area. One read at a time; a change that arrives meanwhile reads once more.
+  // The last good result stays on a failed read. Only the parsed fields are kept, never the screen text.
+  refreshReply(cx) {
+    const r = this.reply;
+    if (!r || !this.live) return;
+    if (r.busy) {
+      r.again = true;
+      return;
+    }
+    r.busy = true;
     cx.spawn(async (cx) => {
-      let text = "";
       try {
-        text = await this.readScreen(a.address);
-      } catch (_e) {}
-      if (!this.live || seq !== this.replySeq) return;
-      const reply = { address: a.address, sending: false, error: null, input: null };
-      this.fillReply(reply, text);
-      this.reply = reply;
-      this.sel = a.address;
-      cx.notify();
-      reply.input?.focus();
+        do {
+          r.again = false;
+          let text = null, err = null;
+          try {
+            const res = await hc(["read", r.address, "--lines", "0"]); // the screen only: history reads can scroll the app and take seconds
+            if (res?.code === 0) text = String(res.stdout);
+            else err = String(res?.stderr || res?.stdout || "Failed").trim().split("\n")[0] || "Failed";
+          } catch (e) {
+            err = String(e?.message ?? e).split("\n")[0];
+          }
+          if (!this.live || this.reply !== r) return;
+          let changed = false;
+          if (text != null) {
+            if (r.sending || r.typing) continue; // a menu key or a typed answer is in progress; it re-reads itself
+            const p = parseScreen(text);
+            const sig = JSON.stringify(p);
+            if (!r.loaded || sig !== r.sig) {
+              r.sig = sig;
+              this.applyParsed(r, p);
+              changed = true;
+            }
+          } else if (!r.loaded) {
+            r.loaded = true;
+            r.mode = "failed";
+            changed = true;
+          }
+          if (err !== r.loadError) {
+            r.loadError = err;
+            changed = true;
+          }
+          if (changed) cx.notify();
+        } while (r.again && this.live && this.reply === r);
+      } finally {
+        r.busy = false;
+      }
     });
   }
 
@@ -274,27 +270,47 @@ export default class Board extends View {
     return input;
   }
 
-  // Puts the parsed screen into the reply: question, tabs, options (buttons), else a text input.
-  // Only parsed fields are kept, never the screen text.
-  fillReply(r, text) {
-    if (r.input) {
-      try {
-        r.input.release();
-      } catch (_e) {}
-      r.input = null;
+  // Shows a parsed screen: a menu (question, tabs, buttons), else the agent's last reply, else the screen tail;
+  // below it a text box, kept (with what was typed) unless the prompt suggestion changed.
+  applyParsed(r, p) {
+    r.mode = p.mode;
+    r.lines = p.lines;
+    r.question = p.question;
+    r.detail = p.detail;
+    r.tabs = p.tabs;
+    r.options = p.options;
+    r.select = p.select;
+    r.suggestion = p.suggestion;
+    r.loaded = true;
+    r.stick = true;
+    if (p.options.length) {
+      if (r.input) {
+        try {
+          r.input.release();
+        } catch (_e) {}
+        r.input = null;
+      }
+      this.replyFocus = false;
+      return;
     }
-    this.replyFocus = false;
-    const options = parseOptions(text);
-    const q = parseQuestion(text);
-    r.question = q.question || "";
-    r.detail = q.detail || "";
-    r.tabs = q.tabs || null;
-    r.options = options;
-    r.select = options.length > 0 && isSelectMenu(text);
+    const hint = p.suggestion || "Reply to agent…";
+    if (r.input && (r.hint === hint || r.input.value())) return;
+    const had = this.replyFocus || !r.input;
+    try {
+      r.input?.release();
+    } catch (_e) {}
+    r.hint = hint;
+    r.input = this.makeInput(hint);
+    if (had) r.input.focus();
+  }
+
+  // The reply after a menu key: the same as a read, and the sending state ends.
+  fillReply(r, text) {
+    const p = parseScreen(text);
+    r.sig = JSON.stringify(p);
     r.typing = null; // the free-text option being answered
-    r.suggestion = options.length ? null : parseSuggestion(text);
     r.sending = false;
-    if (!options.length) r.input = this.makeInput(r.suggestion || "Reply to agent…");
+    this.applyParsed(r, p);
   }
 
   // Enter in the box: a free-text answer, else the typed text or Claude's suggestion.
@@ -662,16 +678,6 @@ export default class Board extends View {
       this.parentOf = parentOf;
       this.kidsOf = kidsOf;
     }
-    if (list.length) {
-      let pruned = false;
-      for (const x of this.collapsed) {
-        if (!agentBy.has(x)) {
-          this.collapsed.delete(x);
-          pruned = true;
-        }
-      }
-      if (pruned) store.set("collapsed", JSON.stringify([...this.collapsed]));
-    }
 
     const matches = (r) => {
       if (flSpace && r.a.space !== flSpace) return false;
@@ -702,15 +708,6 @@ export default class Board extends View {
         kidsMemo.set(addr, k);
       }
       return k;
-    };
-    const attnMemo = new Map();
-    const attention = (addr) => {
-      let v = attnMemo.get(addr);
-      if (v === undefined) {
-        v = kidsShown(addr).some((c) => shownBy.get(c).a.status === "blocked" || attention(c));
-        attnMemo.set(addr, v);
-      }
-      return v;
     };
     // A group (a top-level card with nested descendants) sits in the column of its most urgent status
     // (blocked > working > done > idle); its time is that of the first member with that status that has one, else the parent's.
@@ -749,7 +746,7 @@ export default class Board extends View {
       // Unseen done first, then seen (idle, dimmed), each newest first.
       [...entriesOf("done").sort(byNew), ...entriesOf("idle").sort(byNew)],
     ];
-    // Visual order for the keys: a card, then its open children, depth first.
+    // Visual order for the keys: a card, then its children, depth first.
     this.cols = [];
     this.colIdx = [];
     for (const c of columns) {
@@ -762,7 +759,7 @@ export default class Board extends View {
             addrs.push(ad);
             idx.push(i);
           }
-          if (!this.collapsed.has(ad)) for (const k of kidsShown(ad)) walk(k);
+          for (const k of kidsShown(ad)) walk(k);
         };
         walk(e.r.a.address);
       });
@@ -772,17 +769,15 @@ export default class Board extends View {
     this.byAddr = agentBy;
     if (this.sel && !agentBy.has(this.sel)) this.sel = null;
     // The card left the list (gone, filtered out, or the agent started working): its reply area goes too.
-    if (this.preview && !this.cols.some((c) => c.includes(this.preview.address))) this.preview = null;
-    if (this.preview) {
-      // Read once on open, then again only when this agent's turn or status changes.
-      const pv = this.preview;
-      const key = `${termBy.get(pv.address)?.turn}|${agentBy.get(pv.address)?.status}`;
-      if (key !== pv.want) {
-        pv.want = key;
-        this.loadPreview(cx);
+    if (this.reply && (!this.cols.some((c) => c.includes(this.reply.address)))) this.dropReply();
+    if (this.reply) {
+      // Read again only when this agent's turn or status changed.
+      const key = `${termBy.get(this.reply.address)?.turn}|${agentBy.get(this.reply.address)?.status}`;
+      if (key !== this.reply.want) {
+        this.reply.want = key;
+        this.refreshReply(cx);
       }
     }
-    if (this.reply && (!this.cols.some((c) => c.includes(this.reply.address)) || agentBy.get(this.reply.address)?.status === "working")) this.dropReply();
 
     // Summary counts what is there at all, not what the filter leaves.
     const cnt = (s) => all.filter((r) => r.a.status === s).length;
@@ -897,7 +892,7 @@ export default class Board extends View {
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_mouse_down_out((_e, cx) => this.dismissReply(cx))
         .on_click((_e, cx) => cx.stop_propagation())
-        .when(Boolean(rp.tabs?.length), (el) =>
+        .when(rp.mode === "menu" && Boolean(rp.tabs?.length), (el) =>
           el.child(
             h_flex()
               .gap(4)
@@ -921,7 +916,7 @@ export default class Board extends View {
               ),
           ),
         )
-        .when(Boolean(rp.question), (el) =>
+        .when(rp.mode === "menu" && Boolean(rp.question), (el) =>
           el.child(
             v_flex()
               .id(`reply-question-${rp.address}`)
@@ -936,58 +931,47 @@ export default class Board extends View {
               .when(Boolean(rp.detail), (e) => e.child(div().text_size(12).text_color(t.dim).child(rp.detail))),
           ),
         )
+        .when(rp.mode !== "menu", (el) => el.child(textBox(rp)))
+        .when(Boolean(rp.loadError), (el) => el.child(div().text_size(11).text_color(t.blocked).child(`Read failed: ${rp.loadError}`)))
         .child(body)
         .when(Boolean(rp.error), (el) => el.child(div().text_size(11).text_color(t.blocked).child(rp.error)));
     };
 
-    const toggleFor = (addr, cx) => {
-      if (this.collapsed.has(addr)) this.collapsed.delete(addr);
-      else this.collapsed.add(addr);
-      store.set("collapsed", JSON.stringify([...this.collapsed]));
-      cx.notify();
-    };
-
-    const previewArea = (pv) => {
-      const lines = pv.text;
-      if (pv.stick && lines.length) {
-        pv.stick = false;
+    // The agent's last reply or the screen tail: wrapped lines (spaces kept), a line of only rule characters
+    // is one thin divider, scrolled to the bottom after each change (requested now and once after layout).
+    const textBox = (rp) => {
+      const lines = rp.lines ?? [];
+      if (rp.stick && lines.length) {
+        rp.stick = false;
         const last = lines.length - 1;
         this.pvScroll.scroll_to_item(last);
-        // Once more after this frame's layout (wrapped lines are measured then).
-        cx.timer.after(50, (cx) => {
-          if (!this.live || this.preview !== pv) return;
-          this.pvScroll.scroll_to_item(last);
-          cx.notify();
-        });
+        for (const ms of [50, 250]) {
+          cx.timer.after(ms, (cx) => {
+            if (!this.live || this.reply !== rp) return;
+            this.pvScroll.scroll_to_item(last);
+            cx.notify();
+          });
+        }
       }
-      return v_flex()
-        .id(`preview-${pv.address}`)
+      // The outer box clips and keeps its own height, so the text never draws over the input below.
+      return div().w_full().flex_none().max_h(240).overflow_hidden().rounded(6).bg(t.background).mb(4).child(
+       v_flex()
+        .id(`reply-text-${rp.address}`)
         .w_full()
-        .gap(3)
-        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-        .on_click((_e, cx) => cx.stop_propagation())
-        .child(
-          v_flex()
-            .id(`preview-text-${pv.address}`)
-            .w_full()
-            .max_h(240)
-            .overflow_y_scrollbar()
-            .track_scroll(this.pvScroll)
-            .p(8)
-            .rounded(6)
-            .bg(t.background)
-            .font_family(settings().font_family ?? "JetBrains Mono")
-            .text_size(11)
-            .line_height("15px")
-            .text_color(t.muted)
-            .when(!lines.length, (el) => el.child(div().text_color(t.dim).child(pv.loaded ? "Empty screen" : "Loading…")))
-            // Lines wrap at the box width (spaces kept); a line of only rule characters is one thin divider.
-            .children(lines.map((l) => (RULE.test(l) ? div().h(1).my(4).bg(t.border) : div().child(l || " ")))),
-        )
-        .when(Boolean(pv.error), (el) => el.child(div().text_size(11).text_color(t.blocked).child(pv.error)));
+        .max_h(240)
+        .overflow_y_scrollbar()
+        .track_scroll(this.pvScroll)
+        .p(8)
+        .font_family(settings().font_family ?? "JetBrains Mono")
+        .text_size(11)
+        .line_height("15px")
+        .text_color(t.muted)
+        .when(!lines.length, (el) => el.child(div().text_color(t.dim).child(rp.mode === "failed" ? "Could not read the screen" : rp.loaded ? "Empty screen" : "Loading…")))
+        .children(lines.map((l) => (RULE.test(l) ? div().h(1).my(4).bg(t.border) : div().child(l || " ")))),
+      );
     };
 
-    // opts: nested = drawn inside a parent; kids = number of nested descendants; open/attn = group state.
+    // opts: nested = drawn inside a parent.
     const card = (r, opts = {}) => {
       const a = r.a;
       const sub = opts.nested ? null : r.sub;
@@ -1047,32 +1031,13 @@ export default class Board extends View {
                         .child(r.report || r.program || " "),
                     )
                     .child(
-                      div()
-                        .id(`eye-${a.address}`)
-                        .flex_none()
-                        .size(18)
-                        .rounded(5)
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .cursor_pointer()
-                        .text_color(this.preview?.address === a.address ? t.foreground : t.muted)
-                        .hover((s) => s.bg(t.hover).text_color(t.foreground))
-                        .tooltip("Show screen")
-                        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-                        .on_click((_e, cx) => {
-                          cx.stop_propagation();
-                          this.togglePreview(a, cx);
-                        })
-                        .child(svg(ICONS + "eye.svg").size(16)),
-                    )
-                    .when(a.status !== "working", (el) =>
-                      el.child(
                         div()
                           .id(`reply-${a.address}`)
                           .flex_none()
-                          .size(18)
-                          .rounded(5)
+                          .size(28) // big hit area; the negative margins keep line 2 and the card height as before
+                          .my(-6)
+                          .mr(-4)
+                          .rounded(6)
                           .flex()
                           .items_center()
                           .justify_center()
@@ -1080,44 +1045,17 @@ export default class Board extends View {
                           .text_color(this.reply?.address === a.address ? t.foreground : t.muted)
                           .hover((s) => s.bg(t.hover).text_color(t.foreground))
                           .tooltip("Reply")
-                          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-                          .on_click((_e, cx) => {
+                          // Opens on the press: the open area above would close on that press and shift the card
+                          // under the pointer before the click ended.
+                          .on_mouse_down("left", (_e, cx) => {
                             cx.stop_propagation();
                             this.openReply(a, cx);
                           })
+                          .on_click((_e, cx) => cx.stop_propagation())
                           .child(svg(ICONS + "reply.svg").size(16)),
-                      ),
                     ),
                 )
-                .when(opts.kids > 0, (el) =>
-                  el.child(
-                    h_flex()
-                      .id(`tg-${a.address}`)
-                      .flex_none()
-                      .self_start()
-                      .gap(4)
-                      .px(4)
-                      .py(1)
-                      .rounded(5)
-                      .items_center()
-                      .text_size(11)
-                      .text_color(t.muted)
-                      .cursor_pointer()
-                      .hover((s) => s.bg(t.hover).text_color(t.foreground))
-                      .tooltip(opts.open ? "Hide children" : "Show children")
-                      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-                      .on_click((_e, cx) => {
-                        cx.stop_propagation();
-                        toggleFor(a.address, cx);
-                      })
-                      .child(svg(ICONS + "branch.svg").size(12).flex_none())
-                      .child(`${opts.kids} ${opts.kids === 1 ? "child" : "children"}`)
-                      .when(opts.attn, (e) => e.child(div().flex_none().size(12).rounded(6).bg(t.blocked).text_color(t.background).text_size(9).font_bold().flex().items_center().justify_center().tooltip("A child needs you").child("?")))
-                      .child(svg(ICONS + (opts.open ? "chevron-down.svg" : "chevron-right.svg")).size(12).flex_none()),
-                  ),
-                )
-                .when(this.reply?.address === a.address, (el) => el.child(replyArea(this.reply)))
-                .when(this.preview?.address === a.address, (el) => el.child(previewArea(this.preview))),
+                .when(this.reply?.address === a.address, (el) => el.child(replyArea(this.reply))),
             ),
         );
     };
@@ -1126,12 +1064,11 @@ export default class Board extends View {
     const node = (r, nested) => {
       const ad = r.a.address;
       const kids = kidsShown(ad);
-      const open = !this.collapsed.has(ad);
       return v_flex()
         .flex_none()
         .gap(8)
-        .child(card(r, { nested, kids: kids.length, open, attn: kids.length > 0 && attention(ad) }))
-        .when(kids.length > 0 && open, (el) =>
+        .child(card(r, { nested }))
+        .when(kids.length > 0, (el) =>
           el.child(v_flex().ml(8).pl(8).gap(8).border_l(1).border_color(t.border).children(kids.map((k) => node(shownBy.get(k), true)))),
         );
     };
@@ -1217,15 +1154,10 @@ export default class Board extends View {
       .on_key_down((e, cx) => {
         const k = e.key;
         if (this.replyFocus) return; // typing in a reply box: its own handler owns the keys
-        if (k === "escape") return this.reply ? this.closeReply(cx) : this.preview ? this.closePreview(cx) : this.close(cx);
-        if ((k === "e" || k === "space" || k === " ") && !this.searchFocus && !e.modifiers.platform && !e.modifiers.control) {
-          const a = agentBy.get(this.sel);
-          if (a) this.togglePreview(a, cx);
-          return cx.stop_propagation();
-        }
+        if (k === "escape") return this.reply ? this.closeReply(cx) : this.close(cx);
         if (k === "r" && !this.searchFocus && !e.modifiers.platform && !e.modifiers.control) {
           const a = agentBy.get(this.sel);
-          if (a && a.status !== "working") this.openReply(a, cx);
+          if (a) this.openReply(a, cx);
           return cx.stop_propagation();
         }
         const empty = !this.input.value();
