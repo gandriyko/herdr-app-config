@@ -10,6 +10,7 @@ import { migrate, modelFor, settingsFor, projectKey, projectName, languageLine, 
 // A mod pane (a wb-diff tab) has no cwd: keep the last terminal folder of that space (`places`, per
 // instance) instead of the space folder, which may not be a repo.
 const PLACES_MAX = 50;
+const POLL_EVERY = 2 * 60 * 1000;
 function location(places) {
   const space = spaces().find((s) => s.active), f = focused();
   const pane = f?.pane ? panes().find((p) => p.pane === f.pane) : null;
@@ -285,7 +286,8 @@ export default class Prs extends View {
       const changed = shared("prs.changed");
       if (changed && changed.ts !== this.changedTs) { this.changedTs = changed.ts; if (changed.ts > (this.started ?? 0)) this.poll(cx); }
     });
-    cx.timer.every(60 * 1000, (cx) => { if (this.auto) this.poll(cx); });
+    // ponytail: 2 min, since it costs 3 gh calls per repo of every space and runs while hidden; 1 min if Copilot news feels late.
+    cx.timer.every(POLL_EVERY, (cx) => { if (this.auto) this.poll(cx); });
   }
 
   toggleAuto(cx) {
@@ -331,7 +333,7 @@ export default class Prs extends View {
     });
   }
 
-  // Every minute (and on demand): the open PRs of every repo among all spaces' folders and the focused one,
+  // Every 2 minutes (and on demand): the open PRs of every repo among all spaces' folders and the focused one,
   // one gh call per repo. A sound and a toast when Copilot's review shows up on a PR that was already there.
   // Runs even while the panel is hidden.
   // ponytail: in memory only (a reload re-baselines).
@@ -418,7 +420,8 @@ export default class Prs extends View {
         const items = [...(v.comments ?? []).map((c) => ({ author: c.author?.login, at: c.createdAt, body: c.body })),
           ...(v.reviews ?? []).filter((rv) => (rv.body || rv.state !== "COMMENTED") && !(cp && rv.state === "COMMENTED" && isCopilot(rv.author))).map((rv) => ({ author: rv.author?.login, at: rv.submittedAt, body: rv.body, extra: rv.state.toLowerCase().replace("_", " ") }))]
           .sort((p, q) => String(p.at).localeCompare(String(q.at))).map((c, i) => ({ ...c, id: i }));
-        const me = await exec("gh", ["api", "user", "--jq", ".login"], { cwd: r.cwd, on: r.on }).then((m) => m.code === 0 ? m.stdout.trim() : null).catch(() => null);
+        // My login barely changes: gh's disk cache answers it for a day.
+        const me = await exec("gh", ["api", "user", "--cache", "24h", "--jq", ".login"], { cwd: r.cwd, on: r.on }).then((m) => m.code === 0 ? m.stdout.trim() : null).catch(() => null);
         const by = approvedBy(v.reviews);
         this.detail = { me, mineApproved: Boolean(me && by.includes(me)), title: v.title, body: v.body ?? "", author: v.author?.login, from: v.headRefName, to: v.baseRefName, created: v.createdAt,
           approvedBy: by, comments: items, threads: rest, copilot: cp };
@@ -776,7 +779,7 @@ export default class Prs extends View {
               .bg(this.all === all ? t.hover : t.background).text_color(this.all === all ? t.foreground : t.muted)
               .on_click((_e, cx) => this.setAll(all, cx)).child(label))))
         .child(h_flex().id("auto").h(24).px(5).gap(4).items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
-          .tooltip(this.auto ? "Auto-sync every minute (with Copilot sound): on" : "Auto-sync: off · refresh by hand").on_click((_e, cx) => this.toggleAuto(cx))
+          .tooltip(this.auto ? "Auto-sync every 2 minutes (with Copilot sound): on" : "Auto-sync: off · refresh by hand").on_click((_e, cx) => this.toggleAuto(cx))
           .child(div().size(13).flex().items_center().justify_center().rounded(3).border_1().text_size(10).font_semibold()
             .border_color(this.auto ? t.accent : t.border).bg(this.auto ? t.accent : t.background).text_color(t.accent_foreground).child(this.auto ? "✓" : ""))
           .child(div().text_size(10).text_color(t.muted).child("Auto")))

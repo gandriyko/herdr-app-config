@@ -78,18 +78,13 @@ const filterOf = () => {
 };
 const CHECKS_WORD = { fail: "failing", pass: "passing", pending: "pending", none: "none" };
 
-// One PR's checks as "fail" | "pending" | "pass" | "none" from gh's statusCheckRollup.
-function checksOf(rollup) {
-  if (!Array.isArray(rollup) || !rollup.length) return "none";
-  let pending = false;
-  for (const c of rollup) {
-    const concl = String(c.conclusion ?? "").toUpperCase();
-    const state = String(c.state ?? "").toUpperCase();
-    if (["FAILURE", "TIMED_OUT", "CANCELLED", "ERROR", "STARTUP_FAILURE"].includes(concl) || state === "FAILURE" || state === "ERROR") return "fail";
-    if ((c.status && String(c.status).toUpperCase() !== "COMPLETED") || state === "PENDING" || state === "EXPECTED") pending = true;
-  }
-  return pending ? "pending" : "pass";
-}
+// The open PRs of the cwd's repo with the head commit's rollup state. gh caches the answer on disk
+// for 55 s keyed by the request, so every mod sending this exact query shares one GitHub call
+// (agents-board sends the same text). Keep it byte-identical there.
+const PRS_QUERY = "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){pullRequests(states:OPEN,first:100){nodes{number headRefName commits(last:1){nodes{commit{statusCheckRollup{state}}}}}}}}";
+const PRS_ARGS = ["api", "graphql", "--cache", "55s", "-F", "owner={owner}", "-F", "name={repo}", "-f", `query=${PRS_QUERY}`];
+// GitHub's StatusState of the rollup as "fail" | "pending" | "pass"; no rollup is "none".
+const CHECKS = { FAILURE: "fail", ERROR: "fail", PENDING: "pending", EXPECTED: "pending", SUCCESS: "pass" };
 const MAX_COMMON = 200;
 const MAX_REPOS = 30;
 const PR_EVERY = 60000;
@@ -300,7 +295,7 @@ export default class Agents extends View {
       const novel = cands.some((b) => !r.asked.has(b));
       if (!novel && now < r.next) continue;
       const start = Date.now();
-      const res = await exec("gh", ["pr", "list", "--state", "open", "--limit", "100", "--json", "number,headRefName,statusCheckRollup"], { cwd: r.cwd, timeout: 15000 }).catch(() => null);
+      const res = await exec("gh", PRS_ARGS, { cwd: r.cwd, timeout: 15000 }).catch(() => null);
       if (!this.live) return;
       const at = Date.now();
       r.at = at;
@@ -323,7 +318,8 @@ export default class Agents extends View {
       }
       try {
         const prs = {};
-        for (const pr of JSON.parse(res.stdout)) prs[pr.headRefName] = { n: pr.number, c: checksOf(pr.statusCheckRollup) };
+        for (const pr of JSON.parse(res.stdout).data.repository.pullRequests.nodes)
+          prs[pr.headRefName] = { n: pr.number, c: CHECKS[pr.commits.nodes[0]?.commit.statusCheckRollup?.state] ?? "none" };
         r.prs = prs;
         // From when gh started, with slack so the 30 s tick lands on the mark; a PR on a candidate branch is checked every 60 s, none every 5 min.
         r.next = start + (cands.some((b) => prs[b]) ? PR_EVERY : NO_PR_EVERY) - 2000;
