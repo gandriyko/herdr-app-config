@@ -7,7 +7,8 @@ Herdr's and rewritten on every start). Read them before writing or changing a mo
 
 # Skills
 
-`skills/<name>/SKILL.md` are Claude Code skills for agents running in Herdr, tracked here and linked
-into `~/.claude/skills/` (README, Install step 4 and the Skills section). When setting this repo up on
+`skills/<name>/SKILL.md` are agent skills (Agent Skills format) for agents running in Herdr, tracked
+here and linked into `~/.claude/skills/`, `~/.agents/skills/` and `~/.hermes/skills/` (README, Install
+step 4 and the Skills section). Keep them agent-neutral: no Claude-only commands without the others. When setting this repo up on
 a machine, or after a pull that adds a skill, run that link loop and tell the user to start a new
-Claude session. A new or changed skill updates the Skills table in `README.md` in the same commit.
+agent session. A new or changed skill updates the Skills table in `README.md` in the same commit.

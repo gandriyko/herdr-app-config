@@ -7,7 +7,8 @@ description: Split a task or a PR into parts, give each part its own git worktre
 
 Herdr's core CLI `hc` already runs and coordinates agents. This skill is the worktree
 workflow on top of it. Children you start with `hc run` are recorded as yours (`parent`),
-so Herdr's agents board shows them nested under you.
+so Herdr's agents board shows them nested under you. It works the same whichever agent you
+are (Claude Code, Codex, Copilot CLI, Pi, Hermes, …) and whichever agent you start.
 
 ## 0. Check
 
@@ -39,17 +40,40 @@ Copy untracked files a build needs (`.env`, local config) only if the user agree
 
 ## 3. Start a child agent in each
 
-Put the whole task in the `run` call (a send to a booting agent can be dropped). Always `--bg`
-and `--name`. Tell it its scope, that it must not start agents, and how to report:
+Which agent: the one the user named, else the same program you are
+(`hc get $HC_TERMINAL_ID --json` → `agent`, e.g. `claude-code`, `codex`). Prefer a template from
+`hc templates` when one fits. Always `--bg` and `--name`, and run it interactively, never in a
+one-shot print mode (`claude -p`, `codex exec`, `copilot -p`): it must stay watchable and
+able to take another turn.
+
+The task (`$TASK` below) says: its scope, that it must not start agents, how to finish and how to
+report, e.g. `PR 1/2 of <goal>: <scope and done criteria>. Work only in this worktree, only in
+<paths>. Do not start other agents. Commit on branch auth-pr-1 when done (do not push unless
+told). Report with: hc send $HC_TERMINAL_ID "<summary or blocker>"`.
+
+Put the task in the `run` call when the program takes it as an argument (a send to a booting
+agent can be dropped):
+
+| Agent | Start it with the task |
+| --- | --- |
+| Claude Code | `hc run --bg --name auth-pr-1 --cwd "$wt" claude "$TASK"` |
+| Codex | `hc run --bg --name auth-pr-1 --cwd "$wt" codex --no-daemon "$TASK"` (always `--no-daemon`, or its commands run outside hc) |
+| Copilot CLI | `hc run --bg --name auth-pr-1 --cwd "$wt" copilot -i "$TASK"` |
+| Pi | `hc run --bg --name auth-pr-1 --cwd "$wt" pi "$TASK"` |
+
+Any other agent (Hermes, …), or when unsure how it takes a first prompt: start it plain, wait
+until it is ready, then send the task:
 
 ```sh
-hc run --bg --name auth-pr-1 --cwd "$wt" claude "PR 1/2 of <goal>: <scope and done criteria>. \
-Work only in this worktree, only in <paths>. Do not start other agents. Commit on branch auth-pr-1 \
-when done (do not push unless told). Report with: hc send $HC_TERMINAL_ID \"<summary or blocker>\""
+hc run --bg --name auth-pr-1 --cwd "$wt" hermes
+hc wait auth-pr-1
+hc send auth-pr-1 "$TASK"
 ```
 
-Check the launch output: if `first_message.sent` is false, follow `hc --skill` (read the
-screen, fix the trust dialog, then send) — do not blindly resend.
+Add the model flag the user asked for (`--model …`). Check the launch output: if
+`first_message.sent` is false, follow `hc --skill` (read the screen, fix the trust dialog, then
+send) — do not blindly resend. If a flag above is rejected, check `<agent> --help` and fall back
+to the plain start + send.
 
 Children end when you end. Add `--outlive-parent` only if the user wants them to keep running
 after this session.
@@ -71,7 +95,7 @@ If a child is blocked, `hc read --lines 60 <name>` and answer it (`hc send`) or 
 ```sh
 hc wait auth-pr-1 && hc send auth-pr-1 "Now review your diff against main and fix what you find. Report as before."
 # or a fresh reviewer in the same worktree:
-hc run --bg --name auth-pr-1-review --cwd "$wt" claude "Review branch auth-pr-1 against main. Read-only. Report findings with hc send $HC_TERMINAL_ID"
+hc run --bg --name auth-pr-1-review --cwd "$wt" <agent as in step 3> "Review branch auth-pr-1 against main. Read-only. Report findings with hc send $HC_TERMINAL_ID"
 ```
 
 `hc send --if idle <name> "…"` only types when it is idle; `hc send --wait` also waits for that turn.
