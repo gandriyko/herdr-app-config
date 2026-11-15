@@ -31,6 +31,6 @@ Outside a git repo the dialog only starts the agent there with `<key>: <title>` 
 - `localStorage` `current` ("1" / "0"): the current-sprint filter; `statuses` (JSON list of status names, at most 50): the status filter.
 
 ## Notes
-- Refresh every 5 min.
+- Loads once on open; refreshes every 5 min only when the Auto checkbox in the header is on (off by default, saved in `localStorage` `jira.auto`).
 - Uses an API token, not OAuth; the token is briefly in `security` argv when saved (noted in code).
 - macOS only (Keychain); standalone.

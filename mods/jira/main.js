@@ -201,8 +201,16 @@ export default class Jira extends View {
     this.filterOpen = false;
     this.search = InputState.new({ placeholder: "Search by key or title" });
     this.search.on("change", (_e, cx) => { this.query = this.search.value().trim().toLowerCase(); cx.notify(); });
+    // Auto-sync is off until switched on (jira.auto = "1"); the list loads once on open either way.
+    this.auto = (() => { try { return localStorage.getItem("jira.auto") === "1"; } catch { return false; } })();
     this.refresh(cx);
-    cx.timer.every(5 * 60 * 1000, (cx) => this.refresh(cx));
+    cx.timer.every(5 * 60 * 1000, (cx) => { if (this.auto) this.refresh(cx); });
+  }
+
+  toggleAuto(cx) {
+    this.auto = !this.auto;
+    try { localStorage.setItem("jira.auto", this.auto ? "1" : "0"); } catch {}
+    if (this.auto) this.refresh(cx); else cx.notify();
   }
 
   get token() { return this.savedEmail ? this.tokenKeep : this.tokenNew; }
@@ -591,6 +599,11 @@ export default class Jira extends View {
         .child(div().font_semibold().text_size(13).child("Jira"))
         .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(`${this.count} open`))
         .child(div().flex_1())
+        .when(!this.setup, (e) => e.child(h_flex().id("auto").h(24).px(5).gap(4).items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
+          .tooltip(this.auto ? "Auto-sync every 5 minutes: on" : "Auto-sync: off (default) · refresh by hand").on_click((_e, cx) => this.toggleAuto(cx))
+          .child(div().size(13).flex().items_center().justify_center().rounded(3).border_1().text_size(10).font_semibold()
+            .border_color(this.auto ? t.accent : t.border).bg(this.auto ? t.accent : t.background).text_color(t.accent_foreground).child(this.auto ? "✓" : ""))
+          .child(div().text_size(10).text_color(t.muted).child("Auto"))))
         .when(!this.setup, (e) => e.child(iconButton("settings", "mods/jira/settings.svg", "Settings", (_e, cx) => this.openSettings(cx))))
         .child(iconButton("refresh", "mods/jira/refresh.svg", "Refresh", (_e, cx) => this.refresh(cx), this.loading)))
       .when(!form, (e) => e.child(h_flex().flex_none().px(8).pt(8).gap(6).items_center()

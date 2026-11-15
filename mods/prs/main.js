@@ -275,7 +275,7 @@ export default class Prs extends View {
     this.focusRepo = null;
     this.seen = null; // PR url -> copilot state at the last poll; null until the first one (no sound for what already was)
     // Auto-sync (the minute poll and its sound) can be switched off; remembered. Refresh still works by hand.
-    this.auto = (() => { try { return (localStorage.getItem("prs.auto") ?? localStorage.getItem("auto")) !== "0"; } catch { return true; } })();
+    this.auto = (() => { try { return (localStorage.getItem("prs.auto") ?? localStorage.getItem("auto")) === "1"; } catch { return false; } })();
     this.all = (() => { try { return localStorage.getItem("prs.all") === "1"; } catch { return false; } })();
     this.poll(cx);
     // One 2 s tick for two checks. The folder follows focus: a repo already polled is shown from memory.
@@ -779,7 +779,7 @@ export default class Prs extends View {
               .bg(this.all === all ? t.hover : t.background).text_color(this.all === all ? t.foreground : t.muted)
               .on_click((_e, cx) => this.setAll(all, cx)).child(label))))
         .child(h_flex().id("auto").h(24).px(5).gap(4).items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
-          .tooltip(this.auto ? "Auto-sync every 2 minutes (with Copilot sound): on" : "Auto-sync: off · refresh by hand").on_click((_e, cx) => this.toggleAuto(cx))
+          .tooltip(this.auto ? "Auto-sync every 2 minutes (with Copilot sound): on" : "Auto-sync: off (default) · refresh by hand").on_click((_e, cx) => this.toggleAuto(cx))
           .child(div().size(13).flex().items_center().justify_center().rounded(3).border_1().text_size(10).font_semibold()
             .border_color(this.auto ? t.accent : t.border).bg(this.auto ? t.accent : t.background).text_color(t.accent_foreground).child(this.auto ? "✓" : ""))
           .child(div().text_size(10).text_color(t.muted).child("Auto")))
