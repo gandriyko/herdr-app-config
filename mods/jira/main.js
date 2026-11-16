@@ -645,9 +645,9 @@ export default class Jira extends View {
   }
 
   groupHeader(name, count, t) {
-    return h_flex().h(24).flex_none().px(8).pt(6).gap(6).items_center().text_size(10).text_color(t.dim)
-      .child(div().flex_1().min_w(0).truncate().font_semibold().child(name.toUpperCase()))
-      .child(div().child(String(count)));
+    return h_flex().h(24).flex_none().px(8).pt(6).gap(6).items_center().justify_center().text_size(10)
+      .child(div().min_w(0).truncate().font_bold().text_color(t.foreground).child(name.toUpperCase()))
+      .child(div().text_color(t.dim).child(String(count)));
   }
 
   // `section` keeps ids unique: an issue of mine can also sit in the backlog.
