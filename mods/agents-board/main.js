@@ -8,6 +8,7 @@ import { isSelectMenu, parseOptions, parseQuestion, parseSuggestion, sameOptions
 import { CHECKS_WORD, newPrState, prMap, prOf, refreshPrs } from "./prs.js";
 
 const ICONS = "mods/agents-board/";
+const SEND_TIMEOUT = 3000; // ms a reply `hc send` may wait for the agent's input line to clear (a normal send takes < 1 s)
 const PR_FILTERS = [
   { id: "any", label: "Any" },
   { id: "with", label: "Has PR" },
@@ -325,7 +326,9 @@ export default class Board extends View {
     const text = r.input?.value().trim() || (r.typing ? "" : r.suggestion);
     if (!text) return;
     if (r.typing) return this.followUp(r, [["keys", r.address, String(r.typing)], 300, ["send", "--force", r.address, text]], cx);
-    this.runReply(["send", r.address, text], r, cx);
+    // `hc send` waits while the input line holds a person's unsent draft (Claude's gray suggestion doesn't count,
+    // tested); give up after SEND_TIMEOUT and say why.
+    this.runReply(["send", r.address, text], r, cx, null, SEND_TIMEOUT);
   }
 
   // A click on a free-text option: a text input takes the place of the buttons.
@@ -388,18 +391,22 @@ export default class Board extends View {
   }
 
   // Runs one hc command for the open reply; success closes the area, failure shows the first line of stderr.
-  runReply(args, r, cx, after) {
+  // timeout (ms): run `hc` through exec so it is killed when it takes longer.
+  runReply(args, r, cx, after, timeout) {
     r.sending = true;
     r.error = null;
     cx.notify();
     cx.spawn(async (cx) => {
       let err = null;
+      const t0 = Date.now();
       try {
-        const res = await hc(args);
+        const res = await (timeout ? exec("hc", args, { timeout }) : hc(args));
         if (res?.code !== 0) err = String(res?.stderr || res?.stdout || "Failed").trim().split("\n")[0] || "Failed";
       } catch (e) {
         err = String(e?.message ?? e).split("\n")[0];
       }
+      if (err && timeout && Date.now() - t0 >= timeout - 500)
+        err = "Not sent: hc send is waiting for an unsent draft in the agent's input line. Open its terminal.";
       if (!this.live || this.reply !== r) return;
       if (err) {
         r.sending = false;
@@ -939,7 +946,8 @@ export default class Board extends View {
         .when(rp.mode !== "menu", (el) => el.child(textBox(rp)))
         .when(Boolean(rp.loadError), (el) => el.child(div().text_size(11).text_color(t.blocked).child(`Read failed: ${rp.loadError}`)))
         .child(body)
-        .when(Boolean(rp.error), (el) => el.child(div().text_size(11).text_color(t.blocked).child(rp.error)));
+        // A tinted strip with foreground text: plain red 11 px text was hard to read on the dark card.
+        .when(Boolean(rp.error), (el) => el.child(div().text_size(12).px(8).py(4).rounded(6).bg(t.blocked + "33").border_1().border_color(t.blocked + "88").text_color(t.foreground).child(rp.error)));
     };
 
     // The agent's last reply or the screen tail: wrapped lines (spaces kept), a line of only rule characters
@@ -950,8 +958,9 @@ export default class Board extends View {
       const blocks = [];
       for (const l of lines) {
         if (RULE.test(l)) blocks.push(null);
-        else if (typeof blocks.at(-1) === "string") blocks[blocks.length - 1] += "<br>" + textHtml(l);
-        else blocks.push(textHtml(l));
+        // One <p> per screen line: TextView drops <br>, so the lines ran together.
+        else if (typeof blocks.at(-1) === "string") blocks[blocks.length - 1] += `<p>${textHtml(l)}</p>`;
+        else blocks.push(`<p>${textHtml(l)}</p>`);
       }
       if (rp.stick && lines.length) {
         rp.stick = false;
@@ -980,7 +989,7 @@ export default class Board extends View {
         .line_height("15px")
         .text_color(t.muted)
         .when(!lines.length, (el) => el.child(div().text_color(t.dim).child(rp.mode === "failed" ? "Could not read the screen" : rp.loaded ? "Empty screen" : "Loading…")))
-        .children(blocks.map((b, i) => (b === null ? div().h(1).my(4).bg(t.border) : TextView.html(`reply-text-${rp.address}-${i}`, `<span>${b}</span>`).selectable(true))))
+        .children(blocks.map((b, i) => (b === null ? div().h(1).my(4).bg(t.border) : TextView.html(`reply-text-${rp.address}-${i}`, b).selectable(true))))
         .child(div().h(8).flex_none()),
       );
     };
