@@ -1,6 +1,6 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, TextView, InputState, Input } from "gpui-base";
-import { exec, home, theme, spaces, panes, run, notify } from "herdr";
+import { exec, home, theme, spaces, panes, run, notify, props, closeOverlay } from "herdr";
 
 // Past agent sessions (Claude, Codex, OpenCode, ...) from human-history (`human-history`, github.com/gandriyko/human-history).
 // Typing searches prompts and answers; an empty query lists the latest sessions. Results are limited to the
@@ -37,7 +37,7 @@ async function resume(s) {
   const argv = RESUME[s.agent]?.(s.session_id);
   if (!argv || !SAFE_ID.test(s.session_id)) {
     notify({ title: "Can't resume", body: `${s.agent} session ${s.session_id}`, level: "error" });
-    return;
+    return false;
   }
   // The session's own folder, so the agent finds its history; the active space keeps it with this project.
   let folder = s.cwd || null;
@@ -47,7 +47,7 @@ async function resume(s) {
     const moved = await mainCheckout();
     if (!moved) {
       notify({ title: "Can't resume: folder is gone", body: folder, level: "error" });
-      return;
+      return false;
     }
     // Claude looks a session up only under its folder's project dir (~/.claude/projects/<path, non-alnum → "-">),
     // so copy the conversation there; other agents find a session by id from anywhere.
@@ -57,7 +57,7 @@ async function resume(s) {
       'dst="$HOME/.claude/projects/$2"; mkdir -p "$dst" && { [ -e "$dst/$1.jsonl" ] || cp "$src" "$dst/"; }',
       "sh", s.session_id, moved.replace(/[^A-Za-z0-9]/g, "-")]))) {
       notify({ title: "Can't resume: conversation file not found", body: `claude session ${s.session_id}`, level: "error" });
-      return;
+      return false;
     }
     notify({ title: "Resumed in the main checkout", body: `${folder} is gone; opened in ${moved}. Its uncommitted changes are lost.` });
     folder = moved;
@@ -66,6 +66,9 @@ async function resume(s) {
   const t = (s.title ?? "").trim().replace(/\s+/g, " ");
   const name = t.length > 40 ? t.slice(0, 40).replace(/\s+\S*$/, "") + "…" : t;
   run("tab.new", { argv, ...(name ? { name } : {}), ...(folder ? { folder } : {}) });
+  // Opened as a dialog (e.g. the jira mod's "Find in history"): the new tab is what the user wanted, so get out of its way.
+  if (props()?.overlay) closeOverlay(props().overlay);
+  return true;
 }
 
 const ok = async (cmd, args) => (await exec(cmd, args, { timeout: 5000 }).catch(() => ({ code: 1 }))).code === 0;
@@ -109,7 +112,8 @@ export default class History extends View {
     this.open = null; // { session, messages, shown, error }
     this.scope = localStorage.getItem("scope") === "title" ? "title" : "both"; // human-history -s: titles only, or prompts + answers
     this.where = undefined; // the folder the results were asked for; render re-asks when the space moves
-    this.search = InputState.new({ placeholder: "Search sessions" });
+    // Opened as a dialog with props().query (the jira mod passes a task key): start with that search.
+    this.search = InputState.new({ value: String(props()?.query ?? ""), placeholder: "Search sessions" });
     this.search.on("change", (_e, cx) => {
       const seq = ++this.seq;
       cx.timer.after(250, (cx) => { if (seq === this.seq) this.find(cx); });
@@ -313,7 +317,11 @@ export default class History extends View {
           .when(Boolean(RESUME[open.session.agent]), (e) => e.child(div().id("resume").h(24).px(10).flex().items_center().rounded(6).cursor_pointer()
             .bg(t.solid).text_color(t.solid_foreground).hover((s) => s.opacity(0.9))
             .tooltip(`Resume in a new tab: ${RESUME[open.session.agent](open.session.session_id).join(" ")}`)
-            .on_click(() => resume(open.session)).child("Resume"))))
+            .on_click(async (_e, cx) => {
+              // Resumed: back to the plain list, search cleared (set_value fires "change", which asks again).
+              if (!(await resume(open.session))) return;
+              this.open = null; this.search.set_value(""); this.find(cx); cx.notify();
+            }).child("Resume"))))
         .when(!open, (e) => e.child(iconButton("refresh", "refresh", "Re-index and search again", (_e, cx) => this.reindex(cx), this.loading))))
       .when(!open, (e) => e.child(h_flex().flex_none().px(8).pt(8).gap(6).items_center()
         .child(div().id("search").flex_1().min_w(0).h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
