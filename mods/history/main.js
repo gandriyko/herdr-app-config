@@ -84,7 +84,9 @@ async function mainCheckout() {
 
 // Where the active space works now: its focused terminal's folder, else the first known one (as tabs-copy).
 // ponytail: a space on another machine still searches this machine's history with its remote path.
+// props().folder (a block in another mod's dialog, e.g. jira's Start session) pins it to that folder instead.
 function place() {
+  if (props()?.folder) return props().folder;
   const sp = spaces().find((p) => p.active), ps = panes();
   const tabs = new Set((sp?.tabs ?? []).map((c) => c.id));
   return ps.find((p) => p.focused && tabs.has(p.tab))?.cwd ?? ps.find((p) => tabs.has(p.tab) && p.cwd)?.cwd ?? sp?.folder ?? null;
@@ -306,7 +308,10 @@ export default class History extends View {
         .child(svg(`mods/history/icons/${icon}.svg`).size(13))));
     const empty = this.error ?? (!this.where ? "No project folder in this space"
       : !this.results.length ? (this.loading ? "Loading…" : "No sessions found") : null);
-    return v_flex().id("history").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(12)
+    // props().embedded: a block inside another mod's dialog (jira's Start session), so no frame of its own, only a top rule.
+    const embedded = Boolean(props()?.embedded);
+    return v_flex().id("history").size_full().min_h(0).overflow_hidden().bg(t.background).border_color(t.border).text_color(t.foreground).text_size(12)
+      .when(embedded, (e) => e.border_t(1)).when(!embedded, (e) => e.rounded(10).border_1())
       .child(h_flex().h(42).flex_none().px(14).gap(6).items_center().border_b(1).border_color(t.border)
         .when(Boolean(open), (e) => e.child(iconButton("back", "back", "Back to results", (_e, cx) => { this.open = null; cx.notify(); })))
         .child(div().font_semibold().text_size(13).child("History"))

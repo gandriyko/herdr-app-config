@@ -11,7 +11,7 @@ commands: [tab.new (resume a session in a new tab)]
 ---
 
 ## What it does
-Lists the latest agent sessions of the active space's project, or searches prompts and answers while typing. A click opens the conversation as Markdown (paged), with favorite, copy session id and Resume (new tab named after the session title, running the agent's resume command). Opened as an overlay with `props: { query }` (the jira mod's "Find in history" passes a task key), it starts with that search, and Resume closes the overlay. If `human-history` is missing it shows an install hint with a link to the repository.
+Lists the latest agent sessions of the active space's project, or searches prompts and answers while typing. A click opens the conversation as Markdown (paged), with favorite, copy session id and Resume (new tab named after the session title, running the agent's resume command). Props for opening it as an overlay or a block inside another mod's dialog (the jira mod's Start session): `query` (starts with that search), `folder` (searches that folder's project instead of the active space's), `embedded` (no frame of its own, only a top rule). In an overlay, Resume closes it. If `human-history` is missing it shows an install hint with a link to the repository.
 
 ## Files
 - main.js: the whole mod (human-history calls, search, viewer, resume table).
