@@ -1,9 +1,11 @@
-import { View, div, svg } from "gpui-kit";
+import { View, div, svg, image } from "gpui-kit";
+import * as fs from "fs/promises";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
 import { exec, theme, shared, setShared, spaces, panes, focused, run, knownAgents, props, openOverlay, closeOverlay } from "herdr";
 import { Buffer } from "buffer";
 
-// My open Jira issues grouped by sprint, plus the project's backlog. Click opens the issue in Jira;
+// My open Jira issues grouped by sprint, status or not at all and sorted by updated/created date, plus the backlog
+// of one or more projects (optional, its own request). Click opens the issue in Jira;
 // right-click: Copy task ID, Start agent session. The row's terminal button opens that session dialog too (new worktree, new
 // or existing, or a new branch here; the agent gets the issue text); which agent
 // (Herdr's knownAgents(), e.g. Claude Code or Codex) is picked in the settings form and saved in "jira.settings".agent.
@@ -13,11 +15,19 @@ import { Buffer } from "buffer";
 // redirect server, which a mod can't host.
 const TOKEN_PAGE = "https://id.atlassian.com/manage-profile/security/api-tokens";
 const MINE_JQL = "assignee = currentUser() AND statusCategory != Done ORDER BY updated DESC";
-const backlogJql = (project) => `project = "${project}" AND sprint is EMPTY AND statusCategory != Done ORDER BY rank ASC`;
+// The saved project keys: "DA, OPS" → ["DA", "OPS"].
+const projectKeys = (text) => (text ?? "").split(",").map((p) => p.trim()).filter(Boolean);
+const backlogJql = (keys) => `project in (${keys.map((k) => `"${k}"`).join(", ")}) AND sprint is EMPTY AND statusCategory != Done ORDER BY rank ASC`;
 const SERVICE = "herdr-jira";
 const SETTINGS = "jira.settings";
-// In progress first, then to do; Jira's order (latest update) within each.
+// In progress first, then to do (in a sprint group, and the order of status groups).
 const RANK = { indeterminate: 0, new: 1 };
+// Statuses on no board: to do, in progress, done (Jira's own order of categories).
+const CAT_ORDER = { new: 0, indeterminate: 1, done: 2 };
+// Jira's "2026-11-16T10:00:00.000+0200" as ms; the offset gets its colon so any Date.parse takes it.
+const timeOf = (text) => Date.parse((text ?? "").replace(/([+-]\d\d)(\d\d)$/, "$1:$2")) || 0;
+// The created date as "today" / "5d ago".
+const daysAgo = (text) => { const d = Math.floor((Date.now() - timeOf(text)) / 86400000); return d < 1 ? "today" : `${d}d ago`; };
 
 const basic = (email, token) => "Basic " + Buffer.from(`${email}:${token}`).toString("base64");
 
@@ -54,6 +64,39 @@ async function findBase(site, auth) {
   }
   throw rejected;
 }
+
+// The order Jira shows statuses in: the columns of each project's board, left to right (status id → index, first
+// project first). A project without a board, or a token without the board scope, adds nothing.
+// ponytail: the first scrum board of a project (else its first board); pick one by name if a project has several.
+async function boardOrder(base, auth, keys) {
+  const lists = await Promise.all(keys.map(async (key) => {
+    try {
+      const { values = [] } = await jira(base, auth, `/rest/agile/1.0/board?projectKeyOrId=${encodeURIComponent(key)}&maxResults=20`);
+      const board = values.find((b) => b.type === "scrum") ?? values[0];
+      if (!board) return [];
+      const conf = await jira(base, auth, `/rest/agile/1.0/board/${board.id}/configuration`);
+      return (conf.columnConfig?.columns ?? []).flatMap((c) => (c.statuses ?? []).map((st) => String(st.id)));
+    } catch { return []; }
+  }));
+  const order = new Map();
+  for (const id of lists.flat()) if (!order.has(id)) order.set(id, order.size);
+  return order;
+}
+
+// Jira's own issue type icons, saved as files (image() reads them from ~/.config/herdr-app/<path>) and kept across
+// restarts: one per type and avatar, a handful in all.
+const ICON_DIR = "data/jira/types";
+const iconFile = (type) => `${ICON_DIR}/${String(type.id).replace(/\W/g, "")}-${/avatar\/(\d+)/.exec(type.iconUrl ?? "")?.[1] ?? "0"}.svg`;
+const isSvg = (text) => /^\s*(<\?xml[^>]*>\s*)?(<!--[\s\S]*?-->\s*)*(<!DOCTYPE[^>]*>\s*)?<svg[\s>]/i.test(text);
+
+// Our own icon for an issue type, by its name, when Jira's can't be had; the first match wins, else task (TA too).
+const TYPE_ICONS = [["sub", "subtask"], ["bug", "bug"], ["story", "story"], ["epic", "epic"], ["customer", "customer"],
+  ["qa", "pmqa"], ["security", "security"], ["investigation", "investigation"]];
+const typeIcon = (type) => {
+  const name = (type?.name ?? "").toLowerCase();
+  const kind = type?.subtask ? "subtask" : TYPE_ICONS.find(([part]) => name.includes(part))?.[1] ?? "task";
+  return `mods/jira/type-${kind}.svg`;
+};
 
 // The sprint an issue is in now: the active one, else the next planned one, else none.
 function sprintOf(sprints) {
@@ -184,11 +227,12 @@ export default class Jira extends View {
   init(_props, cx) {
     // Opened as the "Start session" dialog of an issue (see openStart).
     if (props()?.start) { this.initStart(cx); return; }
-    this.groups = []; this.backlog = []; this.count = 0; this.error = null; this.loading = false;
+    this.mine = []; this.groups = []; this.backlog = []; this.backlogGroups = []; this.count = 0; this.error = null; this.loading = false;
+    this.typeIcons = new Map(); // issue type id → saved icon path, or null (asked this session, none)
     this.setup = false; this.editing = false; this.saving = false; this.formError = null; this.savedEmail = null; this.query = "";
     const input = (placeholder) => { const s = InputState.new({ placeholder }); s.on("submit", (_e, cx) => this.save(cx)); return s; };
     this.site = input("https://your-company.atlassian.net");
-    this.project = input("Project key for the backlog, e.g. DA");
+    this.project = input("Project keys for the backlog, e.g. DA, OPS");
     this.email = input("Atlassian email");
     // ponytail: InputState has no placeholder setter, so one field per placeholder; `token` picks by savedEmail.
     this.tokenNew = input("API token");
@@ -244,12 +288,13 @@ export default class Jira extends View {
     const gen = this.gen = (this.gen ?? 0) + 1;
     this.loading = true; this.loadingSince = Date.now(); cx.notify();
     cx.spawn(async (cx) => {
+      let icons = null;
       try {
         const creds = await credentials(), s = this.settings();
         this.savedEmail = creds?.email ?? null;
         if (!creds || !s.site) {
           if (!this.setup) { this.setup = true; this.fillForm(); }
-          this.groups = []; this.backlog = []; this.count = 0; return;
+          this.mine = []; this.backlog = []; this.count = 0; this.view = null; return;
         }
         this.setup = false;
         // Once per session: a token that stopped working would otherwise look like "no issues".
@@ -261,41 +306,101 @@ export default class Jira extends View {
         // The sprint field's id differs per site; ask once. Without it issues still show, under "No sprint".
         this.sprintField ??= await jira(base, creds.auth, "/rest/api/3/field")
           .then((all) => all.find((f) => f.schema?.custom === "com.pyxis.greenhopper.jira:gh-sprint")?.id ?? null, () => null);
-        // ponytail: first 100 of mine and 50 of the backlog; page with nextPageToken if that's ever too few.
-        const fields = ["summary", "status", "issuetype", "labels", ...(this.sprintField ? [this.sprintField] : [])];
+        // ponytail: the 100 latest-updated of mine and the top 100 of the backlog(s), sorted here by the picked date;
+        // page with nextPageToken if that's ever too few.
+        const fields = ["summary", "status", "issuetype", "labels", "updated", "created", "parent"];
         const search = (jql, fields, maxResults) => jira(base, creds.auth, "/rest/api/3/search/jql", { jql, fields, maxResults });
+        const keys = s.backlog === false ? [] : projectKeys(s.project);
         const [{ issues = [] }, { issues: backlog = [] }] = await Promise.all([
-          search(MINE_JQL, fields, 100),
-          s.project ? search(backlogJql(s.project), ["summary", "status", "issuetype", "labels"], 50) : { issues: [] },
+          search(MINE_JQL, [...fields, ...(this.sprintField ? [this.sprintField] : [])], 100),
+          keys.length ? search(backlogJql(keys), fields, 100) : { issues: [] },
         ]);
-        const groups = new Map();
-        for (const issue of issues) {
-          const sprint = sprintOf(issue.fields[this.sprintField]);
-          const id = sprint ? `s${sprint.id}` : "none";
-          if (!groups.has(id)) groups.set(id, { id, name: sprint?.name ?? "No sprint", order: sprint ? (sprint.state === "active" ? 0 : 1) : 2, issues: [] });
-          groups.get(id).issues.push(issue);
-        }
-        this.groups = [...groups.values()].sort((a, b) => a.order - b.order || a.name.localeCompare(b.name));
-        for (const g of this.groups) g.issues.sort((a, b) => (RANK[a.fields.status?.statusCategory?.key] ?? 2) - (RANK[b.fields.status?.statusCategory?.key] ?? 2));
-        this.backlog = backlog; this.count = issues.length; this.error = null;
+        for (const issue of issues) issue.sprint = sprintOf(issue.fields[this.sprintField]);
+        // Board order of statuses for the saved projects and those of my issues (at most 5); asked again only when that set changes.
+        const orderKeys = [...new Set([...projectKeys(s.project), ...issues.map((i) => i.key.split("-")[0])])].slice(0, 5).join(",");
+        if (orderKeys !== this.orderKeys) { this.statusOrder = await boardOrder(base, creds.auth, orderKeys.split(",").filter(Boolean)); this.orderKeys = orderKeys; }
+        // render() groups and sorts them (regroup) by the settings.
+        this.mine = issues; this.backlog = backlog; this.count = issues.length; this.error = null; this.view = null;
+        icons = { auth: creds.auth, base, site: s.site, issues: [...issues, ...backlog] };
       } catch (e) {
         // A revoked or expired token: back to the form.
         if (e.status === 401) {
-          this.setup = true; this.verified = false; this.groups = []; this.backlog = []; this.count = 0;
+          this.setup = true; this.verified = false; this.mine = []; this.backlog = []; this.count = 0; this.view = null;
           this.fillForm(); this.formError = "Jira rejected the saved token · paste a new one";
         } else this.error = String(e.message ?? e);
       } finally { if (gen === this.gen) this.loading = false; cx.notify(); }
+      // After the list shows: the icons of issue types not seen yet.
+      if (icons) await this.loadIcons(cx, icons);
     });
+  }
+
+  // Jira's icons for the issue types of `issues` not asked for yet this session: a saved file is used as is, else
+  // the icon is fetched (through `base`, so a token with scopes works too) and saved. One redraw if any is new.
+  // ponytail: SVG only — Herdr's fetch has only text(); a PNG icon (a custom upload) keeps our own (typeIcon).
+  async loadIcons(cx, { auth, base, site, issues }) {
+    const types = new Map();
+    for (const i of issues) { const ty = i.fields.issuetype; if (ty?.id && ty.iconUrl && !this.typeIcons.has(ty.id)) types.set(ty.id, ty); }
+    if (!types.size) return;
+    for (const id of types.keys()) this.typeIcons.set(id, null);
+    this.home ??= (await exec("sh", ["-c", 'printf %s "$HOME"']).catch(() => null))?.stdout.trim() || null;
+    if (!this.home) return;
+    const root = `${this.home}/.config/herdr-app`;
+    await fs.mkdir(`${root}/${ICON_DIR}`, { recursive: true }).catch(() => {});
+    let found = 0;
+    await Promise.all([...types.values()].map(async (ty) => {
+      const path = iconFile(ty);
+      try {
+        if (!(await fs.exists(`${root}/${path}`))) {
+          const url = ty.iconUrl.startsWith(site) ? base + ty.iconUrl.slice(site.length) : ty.iconUrl;
+          const text = await withTimeout(cx, fetch(url, { headers: { Authorization: auth } }).then((r) => (r.ok ? r.text() : ""), () => ""), 15000, "");
+          if (!isSvg(text)) return;
+          await fs.writeFile(`${root}/${path}`, text);
+        }
+        this.typeIcons.set(ty.id, path); found++;
+      } catch {}
+    }));
+    if (found) cx.notify();
+  }
+
+  // A status's place as Jira shows it: its board column; a status on no board goes after, by category (to do,
+  // in progress, done), then by name in the caller.
+  statusPos(status) {
+    return this.statusOrder?.get(String(status?.id)) ?? 1000 + (CAT_ORDER[status?.statusCategory?.key] ?? 3);
+  }
+
+  // Groups my issues by the picked field and sorts every list by the picked date, newest first. Run by render()
+  // when the data or those settings changed (so every copy of the mod follows a change made in one).
+  regroup() {
+    const s = this.settings(), by = s.groupBy ?? "sprint", field = s.sort === "created" ? "created" : "updated";
+    const newest = (a, b) => timeOf(b.fields[field]) - timeOf(a.fields[field]);
+    const rank = (i) => RANK[i.fields.status?.statusCategory?.key] ?? 2;
+    const groups = new Map();
+    for (const issue of this.mine) {
+      const sprint = issue.sprint, status = issue.fields.status, parent = issue.fields.parent;
+      // Parent: the epic of a story/task, or the issue of a sub-task (Jira Cloud's `parent` field covers both).
+      const [id, name, order] = by === "status" ? [`st:${status?.name}`, status?.name ?? "No status", this.statusPos(status)]
+        : by === "parent" ? (parent ? [`p:${parent.key}`, `${parent.key} ${parent.fields?.summary ?? ""}`.trim(), 0] : ["noparent", "No parent", 1])
+        : by === "sprint" ? (sprint ? [`s${sprint.id}`, sprint.name, sprint.state === "active" ? 0 : 1] : ["none", "No sprint", 2])
+        : ["all", "Assigned to me", 0];
+      if (!groups.has(id)) groups.set(id, { id, name, order, issues: [] });
+      groups.get(id).issues.push(issue);
+    }
+    this.groups = [...groups.values()].sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, undefined, { numeric: true }));
+    // In a sprint: in progress first, then to do, each by date.
+    for (const g of this.groups) g.issues.sort(by === "sprint" ? (a, b) => rank(a) - rank(b) || newest(a, b) : newest);
+    // One backlog section per project, in the order the keys were saved.
+    this.backlogGroups = projectKeys(s.project).map((k) => ({ id: k, name: `${k} backlog`,
+      issues: this.backlog.filter((i) => i.key.startsWith(k + "-")).sort(newest) })).filter((g) => g.issues.length);
   }
 
   // Checks the form against Jira, then saves: settings to shared state, a new token to the Keychain.
   save(cx) {
     if (this.saving) return;
-    const site = normalizeSite(this.site.value()), project = this.project.value().trim().toUpperCase();
+    const site = normalizeSite(this.site.value()), keys = projectKeys(this.project.value().toUpperCase()), project = keys.join(", ");
     const email = this.email.value().trim(), token = this.token.value().trim();
     const fail = (message) => { this.formError = message; cx.notify(); };
     if (!/^https:\/\/[^\s/]+$/.test(site)) return fail("Jira URL: https://<name>.atlassian.net");
-    if (project && !/^[A-Z][A-Z0-9_]*$/.test(project)) return fail("Project key: letters, digits and _ (like DA)");
+    if (keys.some((k) => !/^[A-Z][A-Z0-9_]*$/.test(k))) return fail("Project keys: letters, digits and _, separated by commas (like DA, OPS)");
     if (!/^\S+@\S+\.\S+$/.test(email)) return fail("Enter your Atlassian email");
     // The saved token belongs to the saved email; a different email needs its own token.
     const needToken = !this.savedEmail || email !== this.savedEmail;
@@ -314,7 +419,7 @@ export default class Jira extends View {
           this.token.set_value(""); this.savedEmail = email;
         }
         setShared(SETTINGS, { ...this.settings(), site, project, base }); // keeps the agent picked below
-        this.sprintField = undefined; this.verified = true; this.setup = false; this.editing = false;
+        this.sprintField = undefined; this.orderKeys = undefined; this.verified = true; this.setup = false; this.editing = false;
       } catch (e) {
         this.formError = e.status === 401 || e.status === 403
           ? `Jira rejected these credentials (${e.message}). Check the URL and email; a token with scopes needs read:jira-work and read:jira-user.`
@@ -337,7 +442,7 @@ export default class Jira extends View {
     return v_flex().p(8).gap(8).text_color(t.muted)
       .child(div().text_color(t.foreground).font_semibold().child(this.setup ? "Connect Jira" : "Jira settings"))
       .child(this.field("site", "Jira URL", this.site, t))
-      .child(this.field("project", "Backlog project key (optional)", this.project, t))
+      .child(this.field("project", "Backlog project keys (optional, comma-separated)", this.project, t))
       .child(this.field("email", "Atlassian email", this.email, t))
       .child(this.field("token", "API token", this.token, t))
       .child(h_flex().gap(6)
@@ -351,17 +456,23 @@ export default class Jira extends View {
 
   url(key) { return `${this.settings().site}/browse/${key}`; }
 
+  // A row of one-click choices ({ key, name }), the picked one outlined; `pick(option, cx)` saves it.
+  pills(t, id, options, cur, pick) {
+    return h_flex().gap(6).flex_wrap().children(options.map((o) => div().id(`${id}-${o.key}`).h(24).px(10).flex().items_center().rounded(6).border_1()
+      .text_size(12).cursor_pointer().border_color(o.key === cur ? t.accent : t.border).text_color(o.key === cur ? t.accent : t.foreground)
+      .hover((s) => s.bg(t.hover)).on_click((_e, cx) => { pick(o, cx); cx.notify(); }).child(o.name)));
+  }
+
+  labeled(label, child, t) {
+    return v_flex().gap(4).child(div().text_size(10).text_color(t.dim).child(label)).child(child);
+  }
+
   // The agent for task sessions, one click to pick (saved at once, apart from Save): the installed ones of knownAgents().
   agentPicker(t) {
-    const cur = this.settings().agent ?? "claude";
-    const pill = (a) => div().id(`agent-${a.key}`).h(24).px(10).flex().items_center().rounded(6).border_1().text_size(12).cursor_pointer()
-      .border_color(a.key === cur ? t.accent : t.border).text_color(a.key === cur ? t.accent : t.foreground).hover((s) => s.bg(t.hover))
-      .on_click((_e, cx) => { setShared(SETTINGS, { ...this.settings(), agent: a.key, agentName: a.name }); cx.notify(); }).child(a.name);
-    return v_flex().gap(4)
-      .child(div().text_size(10).text_color(t.dim).child("Agent for task sessions"))
-      .child(this.agents === null ? div().text_size(11).text_color(t.dim).child("Checking installed agents…")
-        : this.agents.length ? h_flex().gap(6).flex_wrap().children(this.agents.map(pill))
-        : div().text_size(11).text_color(this.agentsError ? t.ansi1 : t.dim).child(this.agentsError ?? "No installed agents found"));
+    return this.labeled("Agent for task sessions", this.agents === null ? div().text_size(11).text_color(t.dim).child("Checking installed agents…")
+      : this.agents.length ? this.pills(t, "agent", this.agents, this.settings().agent ?? "claude",
+        (a) => setShared(SETTINGS, { ...this.settings(), agent: a.key, agentName: a.name }))
+      : div().text_size(11).text_color(this.agentsError ? t.ansi1 : t.dim).child(this.agentsError ?? "No installed agents found"), t);
   }
 
   // The focused folder (else the space's) and the machine of the active space: where a session for an issue starts.
@@ -372,7 +483,7 @@ export default class Jira extends View {
   }
 
   summaryOf(key) {
-    return [...this.groups.flatMap((g) => g.issues), ...this.backlog].find((i) => i.key === key)?.fields.summary ?? "";
+    return [...this.mine, ...this.backlog].find((i) => i.key === key)?.fields.summary ?? "";
   }
 
   // Opens the "Start session" dialog for an issue, for the focused folder (else the space's) and its machine.
@@ -496,17 +607,29 @@ export default class Jira extends View {
       .border_color(on ? t.accent : t.muted).when(on, (s) => s.bg(t.accent).text_color(t.background))
       .when(on, (s) => s.child(svg("mods/jira/check.svg").size(10)));
     const row = (id, on, label, color, count, toggle) => h_flex().id(id).h(26).px(8).gap(8).items_center().rounded(5).cursor_pointer()
-      .hover((s) => s.bg(t.hover)).on_click((_e, cx) => { toggle(); this.saveFilters(); cx.notify(); })
+      .hover((s) => s.bg(t.hover)).on_click((_e, cx) => { toggle(cx); this.saveFilters(); cx.notify(); })
       .child(box(on))
       .child(div().flex_1().min_w(0).truncate().text_color(color).child(label))
       .when(count !== null, (e) => e.child(div().flex_none().text_size(10).text_color(t.dim).child(String(count))));
     const title = (text) => div().px(8).pt(6).pb(2).text_size(10).font_semibold().text_color(t.dim).child(text);
     const catColor = (cat) => cat === "indeterminate" ? t.working : cat === "done" ? t.done : t.foreground;
+    const s = this.settings(), sort = s.sort === "created" ? "created" : "updated", backlogOn = s.backlog !== false;
+    const set = (patch) => setShared(SETTINGS, { ...this.settings(), ...patch });
     return v_flex().id("filter-menu").absolute().top(82).right(8).w(230).max_h(360).overflow_y_scroll().p(4).gap(1)
       .rounded(8).border_1().border_color(t.border).bg(t.popover).shadow_lg()
       .on_mouse_down_out((_e, cx) => { this.filterOpen = false; this.filterClosedAt = Date.now(); cx.notify(); })
       // The popover floats over issue rows: without this the press falls through and opens Jira.
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .child(title("SORT (NEWEST FIRST)"))
+      .children([["updated", "Updated"], ["created", "Created"]].map(([key, label]) =>
+        row(`filter-sort-${key}`, sort === key, label, t.foreground, null, () => set({ sort: key }))))
+      .child(title("GROUP BY"))
+      .children([["sprint", "Sprint"], ["status", "Status"], ["parent", "Parent (epic, story)"], ["none", "None"]].map(([key, label]) =>
+        row(`filter-group-${key}`, (s.groupBy ?? "sprint") === key, label, t.foreground, null, () => set({ groupBy: key }))))
+      .child(title("BACKLOG"))
+      // A separate request: shown again → fetch it; hidden → render() just leaves it out.
+      .child(row("filter-backlog", backlogOn, "Show project backlog", t.foreground, null,
+        (cx) => { set({ backlog: !backlogOn }); if (!backlogOn) this.refresh(cx); }))
       .child(title("SPRINT"))
       .child(row("filter-current", this.current, "Current sprint only", t.foreground, null, () => { this.current = !this.current; }))
       .child(title("STATUS"))
@@ -545,7 +668,9 @@ export default class Jira extends View {
       .child(v_flex().flex_1().min_w(0)
         .child(div().truncate().child(f.summary ?? ""))
         .child(h_flex().gap(6).items_center().text_size(10)
+          .child(image(this.typeIcons.get(f.issuetype?.id) ?? typeIcon(f.issuetype)).size(12).flex_none())
           .child(div().flex_none().text_color(t.dim).child(issue.key))
+          .when(Boolean(f.created), (e) => e.child(div().flex_none().text_color(t.dim).child(daysAgo(f.created))))
           .child(div().flex_1().min_w(0).truncate().text_color(color).child(f.status?.name ?? ""))
           // Start a Claude session for this task; the press stops here, so the row doesn't open Jira.
           .child(div().id(`session-${section}-${issue.key}`).flex_none().size(16).flex().items_center().justify_center().rounded(4)
@@ -560,29 +685,31 @@ export default class Jira extends View {
     const picked = this.statuses, filtered = this.current || picked.size > 0;
     const byStatus = (issue) => !picked.size || picked.has(issue.fields.status?.name ?? "");
     const match = (issue) => byStatus(issue) && (!q || issue.key.toLowerCase().includes(q) || (issue.fields.summary ?? "").toLowerCase().includes(q));
-    // order 0: an active sprint (see refresh).
-    const inSprint = this.groups.filter((g) => !this.current || g.order === 0);
-    const groups = inSprint.map((g) => ({ ...g, issues: g.issues.filter(match) })).filter((g) => g.issues.length);
-    const backlog = this.current ? [] : this.backlog.filter(match), project = this.settings().project;
-    const empty = form ? null : this.error || (this.loading && !this.groups.length ? "Loading…"
-      : q && !groups.length && !backlog.length ? "No matches" : !this.groups.length ? "No open issues assigned to you"
+    const s = this.settings(), view = `${s.groupBy}|${s.sort}|${s.project}`;
+    if (this.view !== view) { this.view = view; this.regroup(); }
+    const inCurrent = (issue) => !this.current || issue.sprint?.state === "active";
+    const groups = this.groups.map((g) => ({ ...g, issues: g.issues.filter((i) => inCurrent(i) && match(i)) })).filter((g) => g.issues.length);
+    const showBacklog = !this.current && s.backlog !== false;
+    const backlogGroups = !showBacklog ? [] : this.backlogGroups.map((g) => ({ ...g, issues: g.issues.filter(match) })).filter((g) => g.issues.length);
+    const empty = form ? null : this.error || (this.loading && !this.mine.length ? "Loading…"
+      : q && !groups.length && !backlogGroups.length ? "No matches" : !this.mine.length ? "No open issues assigned to you"
       : !groups.length ? (picked.size ? "None of your issues match the filter" : "No issues in the current sprint") : null);
-    // The popover's statuses: those of the issues the sprint filter leaves (to do, then in progress, by name), with
+    // The popover's statuses: those of the issues the sprint filter leaves (in Jira's board order), with
     // counts, plus picked ones no issue has now so they can be unpicked. At most ~150 issues, only while it's open.
     let statuses = [];
     if (this.filterOpen && !form) {
       const seen = new Map();
-      for (const issue of [...inSprint.flatMap((g) => g.issues), ...(this.current ? [] : this.backlog)]) {
+      for (const issue of [...this.mine.filter(inCurrent), ...(showBacklog ? this.backlog : [])]) {
         const st = issue.fields.status, name = st?.name;
         if (!name) continue;
-        if (!seen.has(name)) seen.set(name, { name, cat: st.statusCategory?.key, count: 0 });
+        if (!seen.has(name)) seen.set(name, { name, cat: st.statusCategory?.key, pos: this.statusPos(st), count: 0 });
         seen.get(name).count++;
       }
-      for (const name of picked) if (!seen.has(name)) seen.set(name, { name, cat: null, count: 0 });
-      const order = (cat) => cat === "new" ? 0 : cat === "indeterminate" ? 1 : cat === "done" ? 2 : 3;
-      statuses = [...seen.values()].sort((a, b) => order(a.cat) - order(b.cat) || a.name.localeCompare(b.name));
+      for (const name of picked) if (!seen.has(name)) seen.set(name, { name, cat: null, pos: this.statusPos(null), count: 0 });
+      // As Jira's board shows them (see statusPos).
+      statuses = [...seen.values()].sort((a, b) => a.pos - b.pos || a.name.localeCompare(b.name));
     }
-    const filterTip = !filtered ? "Filter by sprint and status"
+    const filterTip = !filtered ? "Sort, grouping, backlog, sprint and status filters"
       : [this.current ? "Current sprint only" : null, picked.size ? `Status: ${[...picked].join(", ")}` : null].filter(Boolean).join("\n");
     const iconButton = (id, icon, tip, onClick, spin = false) => div().id(id).size(24).flex().items_center().justify_center().rounded(6).cursor_pointer()
       .text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip(tip).on_click(onClick).child(svg(icon).size(14).when(spin, (s) => s.spin(900)));
@@ -627,11 +754,10 @@ export default class Jira extends View {
           .when(Boolean(empty), (e) => e.child(div().p(8).text_color(this.error ? t.ansi1 : t.dim).child(empty)))
           .when(!form, (e) => e
             .children(groups.flatMap((g) => [this.groupHeader(g.name, g.issues.length, t), ...g.issues.map((issue) => this.issueRow(issue, t, "mine"))]))
-            // The project backlog, set apart from my issues by a rule.
-            .when(backlog.length > 0, (e) => e
+            // The project backlogs, set apart from my issues by a rule.
+            .when(backlogGroups.length > 0, (e) => e
               .child(div().flex_none().mt(8).mx(8).h(1).bg(t.border))
-              .child(this.groupHeader(`${project} backlog`, backlog.length, t))
-              .children(backlog.map((issue) => this.issueRow(issue, t, "backlog"))))))
+              .children(backlogGroups.flatMap((g) => [this.groupHeader(g.name, g.issues.length, t), ...g.issues.map((issue) => this.issueRow(issue, t, "backlog"))])))))
         .child(Scrollbar.vertical("jira-list").absolute().inset_0()))
       .when(this.filterOpen && !form, (e) => e.child(this.filterView(t, statuses)))
       .when(Boolean(this.menu), (e) => e.child(this.menuView(t)));

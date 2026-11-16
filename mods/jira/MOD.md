@@ -1,6 +1,6 @@
 ---
 name: jira
-summary: Panel with my open Jira issues by sprint and the project backlog
+summary: Panel with my open Jira issues (grouped by sprint or status, sorted by date) and optional project backlogs
 source: https://github.com/gandriyko/herdr-app-config/tree/main/mods/jira
 install: copy the folder mods/jira into ~/.config/herdr-app/mods/jira
 place: none
@@ -11,7 +11,7 @@ commands: [tab.new (an agent session for a task in the current folder), space.ne
 ---
 
 ## What it does
-Lists my open Jira issues grouped by sprint plus the project backlog; the filter button next to search opens a popover with "Current sprint only" (no other sprints, no backlog) and a checkbox per status found in the loaded issues (To Do, In Progress, QA, …, with counts; none checked = all); the button shows how many filters are on. Click opens the issue in the browser; right-click copies the task ID or starts an agent session.
+Lists my open Jira issues plus the backlog of one or more projects (keys comma-separated, e.g. `DA, OPS`; one section per project). The filter button next to search opens a popover with Sort (Updated or Created, newest first, my issues and backlogs; in a sprint group in-progress issues still come first), Group by (Sprint, Status, Parent — the epic of a story/task or the issue of a sub-task, from Jira's `parent` field, "No parent" last — or None; my issues), "Show project backlog" (off = its request is not made), "Current sprint only" (no other sprints, no backlog) and a checkbox per status found in the loaded issues (To Do, In Progress, QA, …, with counts; none checked = all); the button shows how many filters are on. Each row shows the issue type's icon (Jira's own, see Settings and data; else the mod's, picked by the type's name: sub-task, bug, story, epic, customer ticket, PM/QA, security, investigation, else task), the key, the age since creation ("today", "5d ago") and the status. Click opens the issue in the browser; right-click copies the task ID or starts an agent session.
 
 The row's terminal button (and "Start <agent> session…" in the menu) opens a "Start session" dialog for the focused pane's folder (else the active space's) with an editable branch name (`<key>-<first words of the title>`) and base branch (origin's default), and two choices:
 - New worktree (default): a worktree for the branch next to the main checkout, then a space there running the agent with the task.
@@ -23,11 +23,15 @@ Outside a git repo the dialog only starts the agent there with `<key>: <title>` 
 ## Files
 - main.js: UI, Jira requests, Keychain access, settings form.
 - jira.svg, refresh.svg, session.svg, settings.svg, filter.svg, check.svg: icons.
+- type-*.svg (task, bug, story, epic, subtask, customer, pmqa, security, investigation): fallback issue type icons, colored outlines like Jira's (full color, via image()).
 - gpui-kit.d.ts, jsconfig.json: editor typings only.
 
 ## Settings and data
 - Keychain service `herdr-jira` (account = email, password = API token), via `security`.
-- Shared state `jira.settings` ({ site, project, base }).
+- Shared state `jira.settings` ({ site, project ("DA, OPS"), base, agent, agentName, sort ("updated" | "created"), groupBy ("sprint" | "status" | "parent" | "none"), backlog (false = hidden) }).
+- Status order (status groups, the status list in the filter): the columns of each project's board, left to right, read once per session from `GET /rest/agile/1.0/board?projectKeyOrId=<key>` and `/board/<id>/configuration` (first scrum board, else first board; the saved projects and those of my issues, at most 5). Statuses on no board go after them: to do, in progress, done, then by name. A token with scopes also needs read:board-scope:jira-software and read:board-scope.admin:jira-software for this; without them the fallback order is used.
+- `data/jira/types/<type id>-<avatar id>.svg`: Jira's issue type icons (the type's `iconUrl`, fetched with the credentials through the API base), saved once and kept across restarts; after a refresh, types not seen this session are looked up. Only SVG is kept (Herdr's fetch reads text); a PNG icon or a failed fetch falls back to the mod's own. Delete the folder to fetch them again.
+- Fetches the 100 latest-updated of my issues and the top 100 (by rank) of the backlogs, then sorts them locally.
 - `localStorage` `current` ("1" / "0"): the current-sprint filter; `statuses` (JSON list of status names, at most 50): the status filter.
 
 ## Notes

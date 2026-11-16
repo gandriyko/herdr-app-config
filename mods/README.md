@@ -24,7 +24,7 @@ when one of them is absent.
 | [changes-copy](changes-copy/MOD.md) | Changes panel (clone of changes) with list/tree views, side-by-side diff tab and AI commit messages |
 | [files-copy](files-copy/MOD.md) | File tree (clone of files, dot files hidden behind a toggle, a filter input that keeps the tree) that opens a file in its own tab; in Python files ⌘-hover underlines a name, ⌘-click jumps to its definition (centred) via jedi, ⌘[ / ⌘] go back and forward. |
 | [history](history/MOD.md) | Search and read past agent sessions (Claude, Codex, ...) via the human-history tool, with resume |
-| [jira](jira/MOD.md) | Panel with my open Jira issues by sprint and the project backlog |
+| [jira](jira/MOD.md) | Panel with my open Jira issues (grouped by sprint or status, sorted by date) and optional project backlogs |
 | [prs](prs/MOD.md) | Panel listing my (or all) open GitHub PRs for the focused repo, with detail, approve, create-PR and AI review/description. |
 | [status-copy](status-copy/MOD.md) | Status bar piece showing the active space's git branch, a keep-awake button and a command-palette hint. |
 | [tabs-copy](tabs-copy/MOD.md) | Top tab bar with space tabs, side-panel toggle buttons and window controls. |
