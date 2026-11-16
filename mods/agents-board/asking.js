@@ -3,7 +3,10 @@
 // done -> idle (the person looked) or a new terminal title means the screen may have changed.
 // Pure helpers at module scope; the tracker's state lives in the instance the view creates in init().
 
-const MENU = [/Enter to confirm/, /Esc to cancel/, /^\s*[❯>]\s*\d+\.\s/m, /\(y\/n\)|\[y\/N\]|\[Y\/n\]/i];
+// A menu footer phrase starts its line or follows a "·", and a y/n prompt ends a line, so text that merely
+// quotes them (a diff, a reply) doesn't count.
+export const FOOTER = /(?:^|·)\s*(?:Enter to (?:confirm|select)|Esc to cancel)\b/m;
+const MENU = [FOOTER, /^\s*[❯>]\s*\d+\.\s/m, /(?:\(y\/n\)|\[y\/N\]|\[Y\/n\])\s*$/im];
 const BORDER = /^\s*[─━]{10,}\s*$/;
 const MENU_LINES = 14;
 const MAX_ENTRIES = 200;

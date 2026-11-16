@@ -1,14 +1,13 @@
 // Pure parsers for replying from the board: they read the plain text of `hc read <address>`.
 // No state here; the view keeps only the parsed result (suggestion, options), never the screen.
 
-import { isAsking } from "./asking.js";
+import { FOOTER, isAsking } from "./asking.js";
 
 const BORDER = /^\s*[─━]{10,}\s*$/;
 const OPTION = /^\s*[❯>]?\s*(\d{1,2})\.\s+(\S.*?)\s*$/;
 const PROMPT = /^\s*[❯>]\s?(.*)$/;
 const MENU_LINES = 14;
 const MAX_OPTIONS = 12;
-const FOOTER = /Enter to (?:select|confirm)|Esc to cancel/;
 const TAB_MARK = /[☐✔☑■✓]/;
 const FREE_TEXT = /^(?:type something|other)\b[.…]*$/i;
 const OPTION_RE = /^\s*(?:[❯>]\s*)?(\d+)\.\s+(.+?)\s*$/;
@@ -129,7 +128,7 @@ export function parseQuestion(text) {
   let first = -1;
   let tabs = null;
   // A menu shows its own footer ("Esc to cancel", "Enter to select"); its first option sits right above it.
-  const footer = lines.findLastIndex((l) => /Esc to cancel|Enter to (confirm|select)/.test(l));
+  const footer = lines.findLastIndex((l) => FOOTER.test(l));
   if (footer > 0 || isAsking(text)) {
     for (let i = (footer > 0 ? footer : lines.length) - 1; i >= Math.max(0, lines.length - 40); i--) {
       const m = OPTION.exec(lines[i]);
