@@ -7,24 +7,26 @@ place: none
 needs: [gh, git, hc]
 shared_keys: [agents-copy.sort, agents-copy.filter, agents-copy.remind]
 reads_keys: [agents.sort (legacy fallback for agents-copy.sort), sidebar.width, sidebar.collapsed]
-commands: [pane.focus, terminal.pin, terminal.peek, layout.resize, mod.open agents-copy (its own sort and filter popups), mod.open agents-board (header button)]
+commands: [pane.focus, terminal.pin, terminal.peek, terminal.keep, layout.resize, mod.open agents-copy (its own sort and filter popups), mod.open agents-board (header button)]
 ---
 
 ## What it does
 Lists agents like the shipped `agents` panel, in Priority or Grouped by space, with sub-agent trees, pins and a narrow rail mode. Cloned from agents 0.1.15.
 
-- Cards: every agent, in every state, is the same card (rounded, raised background, 1px border). Left column: the program icon with the status glyph under it (a fixed 16 px slot, empty when idle, so all cards share a minimum height). Glyph: spinner when working, a red circle with a pulsing `?` when blocked, a 10 px accent dot with a soft ring when done and unseen (the unread mark), none when idle (seen cards are not dimmed). Line 1: space name (semibold), dim `/ tab` only when the person named the tab and it differs from line 2 and from the program name, time in state on the right (hover shows the pin button). Line 2: the agent's report (terminal `report`, else its title, else the tab name if a person named it; with none, the program name in dim text), wraps up to two lines, then cut off. Every card is two lines: the PR pill sits in line 1 right after the name. Blocked cards are red-tinted with red text; idle (seen) cards are dimmed. No branch is shown. Sub-agents sit inside their parent's card.
-- Priority view: groups Needs you, Working, Done (colored dot, title, count); idle agents are cards without the unread dot at the end of Done. Grouped view uses the same cards under the space headers.
+- Cards: every agent, in every state, is the same card (rounded, raised background, 1px border). Left column: the program icon with the status glyph under it (a fixed 16 px slot, empty when idle, so all cards share a minimum height). Glyph: spinner when working, a red circle with a pulsing `?` when blocked, a check in a 16 px accent circle when done and unseen (the unread mark), none when idle (seen cards are not dimmed). Line 1: space name (semibold), dim `/ tab` only when the person named the tab and it differs from line 2 and from the program name, time in state on the right (hover shows the pin button). Line 2: the agent's report (terminal `report`, else its title, else the tab name if a person named it; with none, the program name in dim text), wraps up to two lines, then cut off. Every card is two lines: the PR pill sits in line 1 right after the name. Blocked cards are red-tinted with red text; idle (seen) cards are dimmed. No branch is shown. Sub-agents sit inside their parent's card.
+- Priority view: groups Needs you, Working, Done (colored dot, title, count); idle agents are cards without the unread check at the end of Done. Grouped view uses the same cards under the space headers.
 
-- PR chip: a small pill in line 1 after the name with `#<n>` and a check glyph (red failing, green passing, yellow pending, grey none). Click opens the PR in the browser (`gh pr view --web`). No chip without an open PR, for agents on other machines, or in rail mode.
+- PR chip: a small pill in line 1 after the name with `#<n>` and a check glyph (red failing, green passing, yellow pending, grey none). Click opens the PR in the browser (`gh pr view --web`). No chip without an open PR, for agents on other machines, or in rail mode. The PR is found by the agent's folder and branch, so agents in the same folder share it; when the branch names a Jira key (e.g. `DA-20457-…`) and some of those agents mention the key (title, report, tab or name, case-insensitive), only they get the chip (and match the PR filter). If none mentions it, all keep the chip.
 - Filter (funnel button in the header): one space or all, and PR: Any / Has PR / Checks failing / No PR. An active filter shows a chip with a clear button and an accent-colored icon. It applies to both views and to the order used by agent.next/prev.
 - Asking: an agent that finished (done or idle) on a choice menu counts as blocked: Needs you group, red tint, pulsing `?`, ordered and reminded like a blocked one (its time counts from when it was detected). It stays so until the screen is re-read without a menu (turn, done-to-idle or title change) or it starts working.
+- Search (magnifier button in the header, not in rail mode): opens a box under the header, focused. Text filters (case-insensitive substring) by program, name, template, title, report, space and tab names, and the names of its sub-agents; it applies after the filter. Esc, the x, or a click on an agent or sub-agent row (going to it) closes it and clears the text. The space/PR filter is not reset.
+- Sub-agents without a pane (started with `hc run`) are rows under their parent. A click gives one a pane with `terminal.keep` (it lands in its parent's tab; the core may apply it a moment later), then focuses it after one-shot checks at 0.4 s and 1.6 s; if no pane appears or the keep fails, it is peeked (`terminal.peek`) instead. A sub-agent that already has a pane is focused.
 - Reminders: while an agent stays blocked (or asking), a repeat warning toast and the `blocked` sound come every 2, 5 (default) or 10 minutes (or off), set in the sort popup. Herdr's own first toast and sound are not duplicated. Not sent for the agent you are looking at in an active window. Several due at once give one toast naming the count, focusing the longest-waiting.
 
 ## Files
 - main.js: the view, popups, gh lookups, reminders.
 - asking.js: the asking detector and its read queue.
-- check.svg, columns.svg, chevron-down.svg, chevron-right.svg, clock.svg, filter.svg, layers.svg, pin.svg, pin-off.svg, spinner.svg, x.svg: icons.
+- check.svg, search.svg, columns.svg, chevron-down.svg, chevron-right.svg, clock.svg, filter.svg, layers.svg, pin.svg, pin-off.svg, spinner.svg, x.svg: icons.
 - gpui-kit.d.ts, jsconfig.json: editor typings only.
 
 ## Settings and data

@@ -1,7 +1,7 @@
 // Agents in grouped or priority views; parents take their most urgent sub-agent's place.
 
 import { View, div, image, svg } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
+import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { AskingTracker } from "./asking.js";
 import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, hc, openOverlay, closeOverlay, props, window, layout, exec, notify, playSound, settings } from "herdr";
 
@@ -76,6 +76,7 @@ const filterOf = () => {
   const f = shared("agents-copy.filter");
   return { space: typeof f?.space === "string" ? f.space : null, pr: PR_FILTERS.some((x) => x.id === f?.pr) ? f.pr : "any" };
 };
+const JIRA_KEY = /[A-Z][A-Z0-9]+-\d+/; // in an upper-cased branch name: da-20457-fix -> DA-20457
 const CHECKS_WORD = { fail: "failing", pass: "passing", pending: "pending", none: "none" };
 
 // The open PRs of the cwd's repo with the head commit's rollup state. gh caches the answer on disk
@@ -119,8 +120,8 @@ function icon(p, size, color) {
 function glyph(t, status, spinner) {
   if (status === "working") return svg(spinner).size(13).flex_none().text_color(t.working).spin(900);
   if (status === "blocked") return div().flex_none().size(16).rounded(8).bg(t.blocked).text_color(t.background).text_size(11).font_bold().flex().items_center().justify_center().loop("opacity", { from: 1, to: 0.55, period: 1400 }).child("?");
-  // Unread: a 10 px accent dot with a soft ring, the only mark that sets it apart from a seen card.
-  if (status === "done") return div().flex_none().size(10).rounded(5).bg(t.accent).border_2().border_color(t.accent + "55").tooltip("Not seen yet");
+  // Unread: a check in an accent circle (same size as the "?"), the only mark that sets it apart from a seen card.
+  if (status === "done") return div().flex_none().size(16).rounded(8).bg(t.accent).text_color(t.background).flex().items_center().justify_center().tooltip("Finished, not seen yet").child(svg("mods/agents-copy/check.svg").size(11));
   return null;
 }
 
@@ -156,6 +157,14 @@ export default class Agents extends View {
     this.blocked = new Map(); // address -> { since, last }
     // Agents finished on a menu or a question count as blocked; one screen read per turn.
     this.asking = new AskingTracker(hc, () => this.live);
+    // Quick search: the header's magnifier opens a box under it; text filters by program, space, tab, title, report.
+    this.q = "";
+    this.searchOpen = false;
+    this.search = InputState.new({ placeholder: "Search agents" });
+    this.search.on("change", (_e, cx) => {
+      this.q = this.search.value().trim().toLowerCase();
+      cx.notify();
+    });
     cx.timer.every(30000, (cx) => {
       if (!this.live) return;
       const list = this.asking.apply(agents(), terminals(), cx);
@@ -168,6 +177,41 @@ export default class Agents extends View {
 
   close(cx) {
     this.live = false;
+    this.search?.release();
+  }
+
+  // Opens the search box and focuses it, or closes and clears it.
+  toggleSearch(cx) {
+    this.searchOpen = !this.searchOpen;
+    if (this.searchOpen) this.search.focus();
+    else {
+      this.search.set_value("");
+      this.q = "";
+    }
+    cx.notify();
+  }
+
+  // Going to an agent ends the search: the box closes and its text is cleared.
+  endSearch(cx) {
+    if (this.searchOpen) this.toggleSearch(cx);
+  }
+
+  // A sub-agent without a pane (started with `hc run`) first gets one (terminal.keep, which the core
+  // may apply a moment later), then it is focused; if no pane shows up it is peeked instead.
+  openSub(addr, cx) {
+    try {
+      run("terminal.keep", { terminal: addr });
+    } catch {
+      return this.peek(addr);
+    }
+    const attempt = (n) =>
+      cx.timer.after(n ? 1200 : 400, () => {
+        if (!this.live) return;
+        if (panes().some((p) => p.terminal === addr)) run("pane.focus", { terminal: addr });
+        else if (n) this.peek(addr);
+        else attempt(1);
+      });
+    attempt(0);
   }
 
   // Blocked agents and since when; entries leave with the blocked state or the agent.
@@ -481,7 +525,8 @@ export default class Agents extends View {
       .hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => {
         cx.stop_propagation();
-        this.listed.has(k.address) ? run("pane.focus", { terminal: k.address }) : this.peek(k.address);
+        this.endSearch(cx);
+        this.listed.has(k.address) ? run("pane.focus", { terminal: k.address }) : this.openSub(k.address, cx);
       })
       .children(s.lines.map(l => div().self_start().mt(-4).w(9).h(17).mr(4).flex_none()
         .when(Boolean(l), el => el.border_l(1.5).border_color(t.input))
@@ -546,7 +591,24 @@ export default class Agents extends View {
       this.placesKey = placesKey;
       if (!collapsed) this.kick(cx);
     }
-    const prFor = (a) => this.prOf(placeOf.get(a.address));
+    // Agents sharing a folder and branch share its PR. When the branch names a Jira key (DA-20457) and some
+    // of those agents mention it (title, report, tab, name), only they get the chip; if none does, all keep it.
+    const placeKey = (p) => p && `${p.cwd}\n${p.branch}`;
+    const byPlace = new Map();
+    for (const a of list) {
+      const k = placeKey(placeOf.get(a.address));
+      if (k) byPlace.set(k, [...(byPlace.get(k) ?? []), a]);
+    }
+    const mentions = (a, key) =>
+      [a.title, a.tab_name, a.name, termBy.get(a.address)?.report, termBy.get(a.address)?.title].filter(Boolean).join("\n").toUpperCase().includes(key);
+    const prFor = (a) => {
+      const p = placeOf.get(a.address);
+      const pr = this.prOf(p);
+      const key = pr && p.branch.toUpperCase().match(JIRA_KEY)?.[0];
+      const mates = key ? byPlace.get(placeKey(p)) ?? [] : [];
+      if (mates.length < 2 || !mates.some((m) => mentions(m, key))) return pr;
+      return mentions(a, key) ? pr : null;
+    };
 
     // The filter, before grouping. A space that's gone counts as none.
     const fl = filterOf();
@@ -559,6 +621,14 @@ export default class Agents extends View {
         const pr = prFor(a);
         return fl.pr === "any" || (fl.pr === "with" ? Boolean(pr) : fl.pr === "failing" ? pr?.c === "fail" : !pr);
       });
+    }
+    // Search: an agent matches by its own texts or a sub-agent's name.
+    const q = this.searchOpen ? this.q : "";
+    if (q) {
+      const text = (k) => [k.name, k.template, k.program?.name, k.title, k.report];
+      list = list.filter((a) =>
+        [...text(a), ...text(termBy.get(a.address) ?? {}), a.space_name, a.tab_name, ...treeOf(a.address).flatMap((s) => text(s.t))]
+          .filter(Boolean).join("\n").toLowerCase().includes(q));
     }
     const clearFilter = () => setShared("agents-copy.filter", { space: null, pr: "any" });
     const tabCounts = new Map();
@@ -704,7 +774,10 @@ export default class Agents extends View {
           else if (this.hovered === a.address) this.hovered = null;
           if (this.hovered !== was) cx.notify();
         })
-        .on_click(() => run("pane.focus", { pane: a.pane }));
+        .on_click((_e, cx) => {
+          this.endSearch(cx);
+          run("pane.focus", { pane: a.pane });
+        });
       const timeOrPin = this.hovered === a.address ? pin : Boolean(when) ? div().flex_none().flex().justify_end().whitespace_nowrap().overflow_hidden().text_size(11).text_color(a.status === "blocked" ? t.blocked : t.dim).child(duration(now - when)) : null;
       const picFold = (p) => div().id(`agent-fold-${a.address}`)
         .when(subs.length > 0, (el) => el.on_click((_e, cx) => {
@@ -848,6 +921,15 @@ export default class Agents extends View {
                     .tooltip("Clear filter")
                     .on_click(clearFilter)
                     .child(svg("mods/agents-copy/x.svg").size(10)))))
+                .child(
+                  div()
+                    .id("ag-search")
+                    .text_color(this.searchOpen ? t.accent : t.dim)
+                    .hover((s) => s.text_color(this.searchOpen ? t.accent : t.foreground))
+                    .on_click((_e, cx) => this.toggleSearch(cx))
+                    .tooltip(this.searchOpen ? "Close search" : "Search agents")
+                    .child(svg("mods/agents-copy/search.svg").size(14)),
+                )
                 .when(!collapsed, (el) => el.child(
                   div()
                     .id("ag-board")
@@ -881,9 +963,42 @@ export default class Agents extends View {
             ),
         ),
       )
+      .when(this.searchOpen && !collapsed, (el) =>
+        el.child(h_flex()
+          .id("ag-search-box")
+          .mx(8)
+          .mb(4)
+          .h(28)
+          .flex_none()
+          .px(8)
+          .gap(6)
+          .items_center()
+          .rounded(7)
+          .border_1()
+          .border_color(t.border)
+          .bg(t.background)
+          .on_key_down((e, cx) => {
+            if (e.key !== "escape") return;
+            this.toggleSearch(cx);
+            cx.stop_propagation();
+          })
+          .child(svg("mods/agents-copy/search.svg").size(13).flex_none().text_color(t.dim))
+          .child(Input.new(this.search).flex_1().h_full().text_size(12.5).text_color(t.foreground))
+          .child(div()
+            .id("ag-search-close")
+            .flex_none()
+            .p(2)
+            .rounded(3)
+            .text_color(t.dim)
+            .cursor_pointer()
+            .hover((s) => s.bg(t.hover).text_color(t.foreground))
+            .tooltip("Close search (Esc)")
+            .on_click((_e, cx) => this.toggleSearch(cx))
+            .child(svg("mods/agents-copy/x.svg").size(11)))),
+      )
       .when(list.length === 0 && unfiltered > 0 && !collapsed, (el) =>
         el.child(h_flex().px(12).py(6).gap(6).text_size(12).text_color(t.dim)
-          .child("No agents match the filter")
+          .child(q ? "No agents match the search" : "No agents match the filter")
           .child(div().id("ag-filter-none").cursor_pointer().text_color(t.accent).hover((s) => s.text_color(t.foreground)).on_click(clearFilter).child("Clear"))),
       )
       .when(unfiltered === 0 && !collapsed, (el) =>

@@ -57,8 +57,8 @@ function icon(p, size, color) {
 function glyph(t, status) {
   if (status === "working") return svg(ICONS + "spinner.svg").size(13).flex_none().text_color(t.working).spin(900);
   if (status === "blocked") return div().flex_none().size(16).rounded(8).bg(t.blocked).text_color(t.background).text_size(11).font_bold().flex().items_center().justify_center().loop("opacity", { from: 1, to: 0.55, period: 1400 }).child("?");
-  // Unread: a 10 px accent dot with a soft ring, the only mark that sets it apart from a seen card.
-  if (status === "done") return div().flex_none().size(10).rounded(5).bg(t.accent).border_2().border_color(t.accent + "55").tooltip("Not seen yet");
+  // Unread: a check in an accent circle (same size as the "?"), the only mark that sets it apart from a seen card.
+  if (status === "done") return div().flex_none().size(16).rounded(8).bg(t.accent).text_color(t.background).flex().items_center().justify_center().tooltip("Finished, not seen yet").child(svg(ICONS + "check.svg").size(11));
   return null;
 }
 
@@ -756,7 +756,7 @@ export default class Board extends View {
     const columns = [
       entriesOf("blocked").sort(byAt),
       entriesOf("working").sort(byAt),
-      // Unseen done first (unread dot), then seen (idle), each newest first.
+      // Unseen done first (unread check), then seen (idle), each newest first.
       [...entriesOf("done").sort(byNew), ...entriesOf("idle").sort(byNew)],
     ];
     // Visual order for the keys: a card, then its children, depth first.
