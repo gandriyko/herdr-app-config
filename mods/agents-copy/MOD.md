@@ -21,12 +21,14 @@ Lists agents like the shipped `agents` panel, in Priority or Grouped by space, w
 - Asking: an agent that finished (done or idle) on a choice menu counts as blocked: Needs you group, red tint, pulsing `?`, ordered and reminded like a blocked one (its time counts from when it was detected). It stays so until the screen is re-read without a menu (turn, done-to-idle or title change) or it starts working.
 - Search (magnifier button in the header, not in rail mode): opens a box under the header, focused. Text filters (case-insensitive substring) by program, name, template, title, report, space and tab names, and the names of its sub-agents; it applies after the filter. Esc, the x, or a click on an agent or sub-agent row (going to it) closes it and clears the text. The space/PR filter is not reset.
 - Sub-agents without a pane (started with `hc run`) are rows under their parent. A click gives one a pane with `terminal.keep` (it lands in its parent's tab; the core may apply it a moment later), then focuses it after one-shot checks at 0.4 s and 1.6 s; if no pane appears or the keep fails, it is peeked (`terminal.peek`) instead. A sub-agent that already has a pane is focused.
+- Last message (experiment): an eye button at the end of line 2 expands the card. One `hc read <address> --lines 0` (the visible screen) gives the last message: the person's prompt (`❯ ` line, labelled YOU) or the agent's reply (`⏺` block, tool calls skipped, labelled AGENT), whichever is lower above the input box, up to 12 lines, in a box under line 2 ("Loading…", "No message on screen" or "Could not read the screen" otherwise). While open it reads again when that agent's turn or status changes (no timer; one read at a time, a change meanwhile reads once more; the last good message stays on a failed read). One card is open at a time; the eye again, a press anywhere outside the open card, or a click on a card collapses it, and the text is dropped. Not for agents on other machines.
 - Reminders: while an agent stays blocked (or asking), a repeat warning toast and the `blocked` sound come every 2, 5 (default) or 10 minutes (or off), set in the sort popup. Herdr's own first toast and sound are not duplicated. Not sent for the agent you are looking at in an active window. Several due at once give one toast naming the count, focusing the longest-waiting.
 
 ## Files
 - main.js: the view, popups, gh lookups, reminders.
 - asking.js: the asking detector and its read queue.
-- check.svg, search.svg, columns.svg, chevron-down.svg, chevron-right.svg, clock.svg, filter.svg, layers.svg, pin.svg, pin-off.svg, spinner.svg, x.svg: icons.
+- last.js: pure parser of the last message on a screen, for the eye button.
+- check.svg, eye.svg, search.svg, columns.svg, chevron-down.svg, chevron-right.svg, clock.svg, filter.svg, layers.svg, pin.svg, pin-off.svg, spinner.svg, x.svg: icons.
 - gpui-kit.d.ts, jsconfig.json: editor typings only.
 
 ## Settings and data

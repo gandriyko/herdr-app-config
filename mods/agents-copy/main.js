@@ -3,6 +3,7 @@
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { AskingTracker } from "./asking.js";
+import { lastMessage } from "./last.js";
 import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, hc, openOverlay, closeOverlay, props, window, layout, exec, notify, playSound, settings } from "herdr";
 
 function find(node, id) {
@@ -160,6 +161,12 @@ export default class Agents extends View {
     // Quick search: the header's magnifier opens a box under it; text filters by program, space, tab, title, report.
     this.q = "";
     this.searchOpen = false;
+    this.expandSeq = 0;
+    this.expanded = null; // the card opened with its eye button
+    this.expandKey = null;
+    this.expandBusy = false;
+    this.expandAgain = false;
+    this.lastMsg = null; // { address, loading?, failed?, msg } for the open card; dropped on collapse
     this.search = InputState.new({ placeholder: "Search agents" });
     this.search.on("change", (_e, cx) => {
       this.q = this.search.value().trim().toLowerCase();
@@ -188,6 +195,63 @@ export default class Agents extends View {
       this.search.set_value("");
       this.q = "";
     }
+    cx.notify();
+  }
+
+  // The eye button: expands one card with the last message on its screen (one read per click), or
+  // collapses it. A press anywhere outside the open card, or going to an agent, collapses it too.
+  toggleExpand(addr, cx) {
+    const seq = ++this.expandSeq;
+    if (this.expanded === addr) {
+      this.expanded = null;
+      this.lastMsg = null;
+      return cx.notify();
+    }
+    this.expanded = addr;
+    this.lastMsg = { address: addr, loading: true, msg: null, key: null };
+    this.expandKey = null; // set by render: the agent's turn|status; a change re-reads
+    cx.notify();
+    this.readExpanded(addr, seq, cx);
+  }
+
+  // Reads the open card's screen. One read at a time; a turn/status change meanwhile reads once more.
+  // The last good message stays shown during a re-read and after a failed one.
+  readExpanded(addr, seq, cx) {
+    if (this.expandBusy) return void (this.expandAgain = true);
+    this.expandBusy = true;
+    cx.spawn(async (cx) => {
+      try {
+        do {
+          this.expandAgain = false;
+          const key = this.expandKey;
+          let msg = null;
+          let failed = false;
+          try {
+            const r = await hc(["read", addr, "--lines", "0"]);
+            if (r?.code === 0) msg = lastMessage(r.stdout);
+            else failed = true;
+          } catch {
+            failed = true;
+          }
+          if (!this.live || seq !== this.expandSeq || this.expanded !== addr) return;
+          const prev = this.lastMsg;
+          const next = failed && prev?.msg ? { ...prev, loading: false, key } : { address: addr, msg, failed, key };
+          if (JSON.stringify(next) !== JSON.stringify(prev)) {
+            this.lastMsg = next;
+            cx.notify();
+          }
+        } while (this.expandAgain && this.live && seq === this.expandSeq);
+      } finally {
+        this.expandBusy = false;
+      }
+    });
+  }
+
+  collapse(cx) {
+    if (!this.expanded) return;
+    this.expandSeq++;
+    this.expanded = null;
+    this.lastMsg = null;
     cx.notify();
   }
 
@@ -559,6 +623,15 @@ export default class Agents extends View {
     const spaceList = spaces();
     this.trackBlocked(list, Date.now());
     this.listed = new Map(list.map((a) => [a.address, a.status]));
+    // The open card follows its agent: a new turn or status re-reads its screen (render reruns on those).
+    if (this.expanded) {
+      const key = `${all.find((k) => k.address === this.expanded)?.turn}|${this.listed.get(this.expanded)}`;
+      if (this.expandKey === null) this.expandKey = key; // the first read is already running
+      else if (key !== this.expandKey) {
+        this.expandKey = key;
+        this.readExpanded(this.expanded, this.expandSeq, cx);
+      }
+    }
     this.migratePins(all);
     const termBy = new Map(all.map((k) => [k.address, k]));
     const shown = focused()?.agent;
@@ -774,7 +847,9 @@ export default class Agents extends View {
           else if (this.hovered === a.address) this.hovered = null;
           if (this.hovered !== was) cx.notify();
         })
+        .when(this.expanded === a.address, (el) => el.on_mouse_down_out((_e, cx) => this.collapse(cx)))
         .on_click((_e, cx) => {
+          this.collapse(cx);
           this.endSearch(cx);
           run("pane.focus", { pane: a.pane });
         });
@@ -800,6 +875,26 @@ export default class Agents extends View {
       if (!lead) { lead = tabTxt ?? (prog || label(a)); if (tabTxt) tabTxt = null; }
       const pr = prFor(a);
       const g = glyph(t, a.status, "mods/agents-copy/spinner.svg");
+      const open = this.expanded === a.address ? this.lastMsg : null;
+      const canPeek = !a.address.includes("/"); // the screen of another machine's agent isn't read
+      const eye = div()
+        .id(`ag-eye-${a.address}`)
+        .flex_none()
+        .p(2)
+        .rounded(4)
+        .text_color(open ? t.accent : t.dim)
+        .hover((s) => s.bg(t.hover).text_color(open ? t.accent : t.foreground))
+        .tooltip(open ? "Hide last message" : "Show last message")
+        .on_click((_e, cx) => {
+          cx.stop_propagation();
+          this.toggleExpand(a.address, cx);
+        })
+        .child(svg("mods/agents-copy/eye.svg").size(13));
+      const msgBox = !open ? null : v_flex().mt(2).p(6).gap(2).rounded(5).bg(t.background).border_1().border_color(t.border).max_h(240).overflow_hidden()
+        .when(Boolean(open.msg), (el) => el
+          .child(div().text_size(10).font_semibold().text_color(open.msg.who === "you" ? t.accent : t.dim).child(open.msg.who === "you" ? "YOU" : "AGENT"))
+          .children(open.msg.text.split("\n").map((l) => div().text_size(11).line_height("15px").text_color(t.muted).child(l || " "))))
+        .when(!open.msg, (el) => el.child(div().text_size(11).text_color(t.dim).child(open.loading ? "Loading…" : open.failed ? "Could not read the screen" : "No message on screen")));
       return hover(v_flex()
         .id(`ag-${a.address}`)
         .py(8)
@@ -830,7 +925,10 @@ export default class Agents extends View {
               .when(Boolean(machine), (el) => el.child(div().text_size(10).text_color(t.dim).child(machine)))
               .when(subs.length > 0, (el) => el.child(fold(a, subs)))
               .when(Boolean(timeOrPin), (el) => el.child(timeOrPin)))
-            .child(div().min_w(0).max_h(34).overflow_hidden().text_size(12).line_height("17px").text_color(report ? (blocked ? t.blocked : t.muted) : t.dim).child(report || prog || label(a)))))
+            .child(h_flex().gap(4).items_start()
+              .child(div().flex_1().min_w(0).max_h(34).overflow_hidden().text_size(12).line_height("17px").text_color(report ? (blocked ? t.blocked : t.muted) : t.dim).child(report || prog || label(a)))
+              .when(canPeek, (el) => el.child(eye)))
+            .when(Boolean(msgBox), (el) => el.child(msgBox))))
         .when(subs.length > 0 && !this.folded.has(a.address), (el) => el.children(subs.map((x) => this.subRow(t, x, shown, byPriority))));
     };
 
