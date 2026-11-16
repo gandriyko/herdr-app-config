@@ -501,6 +501,11 @@ export default class Jira extends View {
     this.stBranch = InputState.new({ value: branchFor(s.key, s.summary), placeholder: "branch name" });
     this.stBase = InputState.new({ value: "", placeholder: "base branch, e.g. master" });
     for (const i of [this.stBranch, this.stBase]) i.on("submit", (_e, cx) => this.start(cx));
+    // The history mod (optional, ours) installed here: offer to find the task's past sessions there instead.
+    cx.spawn(async (cx) => {
+      const home = (await exec("sh", ["-c", 'printf %s "$HOME"']).catch(() => null))?.stdout.trim();
+      if (home && await fs.exists(`${home}/.config/herdr-app/mods/history/main.js`).catch(() => false)) { this.st.history = true; cx.notify(); }
+    });
     cx.spawn(async (cx) => {
       const info = s.folder ? await gitInfo(s.folder, s.on) : null;
       if (info) {
@@ -579,6 +584,11 @@ export default class Jira extends View {
             .child(div().text_size(11).text_color(t.dim).truncate().child(where)))
         .when(Boolean(st.error), (e) => e.child(div().text_size(11).text_color(t.ansi1).child(st.error))))
       .child(h_flex().flex_none().px(16).py(12).gap(8).justify_end().border_t(1).border_color(t.border)
+        // history takes props().query as its search (prompts and answers) in the active space's project.
+        .when(Boolean(st.history), (e) => e.child(button("st-history", "Find in history", false, () => {
+          closeOverlay(props().overlay);
+          openOverlay({ mod: "history", kind: "dialog", width: 760, height: 0.85, props: { query: st.key } });
+        })).child(div().flex_1()))
         .child(button("st-cancel", "Cancel", false, () => closeOverlay(props().overlay)))
         .child(button("st-start", st.busy ? (st.mode === "worktree" ? "Creating worktree…" : "Starting…") : "Start", true, (_e, cx) => this.start(cx))));
   }
