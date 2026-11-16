@@ -22,6 +22,7 @@ when one of them is absent.
 | [agents-copy](agents-copy/MOD.md) | Sidebar agent list (clone of agents) with PR and checks chips, a space/PR filter and repeat reminders for agents still waiting. |
 | [branch-picker](branch-picker/MOD.md) | Overlay that lists local git branches in a tree and checks one out |
 | [changes-copy](changes-copy/MOD.md) | Changes panel (clone of changes) with list/tree views, side-by-side diff tab and AI commit messages |
+| [files-copy](files-copy/MOD.md) | File tree (clone of files, dot files hidden behind a toggle, a filter input that keeps the tree) that opens a file in its own tab; in Python files ⌘-hover underlines a name, ⌘-click jumps to its definition (centred) via jedi, ⌘[ / ⌘] go back and forward. |
 | [history](history/MOD.md) | Search and read past agent sessions (Claude, Codex, ...) via the human-history tool, with resume |
 | [jira](jira/MOD.md) | Panel with my open Jira issues by sprint and the project backlog |
 | [prs](prs/MOD.md) | Panel listing my (or all) open GitHub PRs for the focused repo, with detail, approve, create-PR and AI review/description. |
@@ -40,3 +41,4 @@ Keys are not prefixed with a mod name on purpose and must not be renamed. Each i
 | `wb.ai.models`, `wb.ai.use`, `wb.ai.project`, `wb.ai.localMigrated`, `wb.ai.projectMigrated` | wb-ai, prs, changes-copy (own copies of ai.js) | wb-ai, prs, changes-copy | defaults created (Claude model, empty projects) |
 | `wb.commit.gen` and unprefixed `ai.*`, `commit.gen` | old builds only | wb-ai, prs, changes-copy (migration) | `{}`, migration skipped |
 | `wb.diff.request` | changes-copy | wb-diff | `null`, nothing shown |
+| `files-copy.open` | files-copy (panel) | files-copy (file tab) | the tab keeps the file it was opened with |
