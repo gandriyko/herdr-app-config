@@ -151,6 +151,7 @@ export default class Agents extends View {
     this.common = new Map(); // cwd -> git common dir (or "" when not a repo)
     this.repos = new Map(); // common dir -> { cwd, at, next, asked: Set, def, defAt, prs: { branch: { n, c } } }
     this.places = []; // { cwd, branch } of the listed agents
+    this.wasWorking = new Set(); // addresses working at the last render
     this.prJson = "{}";
     this.busy = false;
     this.again = false;
@@ -674,6 +675,16 @@ export default class Agents extends View {
     }
     const mentions = (a, key) =>
       [a.title, a.tab_name, a.name, termBy.get(a.address)?.report, termBy.get(a.address)?.title].filter(Boolean).join("\n").toUpperCase().includes(key);
+    // An agent with no PR chip that stops working may have just opened a PR: ask its repo now, not in 5 min.
+    const working = new Set(list.filter((a) => a.status === "working").map((a) => a.address));
+    let stopped = false;
+    for (const ad of this.wasWorking) {
+      const p = placeOf.get(ad);
+      const r = !working.has(ad) && p && !this.prOf(p) && this.repos.get(this.common.get(p.cwd));
+      if (r) { r.next = 0; stopped = true; }
+    }
+    this.wasWorking = working;
+    if (stopped && !collapsed) this.kick(cx);
     const prFor = (a) => {
       const p = placeOf.get(a.address);
       const pr = this.prOf(p);
