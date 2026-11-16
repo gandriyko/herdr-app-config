@@ -119,7 +119,8 @@ function icon(p, size, color) {
 function glyph(t, status, spinner) {
   if (status === "working") return svg(spinner).size(13).flex_none().text_color(t.working).spin(900);
   if (status === "blocked") return div().flex_none().size(16).rounded(8).bg(t.blocked).text_color(t.background).text_size(11).font_bold().flex().items_center().justify_center().loop("opacity", { from: 1, to: 0.55, period: 1400 }).child("?");
-  if (status === "done") return div().flex_none().size(8).rounded(4).bg(t.accent).tooltip("Not seen yet");
+  // Unread: a 10 px accent dot with a soft ring, the only mark that sets it apart from a seen card.
+  if (status === "done") return div().flex_none().size(10).rounded(5).bg(t.accent).border_2().border_color(t.accent + "55").tooltip("Not seen yet");
   return null;
 }
 
@@ -737,7 +738,6 @@ export default class Agents extends View {
         .border(1)
         .border_color(blocked ? t.blocked + "66" : t.border)
         .bg(blocked ? t.blocked + "14" : a.focused ? t.selected : t.raised)
-        .when(a.status === "idle", (el) => el.opacity(0.55))
         .cursor_pointer()
         .hover((s) => s.bg(blocked ? t.blocked + "22" : t.hover)))
         .child(h_flex()

@@ -57,7 +57,8 @@ function icon(p, size, color) {
 function glyph(t, status) {
   if (status === "working") return svg(ICONS + "spinner.svg").size(13).flex_none().text_color(t.working).spin(900);
   if (status === "blocked") return div().flex_none().size(16).rounded(8).bg(t.blocked).text_color(t.background).text_size(11).font_bold().flex().items_center().justify_center().loop("opacity", { from: 1, to: 0.55, period: 1400 }).child("?");
-  if (status === "done") return div().flex_none().size(8).rounded(4).bg(t.accent).tooltip("Not seen yet");
+  // Unread: a 10 px accent dot with a soft ring, the only mark that sets it apart from a seen card.
+  if (status === "done") return div().flex_none().size(10).rounded(5).bg(t.accent).border_2().border_color(t.accent + "55").tooltip("Not seen yet");
   return null;
 }
 
@@ -755,7 +756,7 @@ export default class Board extends View {
     const columns = [
       entriesOf("blocked").sort(byAt),
       entriesOf("working").sort(byAt),
-      // Unseen done first, then seen (idle, dimmed), each newest first.
+      // Unseen done first (unread dot), then seen (idle), each newest first.
       [...entriesOf("done").sort(byNew), ...entriesOf("idle").sort(byNew)],
     ];
     // Visual order for the keys: a card, then its children, depth first.
@@ -1013,7 +1014,6 @@ export default class Board extends View {
         .border_1()
         .border_color(on ? t.accent : blocked ? t.blocked + "66" : t.border)
         .cursor_pointer()
-        .when(a.status === "idle", (el) => el.opacity(0.55))
         .hover((s) => s.bg(blocked ? t.blocked + "22" : t.hover))
         .on_click((_e, cx) => (this.justDismissed() ? null : this.go(a, cx)))
         .child(
