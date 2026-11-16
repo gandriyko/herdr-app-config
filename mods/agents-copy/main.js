@@ -666,15 +666,19 @@ export default class Agents extends View {
       if (!collapsed) this.kick(cx);
     }
     // Agents sharing a folder and branch share its PR. When the branch names a Jira key (DA-20457) and some
-    // of those agents mention it (title, report, tab, name), only they get the chip; if none does, all keep it.
+    // of those agents mention it (title, report, tab, name), only they get the chip; if none does, those that
+    // mention another Jira key (DA-20409 on branch DA-20473-…) lose it and the rest keep it.
     const placeKey = (p) => p && `${p.cwd}\n${p.branch}`;
     const byPlace = new Map();
     for (const a of list) {
       const k = placeKey(placeOf.get(a.address));
       if (k) byPlace.set(k, [...(byPlace.get(k) ?? []), a]);
     }
-    const mentions = (a, key) =>
-      [a.title, a.tab_name, a.name, termBy.get(a.address)?.report, termBy.get(a.address)?.title].filter(Boolean).join("\n").toUpperCase().includes(key);
+    const textOf = (a) =>
+      [a.title, a.tab_name, a.name, termBy.get(a.address)?.report, termBy.get(a.address)?.title].filter(Boolean).join("\n").toUpperCase();
+    const mentions = (a, key) => textOf(a).includes(key);
+    const JIRA_KEYS = new RegExp(JIRA_KEY.source, "g");
+    const mentionsOther = (a, key) => (textOf(a).match(JIRA_KEYS) ?? []).some((k) => k !== key);
     // An agent with no PR chip that stops working may have just opened a PR: ask its repo now, not in 5 min.
     const working = new Set(list.filter((a) => a.status === "working").map((a) => a.address));
     let stopped = false;
@@ -690,8 +694,9 @@ export default class Agents extends View {
       const pr = this.prOf(p);
       const key = pr && p.branch.toUpperCase().match(JIRA_KEY)?.[0];
       const mates = key ? byPlace.get(placeKey(p)) ?? [] : [];
-      if (mates.length < 2 || !mates.some((m) => mentions(m, key))) return pr;
-      return mentions(a, key) ? pr : null;
+      if (mates.length < 2) return pr;
+      if (mates.some((m) => mentions(m, key))) return mentions(a, key) ? pr : null;
+      return mentionsOther(a, key) ? null : pr;
     };
 
     // The filter, before grouping. A space that's gone counts as none.
