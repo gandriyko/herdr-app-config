@@ -58,6 +58,10 @@ another mod is removed, cloned or updated.
   Reference assets by its own path (`mods/<name>/icon.svg`); copy an icon it needs (a spinner, a
   branch icon) into its folder instead of pointing at another mod's (`mods/workspace-chrome/…`,
   `mods/pane/…`): shipped mods are replaced on every start and may drop the file.
+- **Copied helpers stay identical.** Helper modules copied between our mods (`highlight.js`, `ai.js`)
+  are the same file in every copy. When you change one, find the others
+  (`git ls-files mods | rg '/highlight\.js$'`) and copy the change into all of them in the same
+  commit; check each mod that uses it with `herdr-app check`. Icons may differ per mod.
 - **Namespaced shared state.** Every `setShared` key starts with the mod's name
   (`jira.settings`, `prs.changed`). Reading another mod's key is a documented contract: name it
   in a comment at the read, and the mod must still work when the key is missing.
