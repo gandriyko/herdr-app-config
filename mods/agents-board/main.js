@@ -1,7 +1,7 @@
 // Agents as a kanban: Needs you, Working, Done (unseen).
 
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, ScrollHandle } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, ScrollHandle, TextView } from "gpui-base";
 import { agents, terminals, panes, spaces, run, theme, settings, shared, setShared, closeOverlay, props, exec, hc } from "herdr";
 import { AskingTracker } from "./asking.js";
 import { isSelectMenu, parseOptions, parseQuestion, parseSuggestion, sameOptions } from "./reply.js";
@@ -79,6 +79,9 @@ function parseScreen(text) {
   return { ...p, mode: "screen", lines: tailLines(text) };
 }
 const RULE = /^[\s─━═\-_]*[─━═]{3,}[\s─━═\-_]*$/;
+// One screen line as HTML: escaped, leading and repeated spaces kept (single spaces still wrap), empty → one space.
+const textHtml = (l) =>
+  l.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/^ +| {2,}/g, (s) => "&nbsp;".repeat(s.length)) || "&nbsp;";
 const termByAddr = (terms, address) => terms.find((x) => x.address === address);
 const store = {
   get: (k) => {
@@ -133,6 +136,7 @@ export default class Board extends View {
     this.input.on("blur", () => (this.searchFocus = false));
     this.reply = null; // { address, mode, lines, question, detail, tabs, suggestion, options, select, typing, sending, error, input, want, busy, again, sig, loaded, stick } while a reply area is open
     this.replyFocus = false;
+    this.overText = false; // pointer over the reply text: presses go to the text selection, not to the panel
     this.replySeq = 0;
     this.input.focus();
     cx.timer.after(400, () => this.live && this.input.focus());
@@ -156,6 +160,7 @@ export default class Board extends View {
   dropReply() {
     this.replySeq++;
     this.replyFocus = false;
+    this.overText = false;
     const r = this.reply;
     this.reply = null;
     try {
@@ -889,7 +894,7 @@ export default class Board extends View {
       return v_flex()
         .id(`reply-area-${rp.address}`)
         .gap(4)
-        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_mouse_down("left", (_e, cx) => this.overText || cx.stop_propagation())
         .on_mouse_down_out((_e, cx) => this.dismissReply(cx))
         .on_click((_e, cx) => cx.stop_propagation())
         .when(rp.mode === "menu" && Boolean(rp.tabs?.length), (el) =>
@@ -941,9 +946,16 @@ export default class Board extends View {
     // is one thin divider, scrolled to the bottom after each change (requested now and once after layout).
     const textBox = (rp) => {
       const lines = rp.lines ?? [];
+      // Runs of text lines become one selectable block each (so they can be copied); a rule line stays a divider.
+      const blocks = [];
+      for (const l of lines) {
+        if (RULE.test(l)) blocks.push(null);
+        else if (typeof blocks.at(-1) === "string") blocks[blocks.length - 1] += "<br>" + textHtml(l);
+        else blocks.push(textHtml(l));
+      }
       if (rp.stick && lines.length) {
         rp.stick = false;
-        const last = lines.length; // the spacer after the last line, so the last (maybe re-wrapped) row shows whole
+        const last = blocks.length; // the spacer after the last block, so the last (maybe re-wrapped) row shows whole
         this.pvScroll.scroll_to_item(last);
         for (const ms of [50, 250]) {
           cx.timer.after(ms, (cx) => {
@@ -954,7 +966,8 @@ export default class Board extends View {
         }
       }
       // The outer box clips and keeps its own height, so the text never draws over the input below.
-      return div().w_full().flex_none().max_h(240).overflow_hidden().rounded(6).bg(t.background).border_1().border_color(t.border).mb(8).child(
+      // Hover is tracked so the panel's press handlers (stop_propagation, close on backdrop) let a drag select text.
+      return div().id(`reply-box-${rp.address}`).on_hover((h) => (this.overText = h)).w_full().flex_none().max_h(240).overflow_hidden().rounded(6).bg(t.background).border_1().border_color(t.border).mb(8).child(
        v_flex()
         .id(`reply-text-${rp.address}`)
         .w_full()
@@ -967,7 +980,7 @@ export default class Board extends View {
         .line_height("15px")
         .text_color(t.muted)
         .when(!lines.length, (el) => el.child(div().text_color(t.dim).child(rp.mode === "failed" ? "Could not read the screen" : rp.loaded ? "Empty screen" : "Loading…")))
-        .children(lines.map((l) => (RULE.test(l) ? div().h(1).my(4).bg(t.border) : div().child(l || " "))))
+        .children(blocks.map((b, i) => (b === null ? div().h(1).my(4).bg(t.border) : TextView.html(`reply-text-${rp.address}-${i}`, `<span>${b}</span>`).selectable(true))))
         .child(div().h(8).flex_none()),
       );
     };
@@ -1150,7 +1163,7 @@ export default class Board extends View {
       .p(18)
       .gap(12)
       .bg(t.canvas)
-      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_mouse_down("left", (_e, cx) => this.overText || cx.stop_propagation())
       .text_size(13)
       .on_key_down((e, cx) => {
         const k = e.key;
@@ -1295,7 +1308,7 @@ export default class Board extends View {
       })
       .on_mouse_move((e, cx) => this.dragTo(e, cx))
       .on_mouse_up("left", (_e, cx) => this.endDrag(cx))
-      .on_mouse_down("left", (_e, cx) => (this.justDismissed() ? null : this.close(cx)))
+      .on_mouse_down("left", (_e, cx) => (this.justDismissed() || this.overText ? null : this.close(cx)))
       .child(panel);
   }
 }
