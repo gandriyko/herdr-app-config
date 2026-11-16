@@ -664,14 +664,15 @@ export default class Jira extends View {
       .on_mouse_down("left", (_e, cx) => { this.selected = issue.key; exec("open", [this.url(issue.key)]); cx.notify(); })
       // The root's own right-press handler (it runs next) places the menu.
       .on_mouse_down("right", () => { this.menuKey = issue.key; })
-      // Two lines: the summary, then the key (dim), the status (its category's color) and the session button, small.
+      // Two lines: the summary, then the type icon, the key (dim), the status (its category's color), the age and the session button, small.
       .child(v_flex().flex_1().min_w(0)
         .child(div().truncate().child(f.summary ?? ""))
         .child(h_flex().gap(6).items_center().text_size(10)
           .child(image(this.typeIcons.get(f.issuetype?.id) ?? typeIcon(f.issuetype)).size(12).flex_none())
           .child(div().flex_none().text_color(t.dim).child(issue.key))
+          .child(div().min_w(0).truncate().text_color(color).child(f.status?.name ?? ""))
           .when(Boolean(f.created), (e) => e.child(div().flex_none().text_color(t.dim).child(daysAgo(f.created))))
-          .child(div().flex_1().min_w(0).truncate().text_color(color).child(f.status?.name ?? ""))
+          .child(div().flex_1())
           // Start a Claude session for this task; the press stops here, so the row doesn't open Jira.
           .child(div().id(`session-${section}-${issue.key}`).flex_none().size(16).flex().items_center().justify_center().rounded(4)
             .text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(`Start a ${this.settings().agentName ?? "Claude Code"} session for ${issue.key}`)
