@@ -199,6 +199,7 @@ export default class DiffView extends View {
     this.gen = 0; this.loadedKey = null; this.loadingKey = null; this.target = null;
     // A tab opened with its own file must not be overwritten by an older request still sitting in shared state.
     this.applied = Math.max(this.req?.ts ?? 0, props()?.path ? shared("wb.diff.request")?.ts ?? 0 : 0); this.thumbDrag = null;
+    this.sel = null; this.selecting = false;
     this.handle = cx.focus_handle();
     // Once its tab is really on screen it takes the keyboard (Alt+↑/↓ and Esc work without a click first).
     cx.timer.after(300, () => { if (this.shownTab()) this.handle.focus(); });
@@ -472,13 +473,21 @@ export default class DiffView extends View {
   // One source line as colored spans (same rule as the Changes panel: plain when long or unknown).
   spans(text, lang, t, marks) { return markSpans(!lang || text.length > 600 ? [{ text }] : highlight(text, lang, t), marks?.ranges, marks?.bg); }
   span(p) { return div().when(Boolean(p.color), (e) => e.text_color(p.color)).when(Boolean(p.bg), (e) => e.bg(p.bg)).child(p.text); }
-  cell(text, lang, t, marks) {
-    return h_flex().flex_1().min_w(0).h_full().items_center().overflow_hidden().whitespace_nowrap()
+  // The selected [a, b) of a line of `len` chars as a box behind the text. A box, not a cut into spans: cutting
+  // breaks ligatures and kerning, so the text jumped as the selection moved. b Infinity also shades the newline.
+  selBox(a, b, len, t) {
+    const end = Math.min(b, len), w = (end - a) * CHAR_W + (b === Infinity ? CHAR_W / 2 : 0);
+    return w > 0 ? div().absolute().top(0).bottom(0).left(a * CHAR_W).w(w).bg(t.selection) : null;
+  }
+  cell(text, lang, t, marks, sel) {
+    const box = sel && this.selBox(sel[0], sel[1], sel[2], t);
+    return h_flex().flex_1().min_w(0).h_full().items_center().overflow_hidden().whitespace_nowrap().relative()
+      .when(Boolean(box), (e) => e.child(box))
       .children(this.spans(text, lang, t, marks).map((p) => this.span(p)));
   }
 
   // The same line, cut into lines of `cols` characters (colors kept), each its own ROW-tall line.
-  wrapCell(text, lang, t, marks) {
+  wrapCell(text, lang, t, marks, sel) {
     const cols = this.cols, lines = [];
     let cur = [], n = 0;
     for (const p of this.spans(text, lang, t, marks)) {
@@ -490,19 +499,72 @@ export default class DiffView extends View {
       }
     }
     if (cur.length || !lines.length) lines.push(cur);
-    return v_flex().flex_1().min_w(0).children(lines.map((l) => h_flex().h(ROW).items_center().whitespace_nowrap()
-      .children(l.length ? l.map((p) => this.span(p)) : [div().child(" ")])));
+    // Each wrapped line L holds chars [L*cols, (L+1)*cols) and gets its own part of the selection box.
+    const box = (L) => {
+      if (!sel) return null;
+      const s = L * cols, last = L === lines.length - 1;
+      const a = Math.max(sel[0], s), b = last ? sel[1] : Math.min(sel[1], s + cols);
+      return a < b ? this.selBox(a - s, b - s, Math.max(0, Math.min(cols, sel[2] - s)), t) : null;
+    };
+    return v_flex().flex_1().min_w(0).children(lines.map((l, L) => { const bx = box(L); return h_flex().h(ROW).items_center().whitespace_nowrap().relative()
+      .when(Boolean(bx), (e) => e.child(bx))
+      .children(l.length ? l.map((p) => this.span(p)) : [div().child(" ")]); }));
   }
 
-  code(text, lang, t, marks) { return this.wrap ? this.wrapCell(text || " ", lang, t, marks) : this.cell(text || " ", lang, t, marks); }
+  // `sel`: [start, end) of the line's selection (end may be Infinity); its real length is added for the box.
+  code(text, lang, t, marks, sel) {
+    const s = sel && [sel[0], sel[1], (text ?? "").length];
+    return this.wrap ? this.wrapCell(text || " ", lang, t, marks, s) : this.cell(text || " ", lang, t, marks, s);
+  }
+
+  // Text selection: a drag in one code column (unified, left or right) from `a` to `b`, each { i: row, c: char };
+  // ⌘C copies it. Dropped when the rows are rebuilt (another file, a fold, a reveal, the layout).
+  // Code text of row i in a column; null for headers, separators, notes and a split row's empty side.
+  textOf(i, side) {
+    const r = this.rows[i];
+    if (!r || r.kind === "F" || r.kind === "@" || r.kind === "N") return null;
+    return side === "unified" ? r.text ?? "" : r[side]?.text ?? null;
+  }
+  // The character under a point of a column's content (x, y in px, y already scrolled).
+  // ponytail: columns from CHAR_W (monospace estimate, as the wrap width uses); off by a char if the font is wider.
+  // `floor`: the char the pointer is on (for a word), not the nearest gap between chars.
+  posAt(x, y, side, floor = false) {
+    const n = this.rows.length, i = Math.min(n - 1, this.indexAt(y)), text = this.textOf(i, side) ?? "";
+    const col = Math.max(0, Math[floor ? "floor" : "round"]((x - (side === "unified" ? 80 : 40)) / CHAR_W)); // past the line numbers and gaps
+    const sub = this.wrap ? Math.floor((y - this.geo().ys[i]) / ROW) : 0;
+    return { i, c: Math.min(text.length, this.wrap ? sub * this.cols + Math.min(col, this.cols) : col) };
+  }
+  // The selection in order, or null when there is none (or it belongs to rows no longer shown).
+  selection() {
+    const s = this.sel;
+    if (!s || s.rows !== this.rows || (s.a.i === s.b.i && s.a.c === s.b.c)) return null;
+    const [from, to] = s.a.i < s.b.i || (s.a.i === s.b.i && s.a.c <= s.b.c) ? [s.a, s.b] : [s.b, s.a];
+    return { side: s.side, from, to };
+  }
+  // Row i's selected [start, end) in a column; end Infinity runs to the line's end.
+  selRange(sel, i, side) {
+    if (!sel || sel.side !== side || i < sel.from.i || i > sel.to.i) return null;
+    const a = i === sel.from.i ? sel.from.c : 0, b = i === sel.to.i ? sel.to.c : Infinity;
+    return a < b ? [a, b] : null;
+  }
+  selectedText() {
+    const sel = this.selection();
+    if (!sel) return "";
+    const out = [];
+    for (let i = sel.from.i; i <= sel.to.i; i++) {
+      const text = this.textOf(i, sel.side);
+      if (text !== null) out.push(text.slice(i === sel.from.i ? sel.from.c : 0, i === sel.to.i ? sel.to.c : undefined));
+    }
+    return out.join("\n");
+  }
   num(n, t) { return div().w(30).flex_none().text_right().text_size(11).text_color(t.lineNo).child(n === null || n === undefined ? "" : String(n)); }
 
   // One row of a code column. Headers, notes and separators leave a blank of their height here: the
   // overlay draws them across the whole view.
-  row(i, t, name, width, h) {
+  row(i, t, name, width, h, sel) {
     const r = this.rows[i];
     if (r.kind === "F" || r.kind === "@" || r.kind === "N") return div().w(width).h(h).flex_none();
-    const lang = this.files[r.fi]?.lang;
+    const lang = this.files[r.fi]?.lang, sr = this.selRange(sel, i, name);
     // Changed rows get a red/green wash; the words that changed inside a removed/added pair a stronger one.
     // The word ranges are worked out the first time a row shows, and kept on it.
     if (name === "unified") {
@@ -510,14 +572,14 @@ export default class DiffView extends View {
       if ((del || add) && r.pair && r.words === undefined) { const w = wordDiff(del ? r.text : r.pair.text, del ? r.pair.text : r.text); r.words = w ? w[del ? 0 : 1] : null; r.pair.words = w ? w[del ? 1 : 0] : null; }
       return h_flex().w(width).h(h).flex_none().gap(10).when(del || add, (e) => e.bg(del ? t.delBg : t.addBg))
         .child(this.num(r.o, t)).child(this.num(r.n, t))
-        .child(this.code(r.text, lang, t, r.words ? { ranges: r.words, bg: del ? t.delWord : t.addWord } : null));
+        .child(this.code(r.text, lang, t, r.words ? { ranges: r.words, bg: del ? t.delWord : t.addWord } : null, sr));
     }
     const c = r[name], left = name === "left";
     if (r.kind === "x" && r.left && r.right && r.words === undefined) r.words = wordDiff(r.left.text, r.right.text);
     const on = r.kind === "x" && c;
     return h_flex().w(width).h(h).flex_none().gap(10).when(Boolean(on), (e) => e.bg(left ? t.delBg : t.addBg))
       .child(this.num(c?.num, t))
-      .child(this.code(c ? c.text : "", lang, t, on && r.words ? { ranges: r.words[left ? 0 : 1], bg: left ? t.delWord : t.addWord } : null));
+      .child(this.code(c ? c.text : "", lang, t, on && r.words ? { ranges: r.words[left ? 0 : 1], bg: left ? t.delWord : t.addWord } : null, sr));
   }
 
   // A file header: fold chevron, status, name, folder, added/removed counts. A click folds or opens the file.
@@ -618,9 +680,38 @@ export default class DiffView extends View {
     // A single new, untracked file is one block of added lines: nothing to switch or jump between.
     const whole = this.files.length === 1 && this.files[0].fresh;
     // Rows span at least the whole column, so tints don't stop where the longest line ends.
+    // A drag over a column selects its text; local positions are inside the horizontally scrolled content.
+    const sel = this.selection();
+    const at = (e, name, floor) => this.posAt(e.local_position.x / z, e.local_position.y / z + off, name, floor);
     const column = (name, w) => { const width = Math.max(w, colW); return div().id(`diff-${name}`).flex_1().min_w(0).h_full().overflow_x_scrollbar()
-      .child(div().min_w(width).h_full().relative()
-        .child(v_flex().absolute().left(0).top(g.ys[first] - off).children(Array.from({ length: Math.max(0, last - first) }, (_, k) => this.row(first + k, t, name, width, g.hs[first + k]))))); };
+      .child(div().min_w(width).h_full().relative().cursor_text()
+        .on_mouse_down("left", (e, cx) => {
+          if (!e.local_position) return;
+          const p = at(e, name, e.click_count >= 2), s = this.sel;
+          // Double click: the word under the pointer; triple: the whole line. No drag after either.
+          if (e.click_count >= 2) {
+            const text = this.textOf(p.i, name) ?? "";
+            let a = 0, b = text.length;
+            if (e.click_count === 2) {
+              const word = /[\p{L}\p{N}_$]/u, c = Math.min(p.c, Math.max(0, text.length - 1));
+              const same = word.test(text[c] ?? "") ? (ch) => word.test(ch) : (ch) => ch === text[c];
+              a = b = c;
+              while (a > 0 && same(text[a - 1])) a--;
+              while (b < text.length && same(text[b])) b++;
+            }
+            this.sel = { rows: this.rows, side: name, a: { i: p.i, c: a }, b: { i: p.i, c: b } };
+            this.selecting = false; cx.notify();
+            return;
+          }
+          this.sel = e.modifiers.shift && s && s.rows === this.rows && s.side === name ? { ...s, b: p } : { rows: this.rows, side: name, a: p, b: p };
+          this.selecting = true; cx.notify();
+        })
+        .on_mouse_move((e, cx) => {
+          if (!this.selecting || this.sel?.side !== name || this.sel.rows !== this.rows) return;
+          const p = at(e, name);
+          if (p.i !== this.sel.b.i || p.c !== this.sel.b.c) { this.sel.b = p; cx.notify(); }
+        })
+        .child(v_flex().absolute().left(0).top(g.ys[first] - off).children(Array.from({ length: Math.max(0, last - first) }, (_, k) => this.row(first + k, t, name, width, g.hs[first + k], sel))))); };
     // Headers, notes and separators across both columns, at their rows' places.
     const overlay = [];
     for (let i = first; i < last; i++) {
@@ -638,6 +729,7 @@ export default class DiffView extends View {
         const down = e.key === "down", up = e.key === "up";
         if ((down || up) && e.modifiers.alt && e.modifiers.shift) { this.jumpFile(down ? 1 : -1, cx); cx.stop_propagation(); }
         else if ((down || up) && e.modifiers.alt) { this.jump(down ? 1 : -1, cx); cx.stop_propagation(); }
+        else if (e.key === "c" && e.modifiers.platform) { const s = this.selectedText(); if (s) { cx.write_to_clipboard(s); cx.stop_propagation(); } }
         // Esc closes the diff tab on screen, and only a diff tab: anywhere else the key is left alone.
         else if (e.key === "escape") { const tab = this.shownTab(); if (tab) { run("tab.close", { id: tab, confirmed: true }); cx.stop_propagation(); } }
       })
@@ -664,8 +756,8 @@ export default class DiffView extends View {
         .child(div().id("diff-close").w(26).h(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Close").on_mouse_down("left", stop).on_click(() => { const tab = this.shownTab(); if (tab) run("tab.close", { id: tab, confirmed: true }); }).child(svg("mods/wb-diff/icons/close.svg").size(12))))
       .child(div().id("diff-body").flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(FONT)
         .on_size_change((s, cx) => { const h = s.height / z, w = s.width / z; if (h !== this.viewH || w !== this.viewW) { this.viewH = h; this.viewW = w; cx.notify(); } })
-        .on_hover((hovered) => { if (!hovered) this.thumbDrag = null; })
-        .on_mouse_up("left", () => { this.thumbDrag = null; })
+        .on_hover((hovered) => { if (!hovered) { this.thumbDrag = null; this.selecting = false; } })
+        .on_mouse_up("left", () => { this.thumbDrag = null; this.selecting = false; })
         .on_mouse_move((e, cx) => { if (this.thumbDrag) { scroll(this.thumbDrag.off + (e.position.y - this.thumbDrag.y) / z * max / Math.max(1, H - thumb)); cx.notify(); } })
         .on_scroll_wheel((ev, cx) => {
           if (Math.abs(ev.delta.y) < Math.abs(ev.delta.x)) return;
