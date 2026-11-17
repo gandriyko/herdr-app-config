@@ -1,6 +1,6 @@
 ---
 name: files-copy
-summary: File tree (clone of files) that opens a file in its own tab; in Python files ⌘-hover underlines a name and ⌘-click jumps to its definition via jedi.
+summary: File tree (clone of files) that opens a file in its own tab to view or edit (⌘S saves); in Python files ⌘-hover underlines a name and ⌘-click jumps to its definition via jedi.
 source: https://github.com/gandriyko/herdr-app-config/tree/main/mods/files-copy
 install: copy the folder mods/files-copy into ~/.config/herdr-app/mods/files-copy
 place: none
@@ -16,15 +16,27 @@ git marks. Files and folders whose names start with a dot are hidden; the `.*` b
 them. Cloned from the shipped `files` mod.
 
 The input above the tree filters it: every word typed must be in a file's path (case-insensitive), and the
-tree then shows only the matching files with their folders, all open (first 500 matches). The list comes
-from `git ls-files -co --exclude-standard` (tracked and untracked, not ignored), or `find` outside git
+tree then shows only the matching files with their folders, all open (first 500 matches). With dot files
+hidden, a dot file or folder still matches when a typed word is in its name (`env` finds `.env.local`). The list comes
+from `git ls-files -co --exclude-standard` (tracked and untracked) plus ignored files outside ignored folders
+(`git ls-files -oi --exclude-standard --directory`, so `.env.local` but not `node_modules/`), or `find` outside git
 (skips node_modules), at most 20,000 files; it is asked again on each refresh while a filter is typed.
 Esc or the × in the input clears the filter and brings back the normal tree. Each place (space and
 folder) keeps its own filter text, open folders and last file while the panel lives; switching spaces
 swaps them.
 
-A click on a file opens it in a tab: a read-only, syntax-highlighted view at full height. One tab per space
-is reused, as Changes does with its diff tab; the tab is named after the file.
+A click on a file opens it in a tab: a syntax-highlighted editor at full height. One tab per space is reused, as Changes does with its diff tab; the tab is named after the file.
+
+Editing: local files under 400,000 chars are editable (a remote space's or a truncated file is read-only).
+Unsaved edits put ● after the path and a Save button in the header; ⌘S or Save writes the file with
+`writeTextFile`, only if the file on disk is still what was opened (else the footer says it changed and the
+edits stay). Opening another file in the tab, going back/forward or closing the tab saves first; a failed
+save keeps the file open. A Markdown file (`.md`, `.markdown`) has a Preview button: the file rendered
+(read-only, text selectable, unsaved edits included); Source goes back to the editor.
+
+`.env*` files are drawn by the mod's own view too (below), coloured line by line with highlight.js's shell
+rules, so one unbalanced quote in a value (`PASS=it's`) colours only its own line, not the rest of the file
+as a multi-line grammar would; their Edit opens the editor as plain text for the same reason.
 
 Other files use the built-in editor. A `.py` file is drawn by the mod itself (fixed row height and
 character width, own scrolling), so it knows which name is under the pointer: with ⌘ held that name is
@@ -37,7 +49,8 @@ side buttons work only when mapped to ⌘[ / ⌘] (Logi Options+, SteerMouse, Be
 reports only the left, right and middle buttons. The view is read-only with a caret: a click places it, drag or Shift+click selects,
 double-click selects a word, triple-click a line; arrows (Shift extends), Home/End, PageUp/PageDown,
 ⌘←/⌘→ (line indent/end), ⌘↑/⌘↓ (file start/end) move it; ⌘A selects all and ⌘C copies. Typing changes
-nothing. The wheel scrolls. Other languages have no go-to-definition.
+nothing there: the Edit button in the header switches the file to the built-in editor (⌘-click definitions
+are off until the file is opened again). The wheel scrolls. Other languages have no go-to-definition.
 
 ## Files
 - main.js: the panel (tree), the file tab (same class, opened with props) and go-to-definition (the jedi

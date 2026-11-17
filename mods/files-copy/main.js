@@ -2,11 +2,11 @@
 // with props), one tab per space reused through shared("files-copy.open"), like changes-copy and wb-diff.
 // In the tab, Python files: ⌘-click (or F12) a name to jump to its definition (jedi via uvx).
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, Editor, EditorState, Input, InputState } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, run, shared, setShared, props } from "herdr";
+import { v_flex, h_flex, TextView, Editor, EditorState, Input, InputState } from "gpui-base";
+import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, run, shared, setShared, props } from "herdr";
 import { highlight, languageFor } from "./highlight.js";
 
-const PY = languageFor("x.py");
+const PY = languageFor("x.py"), ENV = languageFor(".env");
 // ponytail: CHAR_W assumes a monospace font at 0.6 em (JetBrains Mono, Menlo, SF Mono); another font puts the underline off.
 const FONT = 13, ROW = 20, CHAR_W = FONT * 0.6;
 
@@ -193,6 +193,12 @@ export default class Files extends View {
       try {
         let r = await exec("git", ["ls-files", "-z", "-co", "--exclude-standard"], { cwd, on, timeout: 10000 }).catch(() => null);
         let paths = r?.code === 0 ? r.stdout.split("\0") : null;
+        // Ignored files too (.env.local), but not the inside of ignored folders (node_modules/, build/): with
+        // --directory such a folder comes as one "dir/" entry, dropped here.
+        if (paths) {
+          const ig = await exec("git", ["ls-files", "-z", "-o", "-i", "--exclude-standard", "--directory"], { cwd, on, timeout: 10000 }).catch(() => null);
+          if (ig?.code === 0) paths.push(...ig.stdout.split("\0").filter(p => p && !p.endsWith("/")));
+        }
         if (!paths) {
           r = await exec("sh", ["-c", `find . -type f -not -path '*/.git/*' -not -path '*/node_modules/*' | head -n ${ALL}`], { cwd, on, timeout: 10000 });
           paths = r.stdout.split("\n").map(p => p.replace(/^\.\//, ""));
@@ -216,7 +222,8 @@ export default class Files extends View {
       const low = path.toLowerCase();
       if (!words.every(w => low.includes(w))) continue;
       const parts = path.split("/");
-      if (!this.hidden && parts.some(p => p.startsWith("."))) continue;
+      // Hidden files off: a dot part still shows when the query names it (".env" or "env" finds .env.local; "build" doesn't open .github/).
+      if (!this.hidden && parts.some(p => p.startsWith(".") && !words.some(w => p.toLowerCase().includes(w)))) continue;
       if (++count > MATCHES) { limited = true; break; }
       let node = root;
       for (const dir of parts.slice(0, -1)) node = node.dirs.get(dir) ?? node.dirs.set(dir, { dirs: new Map(), files: [] }).get(dir);
@@ -287,7 +294,9 @@ export default class Files extends View {
   // req: { root, on, path } (path relative to root, or absolute: a definition outside the folder).
   // at: { line, col } (0-based) to centre and mark, or { top, mark } when going back.
   open(req, cx, at = null) {
-    this.code?.release(); this.code = null; this.req = req; this.fileError = null; this.status = null;
+    // Unsaved edits are saved before another file replaces them (as IDEs do); a failed save keeps the file open.
+    if (this.dirty) { this.save(cx, (ok, acx) => { if (ok) this.open(req, acx, at); }); return; }
+    this.code?.release(); this.code = null; this.req = req; this.fileError = null; this.status = null; this.dirty = false; this.editable = false; this.preview = false;
     this.text = null; this.lines = null; this.spans = []; this.hover = null; this.mark = null; this.scrollY = 0; this.scrollX = 0; this.centre = null; this.longest = undefined;
     this.caret = this.anchor = { line: 0, col: 0 }; this.dragging = false; // the selection runs from anchor to caret
     cx.spawn(async cx => {
@@ -296,6 +305,8 @@ export default class Files extends View {
         if (this.req !== req) return;
         if (text === null) { this.fileError = "This file is no longer available"; return; }
         if (text.includes("\0")) { this.fileError = "Binary file · no text preview"; return; }
+        // Editable when whole and on this machine (writeTextFile writes local files only).
+        this.editable = text.length <= 400000 && !req.on;
         this.text = text = text.length > 400000 ? text.slice(0, 400000) + "\n… (file truncated)" : text;
         if (!this.pyView()) { this.makeEditor(); return; }
         // ponytail: a tab drawn as 4 spaces; jedi's column on such a line is off by 3 per tab (Python code rarely has them).
@@ -311,7 +322,9 @@ export default class Files extends View {
   }
 
   // Python is drawn by the mod (it knows which name is under the pointer); other files use the editor.
-  pyView() { return this.req.path.endsWith(".py"); }
+  // .env files too: highlight.js colours each line on its own, so an unbalanced quote in one value
+  // (PASS=it's) can't paint the rest of the file as a string, as the editor's bash grammar would.
+  pyView() { const name = this.req.path.split("/").pop(); return name.endsWith(".py") || name.startsWith(".env"); }
 
   caretToMark() { if (this.mark && this.lines?.[this.mark.line] !== undefined) this.caret = this.anchor = { line: this.mark.line, col: this.mark.start }; }
 
@@ -388,13 +401,44 @@ export default class Files extends View {
     cx.notify();
   }
 
+  // The file in the built-in editor: editable when `editable`, ⌘S (or the Save button) writes it.
   makeEditor() {
-    const t = theme(), path = this.req.path, ext = path.includes(".") ? path.split(".").pop() : "txt";
-    this.code = EditorState.new({ language: LANG[ext] ?? ext, readonly: true, value: this.text,
+    const t = theme(), path = this.req.path, name = path.split("/").pop(), ext = name.includes(".") ? name.split(".").pop() : "txt";
+    // .env while editing: plain text (see pyView: a grammar spanning lines breaks on one bad quote).
+    const language = name.startsWith(".env") ? "text" : LANG[ext] ?? ext;
+    this.code = EditorState.new({ language, readonly: !this.editable, value: this.text,
       font_family: settings().font_family, font_size: FONT,
       syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
+    this.code.on("change", (_e, cx) => {
+      const dirty = this.code.value() !== this.text;
+      if (dirty !== this.dirty) { this.dirty = dirty; if (dirty) this.status = null; cx.notify(); }
+    });
     this.code.focus();
   }
+
+  // Python opens in the mod's own view (⌘-click definitions); Edit switches it to the editor.
+  editPython(cx) { this.lines = null; this.spans = []; this.makeEditor(); cx.notify(); }
+
+  // Writes the editor's text, only if the file on disk is still what was read (else says so and keeps the edits).
+  // then(ok, cx) runs after.
+  save(cx, then) {
+    if (!this.code || !this.dirty || this.saving) { then?.(!this.dirty, cx); return; }
+    const req = this.req, value = this.code.value();
+    this.saving = true; cx.notify();
+    cx.spawn(async cx => {
+      let ok = false;
+      try { await writeTextFile(this.full(req.path), value, this.text); ok = true; }
+      catch (e) { this.status = `Not saved: ${String(e).includes("stale") ? "the file changed on disk since it was opened" : e}`; }
+      this.saving = false;
+      if (ok && this.req === req) { this.text = value; this.dirty = this.code?.value() !== value; this.status = "Saved"; }
+      cx.notify();
+      then?.(ok, cx);
+    });
+  }
+
+  // A tab closed with unsaved edits still writes them (same stale-file guard; the app gives close 250 ms).
+  // ponytail: no "discard changes?" prompt; add one if saving on close turns out unwanted.
+  async close() { if (this.tab && this.dirty && this.code) await writeTextFile(this.full(this.req.path), this.code.value(), this.text).catch(() => {}); }
 
   full(path) { return path.startsWith("/") ? path : `${this.req.root}/${path}`; }
 
@@ -407,7 +451,7 @@ export default class Files extends View {
   // The name under the pointer, from fixed row height and character width (monospace).
   wordUnder() {
     const m = this.mouse;
-    if (!m || !this.lines) return null;
+    if (!m || !this.lines || !this.req.path.endsWith(".py")) return null; // definitions: Python only
     const line = Math.floor((m.y + this.scrollY) / ROW), x = m.x - this.gutter + this.scrollX, col = Math.floor(x / CHAR_W);
     const text = this.lines[line];
     if (text === undefined || x < 0 || !/\w/.test(text[col] ?? "")) return null;
@@ -464,7 +508,7 @@ export default class Files extends View {
 
   // One line's colored pieces: the hovered name underlined, the marked one tinted, the selection shaded.
   lineSpans(i, t, sel) {
-    const spans = this.spans[i] ??= this.lines[i].length > 1000 ? [{ text: this.lines[i] }] : highlight(this.lines[i], PY, t);
+    const spans = this.spans[i] ??= this.lines[i].length > 1000 ? [{ text: this.lines[i] }] : highlight(this.lines[i], this.req.path.endsWith(".py") ? PY : ENV, t);
     const sr = sel && i >= sel.s.line && i <= sel.e.line ? { line: i, start: i === sel.s.line ? sel.s.col : 0, end: i === sel.e.line ? sel.e.col : Infinity } : null;
     const cuts = [this.hover, this.mark, sr].filter(w => w?.line === i);
     const inside = (w, a, b) => w?.line === i && a >= w.start && b <= w.end;
@@ -525,18 +569,28 @@ export default class Files extends View {
 
   renderTab(t) {
     const path = this.req.path, py = path.endsWith(".py");
+    const button = (id, label, tip, act) => div().id(id).flex_none().px(8).py(2).rounded(5).border_1().border_color(t.border).text_size(11)
+      .cursor_pointer().hover(s => s.bg(t.hover)).tooltip(tip).on_click((_e, cx) => act(cx)).child(label);
     return v_flex().id("files-tab").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
+      .on_key_down((e, cx) => { if (e.modifiers.platform && e.key.toLowerCase() === "s" && this.code) { this.save(cx); cx.stop_propagation(); } })
       .child(h_flex().h(36).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .when(this.back.length > 0 || this.fwd.length > 0, el => el
           .child(div().id("files-back").w(20).text_color(this.back.length ? t.muted : t.border).when(this.back.length > 0, e => e.cursor_pointer())
             .tooltip("Back (⌘[ or Ctrl+-)").on_click((_e, cx) => this.goBack(cx)).child("←"))
           .child(div().id("files-fwd").w(20).text_color(this.fwd.length ? t.muted : t.border).when(this.fwd.length > 0, e => e.cursor_pointer())
             .tooltip("Forward (⌘] or Ctrl+Shift+-)").on_click((_e, cx) => this.goForward(cx)).child("→")))
-        .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.dim).child(path))
+        .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.dim).child(path + (this.dirty ? " ●" : "")))
+        .when(this.dirty, el => el.child(button("files-save", this.saving ? "Saving…" : "Save", "Save (⌘S)", cx => this.save(cx))))
+        // Markdown: Preview shows it rendered (read-only, selectable; with unsaved edits as typed), Source goes back.
+        .when(Boolean(this.code) && /\.(md|markdown)$/i.test(path), el => el.child(button("files-preview", this.preview ? "Source" : "Preview",
+          this.preview ? "Back to the source" : "Show the rendered Markdown (read-only)", cx => { this.preview = !this.preview; cx.notify(); })))
+        .when(Boolean(this.lines) && this.editable, el => el.child(button("files-edit", "Edit", "Edit this file (⌘-click definitions are off while editing)", cx => this.editPython(cx))))
         .when(this.finding, el => el.child(h_flex().flex_none().gap(6).items_center().text_size(11).text_color(t.accent)
           .child(svg("mods/files-copy/spinner.svg").size(12).spin(900)).child("Finding definition…")))
-        .when(!this.finding && py, el => el.child(div().flex_none().text_size(11).text_color(this.cmd ? t.accent : t.dim).child("⌘-click: definition"))))
-      .child(this.code ? Editor.new(this.code).flex_1().min_h(0)
+        .when(!this.finding && py && !this.code, el => el.child(div().flex_none().text_size(11).text_color(this.cmd ? t.accent : t.dim).child("⌘-click: definition"))))
+      .child(this.code && this.preview ? div().id("files-md").flex_1().min_h(0).overflow_y_scrollbar().px(24).py(16)
+          .child(TextView.markdown(`files-md-${path}`, this.code.value()).selectable(true))
+        : this.code ? Editor.new(this.code).flex_1().min_h(0)
         : this.lines ? this.codeView(t)
         : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…"))
       .when(Boolean(this.status), el => el.child(div().flex_none().px(14).py(6).border_t(1).border_color(t.border).text_size(11).text_color(t.dim).truncate().child(this.status)));
