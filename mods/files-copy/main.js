@@ -2,11 +2,11 @@
 // with props), one tab per space reused through shared("files-copy.open"), like changes-copy and wb-diff.
 // In the tab, Python files: ⌘-click (or F12) a name to jump to its definition (jedi via uvx).
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, TextView, Editor, EditorState, Input, InputState } from "gpui-base";
+import { v_flex, h_flex, TextView, ScrollHandle, Editor, EditorState, Input, InputState } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, run, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
 import { highlight, languageFor } from "./highlight.js";
 
-const PY = languageFor("x.py"), ENV = languageFor(".env");
+const PY = languageFor("x.py");
 // ponytail: CHAR_W assumes a monospace font at 0.6 em (JetBrains Mono, Menlo, SF Mono); another font puts the underline off.
 const FONT = 13, ROW = 20, CHAR_W = FONT * 0.6;
 
@@ -87,8 +87,15 @@ export default class Files extends View {
     // Filter: every word must be in the file's path; the tree then shows only matches and their folders.
     this.query = ""; this.all = null; this.filtered = null;
     this.search = InputState.new({ placeholder: "Filter files" });
+    // ↑/↓ in the filter move `cursor` over the matching files (in the order shown), Enter opens it.
+    this.cursor = null; this.order = []; this.filterScroll = ScrollHandle.new();
+    // Enter (the input's submit): the file under the cursor, else the first match.
+    this.search.on("submit", (_e, cx) => {
+      const hit = this.query && (this.order.find(o => o.path === this.cursor) ?? this.order[0]);
+      if (hit) this.pick(hit.path, cx);
+    });
     this.search.on("change", (_e, cx) => {
-      this.query = this.search.value().trim().toLowerCase();
+      this.query = this.search.value().trim().toLowerCase(); this.cursor = null;
       if (this.query && !this.all && !this.listing) this.loadAll(this.context, cx);
       cx.notify();
     });
@@ -239,15 +246,21 @@ export default class Files extends View {
       out.push(this.row(path, name, true, true, depth, t));
       this.filteredRows(node.dirs.get(name), path, depth + 1, out, t);
     }
-    for (const name of [...node.files].sort((a, b) => a.localeCompare(b))) out.push(this.row(prefix ? `${prefix}/${name}` : name, name, false, false, depth, t));
+    for (const name of [...node.files].sort((a, b) => a.localeCompare(b))) {
+      const path = prefix ? `${prefix}/${name}` : name;
+      this.order.push({ path, index: out.length });
+      out.push(this.row(path, name, false, false, depth, t, path === this.cursor));
+    }
     return out;
   }
 
   // One file or folder row; in the filtered tree folders are always open and a click on one does nothing.
-  row(path, name, dir, open, depth, t) {
+  // `cur`: the filter's keyboard cursor is on it.
+  row(path, name, dir, open, depth, t, cur = false) {
     const mark = this.marks[`${this.root}/${path}`];
     return h_flex().id(`file-${path}`).h(28).flex_none().pl(8 + depth * 18).pr(8).gap(7).items_center().rounded(7).cursor_pointer().hover(s => s.bg(t.hover))
-      .when(!dir && path === this.file, el => el.bg(t.hover))
+      .when(!dir && path === this.file && !cur, el => el.bg(t.hover))
+      .when(cur, el => el.bg(t.selected))
       .on_click((_e, cx) => dir ? (!this.query && this.toggle(path, cx)) : this.pick(path, cx))
       .child(dir ? svg(`mods/files-copy/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
       .child(svg(`mods/files-copy/${dir ? "folder" : "file"}.svg`).size(14).flex_none().text_color(t.muted))
@@ -297,7 +310,8 @@ export default class Files extends View {
   open(req, cx, at = null) {
     // Unsaved edits are saved before another file replaces them (as IDEs do); a failed save keeps the file open.
     if (this.dirty) { this.save(cx, (ok, acx) => { if (ok) this.open(req, acx, at); }); return; }
-    this.code?.release(); this.code = null; this.req = req; this.fileError = null; this.status = null; this.dirty = false; this.editable = false; this.preview = false;
+    this.code?.release(); this.code = null; this.req = req; this.fileError = null; this.status = null; this.dirty = false; this.editable = false; this.lang = null;
+    this.preview = /\.(md|markdown)$/i.test(req.path); // Markdown opens rendered; Source shows the text
     this.text = null; this.lines = null; this.spans = []; this.hover = null; this.mark = null; this.scrollY = 0; this.scrollX = 0; this.centre = null; this.longest = undefined;
     this.caret = this.anchor = { line: 0, col: 0 }; this.dragging = false; // the selection runs from anchor to caret
     cx.spawn(async cx => {
@@ -325,7 +339,8 @@ export default class Files extends View {
   // Python is drawn by the mod (it knows which name is under the pointer); other files use the editor.
   // .env files too: highlight.js colours each line on its own, so an unbalanced quote in one value
   // (PASS=it's) can't paint the rest of the file as a string, as the editor's bash grammar would.
-  pyView() { const name = this.req.path.split("/").pop(); return name.endsWith(".py") || name.startsWith(".env"); }
+  // Markdown too: the editor shows it uncoloured (its theme has no colours for headings, code, links).
+  pyView() { const name = this.req.path.split("/").pop(); return /\.(py|md|markdown)$/i.test(name) || name.startsWith(".env"); }
 
   caretToMark() { if (this.mark && this.lines?.[this.mark.line] !== undefined) this.caret = this.anchor = { line: this.mark.line, col: this.mark.start }; }
 
@@ -538,7 +553,7 @@ export default class Files extends View {
 
   // One line's colored pieces: the hovered name underlined, the marked one tinted, the selection shaded.
   lineSpans(i, t, sel) {
-    const spans = this.spans[i] ??= this.lines[i].length > 1000 ? [{ text: this.lines[i] }] : highlight(this.lines[i], this.req.path.endsWith(".py") ? PY : ENV, t);
+    const spans = this.spans[i] ??= this.lines[i].length > 1000 ? [{ text: this.lines[i] }] : highlight(this.lines[i], this.lang ??= languageFor(this.req.path) ?? PY, t);
     const sr = sel && i >= sel.s.line && i <= sel.e.line ? { line: i, start: i === sel.s.line ? sel.s.col : 0, end: i === sel.e.line ? sel.e.col : Infinity } : null;
     const cuts = [this.hover, this.mark, sr].filter(w => w?.line === i);
     const inside = (w, a, b) => w?.line === i && a >= w.start && b <= w.end;
@@ -612,15 +627,17 @@ export default class Files extends View {
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.dim).child(path + (this.dirty ? " ●" : "")))
         .when(this.dirty, el => el.child(button("files-save", this.saving ? "Saving…" : "Save", "Save (⌘S)", cx => this.save(cx))))
         // Markdown: Preview shows it rendered (read-only, selectable; with unsaved edits as typed), Source goes back.
-        .when(Boolean(this.code) && /\.(md|markdown)$/i.test(path), el => el.child(button("files-preview", this.preview ? "Source" : "Preview",
+        .when(Boolean(this.code || this.lines) && /\.(md|markdown)$/i.test(path), el => el.child(button("files-preview", this.preview ? "Source" : "Preview",
           this.preview ? "Back to the source" : "Show the rendered Markdown (read-only)", cx => { this.preview = !this.preview; cx.notify(); })))
         .when(Boolean(this.lines) && this.editable, el => el.child(button("files-edit", "Edit", "Edit this file (⌘-click definitions are off while editing)", cx => this.editPython(cx))))
         .when(this.finding, el => el.child(h_flex().flex_none().gap(6).items_center().text_size(11).text_color(t.accent)
           .child(svg("mods/files-copy/spinner.svg").size(12).spin(900)).child("Finding definition…")))
         .when(!this.finding && py && !this.code, el => el.child(div().flex_none().text_size(11).text_color(this.cmd ? t.accent : t.dim).child("⌘-click: definition"))))
-      .child(this.code && this.preview ? div().id("files-md").flex_1().min_h(0).overflow_y_scrollbar().px(24).py(16)
-          .child(TextView.markdown(`files-md-${path}`, this.code.value()).selectable(true))
-        : this.code ? Editor.new(this.code).flex_1().min_h(0)
+      .child(this.preview && (this.code || this.lines) ? div().id("files-md").flex_1().min_h(0).overflow_y_scrollbar().px(24).py(16)
+          .child(TextView.markdown(`files-md-${path}`, this.code ? this.code.value() : this.text).selectable(true))
+        // A fixed box (absolute, inset 0) instead of flex sizing: sized by flex the editor grew with its text,
+        // so nothing overflowed and the wheel didn't scroll (as with the Changes list).
+        : this.code ? div().flex_1().min_h(0).relative().child(Editor.new(this.code).absolute().inset_0())
         : this.lines ? this.codeView(t)
         : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…"))
       .when(Boolean(this.status), el => el.child(div().flex_none().px(14).py(6).border_t(1).border_color(t.border).text_size(11).text_color(t.dim).truncate().child(this.status)));
@@ -641,7 +658,14 @@ export default class Files extends View {
           .child(".*")))
       .child(div().px(8).pt(8).flex_none().child(div().id("files-search").h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-        .on_key_down((e, cx) => { if (e.keystroke === "escape") this.clearFilter(cx); })
+        .on_key_down((e, cx) => {
+          if (e.keystroke === "escape") return this.clearFilter(cx);
+          if (!this.query || !this.order.length || (e.key !== "up" && e.key !== "down")) return;
+          const at = this.order.findIndex(o => o.path === this.cursor), n = this.order.length;
+          const next = this.order[at < 0 ? (e.key === "down" ? 0 : n - 1) : (at + (e.key === "down" ? 1 : -1) + n) % n];
+          this.cursor = next.path; this.filterScroll.scroll_to_item(next.index); cx.notify();
+          cx.stop_propagation();
+        })
         .child(Input.new(this.search).flex_1().h_full().text_size(12).text_color(t.foreground))
         .when(Boolean(this.query), el => el.child(div().id("files-search-clear").size(18).flex_none().flex().items_center().justify_center().rounded(4)
           .cursor_pointer().text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip("Clear filter (Esc)")
@@ -651,13 +675,14 @@ export default class Files extends View {
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total"))));
   }
 
-  clearFilter(cx) { this.search.set_value(""); this.query = ""; cx.notify(); }
+  clearFilter(cx) { this.search.set_value(""); this.query = ""; this.cursor = null; cx.notify(); }
 
   filterView(t) {
     const note = (text) => div().p(8).text_size(11).text_color(t.dim).child(text);
     if (!this.all) return v_flex().flex_1().child(note(this.error || "Loading file list…"));
     const f = this.filterTree();
-    return v_flex().id("files-filtered").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.filteredRows(f.root, "", 0, [], t))
+    this.order = []; // refilled by filteredRows, in the order shown
+    return v_flex().id("files-filtered").flex_1().min_h(0).overflow_y_scrollbar().track_scroll(this.filterScroll).p(6).children(this.filteredRows(f.root, "", 0, [], t))
       .when(!f.count, el => el.child(note("No matching files")))
       .when(f.limited, el => el.child(note(`First ${MATCHES} matches shown`)))
       .when(this.all.capped, el => el.child(note(`Searched the first ${ALL.toLocaleString("en")} files`)));

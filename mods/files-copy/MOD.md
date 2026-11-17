@@ -21,6 +21,8 @@ hidden, a dot file or folder still matches when a typed word is in its name (`en
 from `git ls-files -co --exclude-standard` (tracked and untracked) plus ignored files outside ignored folders
 (`git ls-files -oi --exclude-standard --directory`, so `.env.local` but not `node_modules/`), or `find` outside git
 (skips node_modules), at most 20,000 files; it is asked again on each refresh while a filter is typed.
+↑/↓ in the input move a highlight over the matching files (wrapping, the list scrolls to it); Enter opens
+the highlighted file, or the first match when none is.
 Esc or the × in the input clears the filter and brings back the normal tree. Each place (space and
 folder) keeps its own filter text, open folders and last file while the panel lives; switching spaces
 swaps them.
@@ -33,9 +35,11 @@ Unsaved edits put ● after the path and a Save button in the header; ⌘S or Sa
 edits stay). Opening another file in the tab or going back/forward saves first; a failed save keeps the
 file open. Closing the tab with unsaved edits opens a "Save changes?" dialog (this mod, kind dialog, the edits
 in its props): Save writes them with the same guard, Don't save or Esc drops them. On app quit there is no
-dialog and unsaved edits are lost. A Markdown file (`.md`, `.markdown`) has a Preview button: the file rendered
-(read-only, text selectable, unsaved edits included); Source goes back to the editor.
+dialog and unsaved edits are lost. A Markdown file (`.md`, `.markdown`) opens rendered (read-only, text
+selectable, unsaved edits included); the Source button shows its text, Preview goes back.
 
+Markdown (`.md`, `.markdown`) is drawn by the mod's own view too (the editor leaves it uncoloured), with
+highlight.js's line-by-line Markdown colours (headings, `code`, **bold**, links, fences).
 `.env*` files are drawn by the mod's own view too (below), coloured line by line with highlight.js's shell
 rules, so one unbalanced quote in a value (`PASS=it's`) colours only its own line, not the rest of the file
 as a multi-line grammar would; their Edit opens the editor as plain text for the same reason.
