@@ -7,7 +7,7 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { highlight, languageFor } from "./highlight.js";
-import { props, shared, spaces, panes, theme, settings, exec, readTextFile, run } from "herdr";
+import { props, shared, setShared, spaces, panes, theme, settings, exec, readTextFile, run, notify, appHome } from "herdr";
 
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false", "-c", "core.quotepath=false"];
 // The code's text size matches the side panels' (Changes, Files: 13); ROW is a code line's height, HEAD a file header's.
@@ -596,6 +596,25 @@ export default class DiffView extends View {
       .when(f.minus > 0, (e) => e.child(div().flex_none().text_size(11).text_color(t.ansi1).child(`−${f.minus}`)));
   }
 
+  // Opens the file in files-copy's tab for this space. Contract: the request goes through files-copy's
+  // shared key `files-copy.open` ({ space, root, on, path, ts }), as its panel does; files-copy may be absent.
+  openInFiles(path, cx) {
+    const req = this.req;
+    if (!req) return;
+    cx.spawn(async () => {
+      const there = await readTextFile(`${appHome()}/mods/files-copy/mod.json`).catch(() => null);
+      if (!there) { notify({ title: "Files isn't installed", body: "Copy mods/files-copy to open files from the diff", level: "warning" }); return; }
+      const space = spaces().find((s) => s.id === this.space) ?? spaces().find((s) => s.active);
+      const open = { space: space?.id ?? null, root: req.root, on: req.on ?? null, path, ts: Date.now() };
+      const ids = new Set((space?.tabs ?? []).map((tb) => tb.id));
+      const existing = panes().find((p) => p.mod === "files-copy" && ids.has(p.tab));
+      const name = path.split("/").pop();
+      setShared("files-copy.open", open);
+      if (existing) { run("tab.select", { id: existing.tab }); run("tab.rename", { id: existing.tab, name }); }
+      else run("tab.new", { name, mod: "files-copy", props: open, space: space?.id ?? undefined });
+    });
+  }
+
   // A separator: hidden unchanged lines, with buttons that reveal them (STEP at a time, or all).
   separator(r, t) {
     const f = this.files[r.fi], first = r.hi === 0, tail = r.hi >= f.hunks.length;
@@ -643,6 +662,14 @@ export default class DiffView extends View {
     const scroll = (to) => { this.scrollY = Math.max(0, Math.min(max, to)); };
     // The file at the top of the view, and how far through the changes the view is.
     const fi = this.rows[first]?.fi ?? -1, cf = this.files[fi];
+    // The file the toolbar names and opens. Scrolled to the end, short last files can't reach the top, so the top
+    // row is still an earlier file's: then it's the requested file if its header is in view, else the last header in view.
+    let ci = fi;
+    if (max > 0 && off >= max - 1) {
+      const shown = this.files.map((_, i) => i).filter((i) => this.heads[i] >= first && this.heads[i] < last);
+      ci = shown.find((i) => this.files[i].path === r?.path) ?? shown.at(-1) ?? fi;
+    }
+    const top = this.files[ci];
     let passed = 0;
     while (passed < this.targets.length && this.targetY(passed) <= off + 1) passed++;
     // Like the Changes panel's icon toggle groups: joined 26x20 cells in one bordered box, the active one tinted.
@@ -737,10 +764,13 @@ export default class DiffView extends View {
       .on_mouse_down("left", () => this.handle.focus())
       .child(h_flex().h(42).flex_none().px(14).gap(10).items_center().border_b(1).border_color(t.border)
         .child(svg("mods/wb-diff/icons/diff.svg").size(14).text_color(t.muted))
-        .child(div().flex_none().max_w(260).truncate().font_semibold().child((cf?.path ?? r?.path)?.split("/").pop() ?? "Diff"))
-        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(nf > 1 && fi >= 0 ? `file ${fi + 1} of ${nf}` : (cf?.path ?? r?.path ?? "").includes("/") ? (cf?.path ?? r.path).replace(/\/[^/]*$/, "") : ""))
+        .child(div().flex_none().max_w(260).truncate().font_semibold().child((top?.path ?? r?.path)?.split("/").pop() ?? "Diff"))
+        .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(nf > 1 && ci >= 0 ? `file ${ci + 1} of ${nf}` : (top?.path ?? r?.path ?? "").includes("/") ? (top?.path ?? r.path).replace(/\/[^/]*$/, "") : ""))
         .when(whole, (e) => e.child(div().flex_none().text_size(11).text_color(t.dim).child("new file")))
         .when(Boolean(r), (e) => e.child(group([cell("refresh", "refresh", r.commit ? "Reload the diff" : "Refresh: reload the diff and pick up new or reverted files", false, !this.loading, refresh)])))
+        // The file the toolbar names (or the requested one before the diff loads); a deleted file has nothing to open.
+        .when(Boolean(r), (e) => { const p = top?.path ?? r.path, gone = (top?.status ?? r.status) === "D";
+          return e.child(group([cell("open-files", "open-file", gone ? "Deleted: nothing to open" : `Open ${p.split("/").pop()} in Files`, false, Boolean(p) && !gone, (cx) => this.openInFiles(p, cx))])); })
         .child(group([cell("wrap", "wrap", "Wrap long lines", this.wrap, true, toggleWrap)]))
         .child(group([cell("layout-split", "split", "Side by side", split, true, setLayout("split")),
           cell("layout-unified", "unified", "Unified", !split, true, setLayout("unified"))]))

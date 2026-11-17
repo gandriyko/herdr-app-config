@@ -653,7 +653,8 @@ export default class Files extends View {
         // Markdown: Preview shows it rendered (read-only, selectable; with unsaved edits as typed), Source goes back.
         .when(Boolean(this.code || this.lines) && /\.(md|markdown)$/i.test(path), el => el.child(button("files-preview", this.preview ? "Source" : "Preview",
           this.preview ? "Back to the source" : "Show the rendered Markdown (read-only)", cx => { this.preview = !this.preview; cx.notify(); })))
-        .when(Boolean(this.lines) && this.editable, el => el.child(button("files-edit", "Edit", "Edit this file (⌘-click definitions are off while editing)", cx => this.editPython(cx))))
+        // Not over the rendered Markdown: editing there would change nothing on screen (Source first).
+        .when(Boolean(this.lines) && this.editable && !this.preview, el => el.child(button("files-edit", "Edit", "Edit this file (⌘-click definitions are off while editing)", cx => this.editPython(cx))))
         .when(this.finding, el => el.child(h_flex().flex_none().gap(6).items_center().text_size(11).text_color(t.accent)
           .child(svg("mods/files-copy/spinner.svg").size(12).spin(900)).child("Finding definition…")))
         .when(!this.finding && py && !this.code, el => el.child(div().flex_none().text_size(11).text_color(this.cmd ? t.accent : t.dim).child("⌘-click: definition"))))

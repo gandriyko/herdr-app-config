@@ -36,7 +36,7 @@ edits stay). Opening another file in the tab or going back/forward saves first; 
 file open. Closing the tab with unsaved edits opens a "Save changes?" dialog (this mod, kind dialog, the edits
 in its props): Save writes them with the same guard, Don't save or Esc drops them. On app quit there is no
 dialog and unsaved edits are lost. A Markdown file (`.md`, `.markdown`) opens rendered (read-only, text
-selectable, unsaved edits included); the Source button shows its text, Preview goes back.
+selectable, unsaved edits included); the Source button shows its text, Preview goes back. Edit shows only with the source, not over the rendered view.
 
 Markdown (`.md`, `.markdown`) is drawn by the mod's own view too (the editor leaves it uncoloured), with
 highlight.js's line-by-line Markdown colours (headings, `code`, **bold**, links, fences).
@@ -68,8 +68,8 @@ are off until the file is opened again). The wheel scrolls. Other languages have
 - gpui-kit.d.ts, jsconfig.json: editor typings only.
 
 ## Settings and data
-- Shared state `files-copy.open` ({ space, root, on, path, ts }): written by the panel on a click, read by
-  that space's file tab.
+- Shared state `files-copy.open` ({ space, root, on, path, ts }): written by the panel on a click (and by
+  wb-diff's Open in Files button: a documented contract, keep the shape), read by that space's file tab.
 - `localStorage` `files-copy.hidden`: "1" when dot files are shown.
 - The jedi run uses the project's `.venv` or `venv` (in the pane's folder) when present, otherwise the
   Python uvx picks. Imports resolve from the folder above the file's top package (the first parent

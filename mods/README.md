@@ -41,4 +41,4 @@ Keys are not prefixed with a mod name on purpose and must not be renamed. Each i
 | `wb.ai.models`, `wb.ai.use`, `wb.ai.project`, `wb.ai.localMigrated`, `wb.ai.projectMigrated` | wb-ai, prs, changes-copy (own copies of ai.js) | wb-ai, prs, changes-copy | defaults created (Claude model, empty projects) |
 | `wb.commit.gen` and unprefixed `ai.*`, `commit.gen` | old builds only | wb-ai, prs, changes-copy (migration) | `{}`, migration skipped |
 | `wb.diff.request` | changes-copy | wb-diff | `null`, nothing shown |
-| `files-copy.open` | files-copy (panel) | files-copy (file tab) | the tab keeps the file it was opened with |
+| `files-copy.open` | files-copy (panel), wb-diff (Open in Files) | files-copy (file tab) | the tab keeps the file it was opened with |
