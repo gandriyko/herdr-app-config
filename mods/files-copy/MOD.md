@@ -55,7 +55,9 @@ side buttons work only when mapped to ⌘[ / ⌘] (Logi Options+, SteerMouse, Be
 reports only the left, right and middle buttons. The view is read-only with a caret: a click places it, drag or Shift+click selects,
 double-click selects a word, triple-click a line; arrows (Shift extends), Home/End, PageUp/PageDown,
 ⌘←/⌘→ (line indent/end), ⌘↑/⌘↓ (file start/end) move it; ⌘A selects all and ⌘C copies. Typing changes
-nothing there: the Edit button in the header switches the file to the built-in editor (⌘-click definitions
+nothing there by itself: in an editable file a typed key (a character, Enter, Tab, Backspace, Delete) switches
+to the built-in editor with the same caret or selection and applies the key there; the Edit button does the
+switch too (⌘-click definitions
 are off until the file is opened again). The wheel scrolls. Other languages have no go-to-definition.
 
 ## Files

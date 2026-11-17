@@ -378,6 +378,10 @@ export default class Files extends View {
   // Read-only keys: caret moves (Shift extends the selection), ⌘A, ⌘C, Ctrl+- back. Nothing edits.
   key(e, cx) {
     const m = e.modifiers, k = e.key.toLowerCase(), L = this.lines, n = L.length, { line, col } = this.caret;
+    // Typing here (an editable file): switch to the editor at the caret and apply the key there.
+    if (this.editable && !m.platform && !m.control && (["enter", "backspace", "delete", "tab"].includes(k) || e.key_char)) {
+      this.typeIntoEditor(k, e.key_char, cx); cx.stop_propagation(); return;
+    }
     const at = (l, c) => { l = Math.max(0, Math.min(n - 1, l)); return { line: l, col: Math.max(0, Math.min(L[l].length, c)) }; };
     const page = Math.max(1, Math.floor(this.viewH / ROW) - 2);
     const moves = m.platform
@@ -433,7 +437,27 @@ export default class Files extends View {
   }
 
   // Python opens in the mod's own view (⌘-click definitions); Edit switches it to the editor.
-  editPython(cx) { this.lines = null; this.spans = []; this.makeEditor(); cx.notify(); }
+  editPython(cx) { this.lines = null; this.spans = []; this.preview = false; this.makeEditor(); cx.notify(); }
+
+  // A key typed in the own view: the editor takes over with the same selection (or caret), then gets the key.
+  typeIntoEditor(k, char, cx) {
+    const sel = this.selection() ?? { s: this.caret, e: this.caret }, orig = this.text.split("\n");
+    // The own view's (line, col) as an offset in the file's text: its lines dropped \r and drew a tab as 4 columns.
+    const offset = ({ line, col }) => {
+      let at = 0;
+      for (let i = 0; i < line; i++) at += orig[i].length + 1;
+      const s = orig[line] ?? "";
+      for (let i = 0, w = 0; i < s.length && w < col; i++, at++) w += s[i] === "\t" ? 4 : 1;
+      return at;
+    };
+    let start = offset(sel.s), end = offset(sel.e);
+    this.editPython(cx);
+    if (start === end && k === "backspace") start = Math.max(0, start - 1);
+    if (start === end && k === "delete") end = Math.min(this.text.length, end + 1);
+    this.code.set_selected_range({ start, end });
+    this.code.replace(k === "backspace" || k === "delete" ? "" : k === "enter" ? "\n" : k === "tab" ? "\t" : char);
+    this.dirty = this.code.value() !== this.text; cx.notify();
+  }
 
   // Writes the editor's text, only if the file on disk is still what was read (else says so and keeps the edits).
   // then(ok, cx) runs after.
