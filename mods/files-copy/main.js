@@ -3,7 +3,7 @@
 // In the tab, Python files: ⌘-click (or F12) a name to jump to its definition (jedi via uvx).
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, TextView, Editor, EditorState, Input, InputState } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, run, shared, setShared, props } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, run, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
 import { highlight, languageFor } from "./highlight.js";
 
 const PY = languageFor("x.py"), ENV = languageFor(".env");
@@ -73,6 +73,7 @@ async function directory(path, on) {
 export default class Files extends View {
   init(_props, cx) {
     const p = props();
+    if (p?.unsaved) { this.saving = false; this.saveError = null; return; } // the "Save changes?" dialog
     if (p?.path) { // the file tab
       this.tab = true; this.back = []; this.fwd = []; this.space = p.space ?? null;
       this.handle = cx.focus_handle(); this.viewH = 400; this.viewW = 800;
@@ -436,9 +437,38 @@ export default class Files extends View {
     });
   }
 
-  // A tab closed with unsaved edits still writes them (same stale-file guard; the app gives close 250 ms).
-  // ponytail: no "discard changes?" prompt; add one if saving on close turns out unwanted.
-  async close() { if (this.tab && this.dirty && this.code) await writeTextFile(this.full(this.req.path), this.code.value(), this.text).catch(() => {}); }
+  // A tab closed with unsaved edits: the app can't be stopped from closing it, so a dialog (this mod) gets the
+  // edits in its props and asks whether to write them. Switching files in the tab still saves without asking.
+  // ponytail: on app quit the dialog can't show and the edits are lost; save on quit if that matters.
+  close() {
+    if (!this.tab || !this.dirty || !this.code) return;
+    openOverlay({ mod: "files-copy", kind: "dialog", width: 440, height: 150,
+      props: { unsaved: { path: this.full(this.req.path), text: this.code.value(), expected: this.text } } });
+  }
+
+  // The dialog: Save writes the edits (only if the file is still what the tab read), Don't save / Esc drops them.
+  saveDialog(t) {
+    const p = props(), u = p.unsaved;
+    const save = (cx) => {
+      if (this.saving) return;
+      this.saving = true; this.saveError = null; cx.notify();
+      cx.spawn(async cx => {
+        try { await writeTextFile(u.path, u.text, u.expected); closeOverlay(p.overlay); }
+        catch (e) { this.saveError = `Not saved: ${e}`; }
+        this.saving = false; cx.notify();
+      });
+    };
+    const btn = (id, label, primary, act) => h_flex().id(id).h(30).px(14).items_center().rounded(7).border_1().cursor_pointer()
+      .border_color(primary ? t.accent : t.border).when(primary, el => el.bg(t.accent).text_color(t.background))
+      .hover(s => s.opacity(0.88)).on_click((_e, cx) => act(cx)).child(label);
+    return v_flex().id("files-unsaved").size_full().p(16).gap(10).bg(t.background).text_color(t.foreground).text_size(13)
+      .child(div().font_semibold().text_size(14).child(`Save changes to ${u.path.split("/").pop()}?`))
+      .child(div().text_size(12).text_color(t.dim).truncate().child(u.path))
+      .when(Boolean(this.saveError), el => el.child(div().text_size(12).text_color(t.ansi1).child(this.saveError)))
+      .child(h_flex().flex_1().items_end().justify_end().gap(8)
+        .child(btn("files-unsaved-drop", "Don't save", false, () => closeOverlay(p.overlay)))
+        .child(btn("files-unsaved-save", this.saving ? "Saving…" : "Save", true, save)));
+  }
 
   full(path) { return path.startsWith("/") ? path : `${this.req.root}/${path}`; }
 
@@ -598,6 +628,7 @@ export default class Files extends View {
 
   render(cx) {
     const t = theme();
+    if (props()?.unsaved) return this.saveDialog(t);
     if (this.tab) { this.pickRequest(cx); return this.renderTab(t); }
     if (key() !== this.context?.key) this.refresh(cx);
     return v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)

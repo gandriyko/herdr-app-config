@@ -30,8 +30,10 @@ A click on a file opens it in a tab: a syntax-highlighted editor at full height.
 Editing: local files under 400,000 chars are editable (a remote space's or a truncated file is read-only).
 Unsaved edits put ● after the path and a Save button in the header; ⌘S or Save writes the file with
 `writeTextFile`, only if the file on disk is still what was opened (else the footer says it changed and the
-edits stay). Opening another file in the tab, going back/forward or closing the tab saves first; a failed
-save keeps the file open. A Markdown file (`.md`, `.markdown`) has a Preview button: the file rendered
+edits stay). Opening another file in the tab or going back/forward saves first; a failed save keeps the
+file open. Closing the tab with unsaved edits opens a "Save changes?" dialog (this mod, kind dialog, the edits
+in its props): Save writes them with the same guard, Don't save or Esc drops them. On app quit there is no
+dialog and unsaved edits are lost. A Markdown file (`.md`, `.markdown`) has a Preview button: the file rendered
 (read-only, text selectable, unsaved edits included); Source goes back to the editor.
 
 `.env*` files are drawn by the mod's own view too (below), coloured line by line with highlight.js's shell
