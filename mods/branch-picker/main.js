@@ -126,7 +126,11 @@ export default class BranchPicker extends View {
       out.push({ kind: "group", g, count: groups[g].length, open });
       if (open) for (const b of groups[g]) out.push({ kind: "row", b, depth: 1, rest: b.name.slice(g.length + 1) });
     }
-    return out;
+    // ponytail: every row is a full element tree, and thousands of them overran the host's render
+    // deadline ("interrupted"). Cap and ask to filter; uniform_list + on_item_click if scrolling them all matters.
+    const shown = out.slice(0, 200);
+    shown.hidden = out.slice(200).filter(r => r.kind === "row").length;
+    return shown;
   }
 
   // Keyboard targets: every row but the current branch (checking it out does nothing).
@@ -319,7 +323,7 @@ export default class BranchPicker extends View {
       .text_size(13)
       .child(h_flex()
         .child(div().flex_1().font_semibold().text_color(t.foreground).child(`Branches${this.repoName ? ` of ${this.repoName}` : ""}`))
-        .when(this.branches, el => el.child(div().text_size(11).text_color(t.dim).child(this.text.trim() ? `${rows.filter(r => r.kind === "row").length}/${total}` : `${total}`))))
+        .when(this.branches, el => el.child(div().text_size(11).text_color(t.dim).child(this.text.trim() ? `${rows.filter(r => r.kind === "row").length + rows.hidden}/${total}` : `${total}`))))
       .when(this.inSub, el => el.child(div().text_size(11).text_color(t.dim).child(`checked out inside ${this.folder.replace(this.root + "/", "")}`)))
       .when(this.branches === undefined, el => el.child(div().text_color(t.muted).child("…")))
       .when(this.branches && this.error && !this.branches.length, el => el.child(div().text_color(t.muted).child(this.error)))
@@ -345,6 +349,7 @@ export default class BranchPicker extends View {
         .child(div().relative().h(400).min_h(0)
           .child(v_flex().id("br-list").absolute().inset_0().overflow_y_scroll().gap(1)
             .children(rows.map(row))
+            .when(rows.hidden > 0, el => el.child(div().p(10).text_size(11.5).text_color(t.dim).child(`… ${rows.hidden} more, type to filter`)))
             .when(!rows.some(r => r.kind === "row"), el => el.child(div().p(10).text_color(t.dim).child("No matching branch."))))
           .child(Scrollbar.vertical("br-list").absolute().inset_0())))
       .child(h_flex().justify_end().text_size(11).text_color(t.dim).child("↑↓ choose · ↵ checkout · esc close"));

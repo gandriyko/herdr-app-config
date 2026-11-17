@@ -25,4 +25,5 @@ Opened as an overlay behind the status bar branch. Shows local branches grouped 
 
 ## Notes
 - Runs git with read-only/no-lock options for reads; works on the focused folder of the given space (also remote machines via `on`).
+- Draws at most 200 list rows (render deadline); the rest are reached by the filter.
 - `branch.switched` is a documented contract with status-copy (also written by changes-copy); optional where read.
