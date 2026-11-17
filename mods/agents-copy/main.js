@@ -920,8 +920,9 @@ export default class Agents extends View {
         .mb(5)
         .rounded(7)
         .border(1)
-        .border_color(blocked ? t.blocked + "66" : t.border)
-        .bg(blocked ? t.blocked + "14" : a.focused ? t.selected : t.raised)
+        // The agent being worked with: an accent border and tint (its border wins over blocked's; blocked keeps its tint).
+        .border_color(a.focused ? t.accent : blocked ? t.blocked + "66" : t.border)
+        .bg(blocked ? t.blocked + "14" : a.focused ? t.accent + "1f" : t.raised)
         .cursor_pointer()
         .hover((s) => s.bg(blocked ? t.blocked + "22" : t.hover)))
         .child(h_flex()
