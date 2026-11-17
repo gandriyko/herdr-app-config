@@ -17,11 +17,13 @@ function location(places) {
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
   const cwd = pane?.cwd || f?.cwd;
   if (cwd) {
-    places.delete(space?.id); places.set(space?.id, { cwd, on });
+    // The branch only for a terminal pane (a layout terminal block has no PaneInfo: no branch).
+    const branch = pane?.cwd ? pane.branch ?? null : null;
+    places.delete(space?.id); places.set(space?.id, { cwd, on, branch });
     if (places.size > PLACES_MAX) places.delete(places.keys().next().value);
-    return { cwd, on };
+    return { cwd, on, branch };
   }
-  return places.get(space?.id) ?? { cwd: space?.folder, on };
+  return places.get(space?.id) ?? { cwd: space?.folder, on, branch: space?.branch ?? null };
 }
 
 // CI of the PR: "fail" if any check failed, "wait" if any is still running, else "ok" (or "" without checks).
@@ -306,7 +308,8 @@ export default class Prs extends View {
   }
 
   loc() { return location(this.places); }
-  locKey() { return JSON.stringify(this.loc()); }
+  // Also keeps the focused branch for the row highlight; a branch switch changes the key, so the tick redraws.
+  locKey() { const l = this.loc(); this.branch = l.branch; return JSON.stringify(l); }
 
   // The repo a place belongs to: `{ key, name }`. Folders (and worktrees) of one repo share the key.
   async repoOf({ cwd, on }) {
@@ -708,8 +711,12 @@ export default class Prs extends View {
     const cpTip = level === "high" ? (open ? `Copilot: ${open} open thread${s}, High or Medium among them` : "Copilot reviewed: left comments")
       : level === "low" ? `Copilot: ${open} open thread${s}, all Low` : level === "ok" ? "Copilot reviewed: no open threads"
       : level === "asked" ? "Copilot is reviewing (requested, no answer yet)" : "Copilot not run yet";
+    // The PR of the focused folder's branch (a fork PR's local branch is pr-<n>-<branch>, see startWorktree).
+    const b = this.branch;
+    const current = Boolean(b) && (b === pr.headRefName || b === `pr-${pr.number}-${worktreeSlug(pr.headRefName ?? "")}`);
     return v_flex().id(`pr-${pr.number}`).flex_none().px(8).py(4).gap(2).rounded(5).cursor_pointer()
-      .hover((s) => s.bg(t.hover)).tooltip(`#${pr.number} ${pr.title}\n${pr.headRefName}`)
+      .when(current, (e) => e.bg(t.selected).border_l_2().border_color(t.accent))
+      .hover((s) => s.bg(t.hover)).tooltip(`#${pr.number} ${pr.title}\n${pr.headRefName}${current ? "\nCurrent branch" : ""}`)
       .on_click(() => openOverlay({ mod: "prs", kind: "dialog", width: 780, height: 0.85, props: { pr } }))
       .child(h_flex().gap(6).items_center()
         .child(div().id(`ci-${pr.number}`).flex_none().size(9).flex().items_center().justify_center().tooltip(dotTip)
