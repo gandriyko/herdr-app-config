@@ -97,10 +97,21 @@ function mdBlocks(text) {
 
 // ---- find in the tab ----
 const FIND_CAP = 1000;
-// Every case-insensitive hit of q in text, as [start, end) pairs (at most FIND_CAP + 1: the extra one says "capped").
-function findAll(text, q) {
-  const out = [], hay = text.toLowerCase(), n = q.length;
-  for (let at = hay.indexOf(q); at >= 0 && out.length <= FIND_CAP; at = hay.indexOf(q, at + n)) out.push([at, at + n]);
+// The search as a global RegExp (null when q is empty or an invalid regular expression). o: { case, word, regex }.
+function findRegex(q, o) {
+  if (!q) return null;
+  try {
+    let src = o.regex ? q : q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (o.word) src = `\\b(?:${src})\\b`;
+    return new RegExp(src, "gm" + (o.case ? "" : "i"));
+  } catch { return null; }
+}
+// Every hit of re in text as [start, end) pairs (at most FIND_CAP + 1: the extra one says "capped"); empty matches are skipped.
+function findAll(text, re) {
+  const out = []; re.lastIndex = 0;
+  for (let m = re.exec(text); m && out.length <= FIND_CAP; m = re.exec(text)) {
+    if (m[0] === "") re.lastIndex++; else out.push([m.index, m.index + m[0].length]);
+  }
   return out;
 }
 // What a Markdown block shows as words: link targets, image sources, tags and markers left out, so a hit is something readable.
@@ -151,16 +162,23 @@ export default class Files extends View {
       this.handle = cx.focus_handle(); this.viewH = 400; this.viewW = 800;
       this.imgs = new Map(); this.imgQueue = []; this.imgBusy = false; // source → cached file (false: failed, null: loading)
       // Find bar (always shown; ⌘F focuses it, Esc clears it): list = hits in the shown view (lines, editor offsets, or Markdown blocks), cur = the current one.
-      this.find = { open: true, q: "", list: [], cur: 0, mode: null, capped: false };
+      this.find = { open: true, q: "", list: [], cur: 0, mode: null, capped: false, case: false, word: false, regex: false, bad: false };
+      try { Object.assign(this.find, JSON.parse(localStorage.getItem("files-copy.find") ?? "{}")); } catch {}
       this.fmap = null; this.mdHits = new Set(); this.mdScroll = ScrollHandle.new();
       this.hold = false; this.holdCap = false; this.holdTimer = false; this.pending = false;
       this.findInput = InputState.new({ placeholder: "Find in file" });
-      this.findInput.on("change", (_e, cx) => { this.find.q = this.findInput.value().toLowerCase(); this.find.cur = 0; this.runFind(cx, true); });
+      this.findInput.on("change", (_e, cx) => { this.find.q = this.findInput.value(); this.find.cur = 0; this.runFind(cx, true); });
       this.findInput.on("submit", (e, cx) => this.stepFind(e?.shift ? -1 : 1, cx));
+      this.gotoOpen = false; this.gotoInput = InputState.new({ placeholder: "Line number" });
+      this.gotoInput.on("submit", (_e, cx) => this.goLine(cx));
+      this.confirmRevert = false; this.split = false; this.autoGen = 0; this.splitGen = 0; this.checking = false;
+      try { this.autosave = localStorage.getItem("files-copy.autosave") === "1"; } catch { this.autosave = false; }
       this.replaceOpen = false; this.replaceInput = InputState.new({ placeholder: "Replace with" }); // shown while editing; Enter replaces the current hit
       this.replaceInput.on("submit", (_e, cx) => this.replaceOne(cx));
       this.applied = Math.max(p.ts ?? 0, shared(REQUEST)?.ts ?? 0);
       this.open(p, cx);
+      // Another program (or a git checkout) changing the open file: noticed every 3 s while this tab is on screen.
+      cx.timer.every(3000, acx => this.checkDisk(acx));
       return;
     }
     this.saved = new Map();
@@ -399,7 +417,7 @@ export default class Files extends View {
     this.imgs = new Map(); this.mdCache = null; // pictures are copied again per opened file: an edited one shows anew
     // Markdown stays covered until its pictures are in and the text has settled, so nothing pops in (see mdPane).
     this.hold = this.preview && /\.(md|markdown)$/i.test(req.path); this.holdCap = false; this.holdTimer = false; this.pending = false;
-    this.find.list = []; this.fmap = null; this.mdHits = new Set(); this.find.cur = 0;
+    this.find.list = []; this.fmap = null; this.mdHits = new Set(); this.find.cur = 0; this.confirmRevert = false; this.split = false; this.diskChanged = null;
     // A picture is shown, not read as text (local files only: the app draws from its own folder).
     this.raster = RASTER.test(req.path);
     if (this.raster) { if (req.on) this.fileError = "Images on another machine can't be shown"; cx.notify(); return; }
@@ -522,6 +540,9 @@ export default class Files extends View {
       const dirty = this.code.value() !== this.text;
       if (dirty !== this.dirty) { this.dirty = dirty; if (dirty) this.status = null; cx.notify(); }
       if (this.find.open && this.find.q && this.findMode() === "editor") this.runFind(cx, false);
+      // Auto-save: 1.5 s after the last edit. Split: the rendered side follows the typing (250 ms after it).
+      if (this.autosave && dirty) { const g = ++this.autoGen; cx.timer.after(1500, acx => { if (g === this.autoGen && this.dirty && this.code) this.save(acx); }); }
+      if (this.split) { const g = ++this.splitGen; cx.timer.after(250, acx => { if (g === this.splitGen) acx.notify(); }); }
     });
     this.code.focus();
   }
@@ -639,7 +660,12 @@ export default class Files extends View {
         if (!hit) { this.back.pop(); this.status = r.code === 0 ? "No definition found" : (r.stderr.trim().split("\n").pop() || "jedi failed"); return; }
         this.fwd = []; // a new jump ends the forward history, as in browsers
         const target = hit.path.startsWith(root + "/") ? hit.path.slice(root.length + 1) : hit.path, at = { line: hit.line - 1, col: hit.col };
-        if (target === path) { this.mark = { line: at.line, ...wordAt(this.lines[at.line] ?? "", at.col) }; this.centre = at.line; this.caretToMark(); }
+        if (target === path && !this.lines && this.code) { // editor: the caret goes to the definition
+          const all = this.code.value().split("\n"); let off = 0;
+          for (let i = 0; i < at.line; i++) off += all[i].length + 1;
+          this.code.set_selected_range({ start: off + at.col, end: off + at.col }); this.code.focus();
+        }
+        else if (target === path) { this.mark = { line: at.line, ...wordAt(this.lines[at.line] ?? "", at.col) }; this.centre = at.line; this.caretToMark(); }
         else this.jump(target, cx, at);
       } catch (e) { if (this.req === req) { this.back.pop(); this.status = String(e); } }
       finally { this.finding = false; cx.notify(); }
@@ -796,7 +822,7 @@ export default class Files extends View {
       if (!this.holdCap) { this.holdCap = true; cx.timer.after(3000, acx => { if (this.req === req && this.hold) { this.hold = false; acx.notify(); } }); } // a slow picture can't keep it hidden
       if (!this.pending && !this.holdTimer) { this.holdTimer = true; cx.timer.after(150, acx => { this.holdTimer = false; if (this.req === req && this.hold && !this.pending) { this.hold = false; acx.notify(); } }); }
     }
-    return v_flex().flex_1().min_h(0).relative()
+    return v_flex().flex_1().min_w(0).min_h(0).relative()
       .child(div().id("files-md").flex_1().min_h(0).overflow_y_scrollbar().track_scroll(this.mdScroll).px(24).py(16).children(blocks))
       .when(hold, el => el.child(div().absolute().inset_0().flex().items_center().justify_center().bg(t.background).text_color(t.dim).child("Loading…")));
   }
@@ -805,6 +831,65 @@ export default class Files extends View {
     const file = this.fileError ? false : this.want(this.full(this.req.path), cx);
     return div().id("files-img").flex_1().min_h(0).overflow_y_scrollbar().p(16)
       .child(file ? image(file).max_w_full() : div().text_color(t.dim).child(this.fileError || (file === null ? "Loading image…" : "Cannot show this image")));
+  }
+
+  // ---- tab: editing helpers ----
+
+  // Reads the file again every few seconds: untouched in the tab, it reloads; with unsaved edits it only says so.
+  // ponytail: a read per 3 s of the one open local file (≤ 400,000 chars) while its tab is on screen.
+  checkDisk(cx) {
+    const req = this.req;
+    if (!req || req.on || this.raster || this.saving || this.checking || this.text === null || this.fileError || !this.shownTab()) return;
+    this.checking = true;
+    cx.spawn(async cx => {
+      try {
+        let t = await readTextFile(this.full(req.path), { on: req.on });
+        if (this.req !== req || t === null || this.saving || t.includes("\0")) return;
+        if (t.length > 400000) t = t.slice(0, 400000) + "\n… (file truncated)";
+        if (t === this.text) return;
+        if (!this.dirty) this.open(req, cx, { top: this.scrollY, mark: this.mark });
+        else if (this.diskChanged !== t) { this.diskChanged = t; this.status = "The file changed on disk · Revert loads that version"; cx.notify(); }
+      } catch {}
+      finally { this.checking = false; }
+    });
+  }
+
+  // Revert: asks twice (the second click within 3 s), then loads the file from disk and drops the edits.
+  revert(cx) {
+    if (!this.confirmRevert) {
+      this.confirmRevert = true; cx.notify();
+      const req = this.req;
+      cx.timer.after(3000, acx => { if (this.req === req && this.confirmRevert) { this.confirmRevert = false; acx.notify(); } });
+      return;
+    }
+    this.confirmRevert = false; this.dirty = false; this.autoGen++;
+    this.open(this.req, cx);
+  }
+
+  // Go to line (⌘L or Ctrl+G): the line in the middle of the view, the caret at its start.
+  openGoto(cx) { if (!(this.code || this.lines) || this.preview) return; this.gotoOpen = true; this.gotoInput.focus(); cx.notify(); }
+  goLine(cx) {
+    const text = this.code ? this.code.value() : this.text ?? "", all = text.split("\n");
+    const n = Math.max(1, Math.min(all.length, parseInt(this.gotoInput.value(), 10) || 1)) - 1;
+    if (this.code) { let at = 0; for (let i = 0; i < n; i++) at += all[i].length + 1; this.code.set_selected_range({ start: at, end: at }); this.code.focus(); }
+    else if (this.lines) { this.centre = n; this.caret = this.anchor = { line: n, col: 0 }; this.handle.focus(); }
+    this.gotoOpen = false; cx.notify();
+  }
+  gotoRow(t) {
+    return h_flex().h(34).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
+      .child(div().id("files-goto").h(24).w(160).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_text()
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_key_down((e, cx) => { if (e.keystroke === "escape") { this.gotoOpen = false; (this.code ?? this.lines) && (this.code ? this.code.focus() : this.handle.focus()); cx.notify(); cx.stop_propagation(); } })
+        .child(Input.new(this.gotoInput).flex_1().h_full().text_size(12).text_color(t.foreground)))
+      .child(div().text_size(11).text_color(t.dim).child("Enter: go to line"));
+  }
+
+  // F12 in the editor on a Python name: its definition (jedi reads the saved file: auto-save keeps it current).
+  editorDefinition(cx) {
+    const text = this.code.value(), at = this.code.selected_range().start, before = text.slice(0, at).split("\n");
+    const line = before.length - 1, lineText = text.split("\n")[line] ?? "", w = wordAt(lineText, before[line].length);
+    if (w.start === w.end || /^\d/.test(lineText.slice(w.start, w.end))) { this.status = "No name under the caret"; cx.notify(); return; }
+    this.definition({ line, ...w }, cx);
   }
 
   // ---- tab: find ----
@@ -826,7 +911,8 @@ export default class Files extends View {
   }
   // Recomputes the hits for the shown view (not from render); jump moves the view to the current one.
   runFind(cx, jump) {
-    const f = this.find, q = f.q, mode = this.findMode();
+    const f = this.find, mode = this.findMode(), re = findRegex(f.q, f), q = re;
+    f.bad = Boolean(f.q) && !re;
     f.mode = mode; f.list = []; f.capped = false; this.fmap = null; this.mdHits = new Set();
     if (f.open && q && mode) {
       let raw = [];
@@ -859,29 +945,40 @@ export default class Files extends View {
     const f = this.find, m = f.list[f.cur];
     if (!m || f.mode !== "editor" || !this.editable) return;
     const rv = this.replaceInput.value();
+    const re = findRegex(f.q, f);
+    if (!re) return;
+    // A regular expression may use $1, $& in the replacement: worked out on the hit's own text.
+    const one = f.regex ? this.code.value().slice(m.s, m.e).replace(new RegExp(re.source, re.flags.replace("g", "")), rv) : rv;
     this.code.set_selected_range({ start: m.s, end: m.e });
-    this.code.replace(rv);
+    this.code.replace(one);
     // A replacement that holds the query again would be found again: step past it.
-    if (rv.toLowerCase().includes(f.q)) f.cur++;
+    if (findRegex(f.q, f)?.test(rv)) f.cur++;
     this.runFind(cx, true);
   }
   replaceAll(cx) {
     const f = this.find;
     if (!f.q || !f.list.length || f.mode !== "editor" || !this.editable) return;
     const rv = this.replaceInput.value(), text = this.code.value();
-    this.code.set_value(text.replace(new RegExp(f.q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), () => rv));
+    const re = findRegex(f.q, f);
+    if (!re) return;
+    this.code.set_value(text.replace(re, f.regex ? rv : () => rv));
     f.cur = 0; this.runFind(cx, false);
   }
   findBar(t) {
     const f = this.find, n = f.list.length;
     const btn = (id, label, tip, act) => div().id(id).size(22).flex_none().flex().items_center().justify_center().rounded(4).cursor_pointer()
       .text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip(tip).on_click((_e, cx) => act(cx)).child(label);
+    // Search options (remembered): each toggles one flag and searches again.
+    const opt = (id, label, tip, flag) => div().id(id).h(22).px(5).flex_none().flex().items_center().rounded(4).cursor_pointer().text_size(11)
+      .text_color(f[flag] ? t.foreground : t.dim).when(Boolean(f[flag]), e => e.bg(t.selected)).hover(s => s.bg(t.hover)).tooltip(tip)
+      .on_click((_e, cx) => { f[flag] = !f[flag]; try { localStorage.setItem("files-copy.find", JSON.stringify({ case: f.case, word: f.word, regex: f.regex })); } catch {} f.cur = 0; this.runFind(cx, true); }).child(label);
     return h_flex().flex_none().gap(6).items_center()
       .child(div().id("files-find").h(24).w(210).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_text()
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_key_down((e, cx) => { if (e.keystroke === "escape") { this.closeFind(cx); cx.stop_propagation(); } })
         .child(Input.new(this.findInput).flex_1().h_full().text_size(12).text_color(t.foreground)))
-      .child(div().flex_none().text_size(11).text_color(t.dim).child(f.q ? (n ? `${f.cur + 1}/${n}${f.capped ? "+" : ""}` : "No results") : ""))
+      .child(opt("files-find-case", "Aa", "Match case", "case")).child(opt("files-find-word", "W", "Whole word", "word")).child(opt("files-find-re", ".*", "Regular expression", "regex"))
+      .child(div().flex_none().text_size(11).text_color(f.bad ? t.ansi1 : t.dim).child(f.bad ? "Invalid regex" : f.q ? (n ? `${f.cur + 1}/${n}${f.capped ? "+" : ""}` : "No results") : ""))
       .child(btn("files-find-prev", "↑", "Previous (⇧Enter)", cx => this.stepFind(-1, cx)))
       .child(btn("files-find-next", "↓", "Next (Enter)", cx => this.stepFind(1, cx)))
       .when(f.mode === "editor" && this.editable, el => el.child(btn("files-replace-toggle", "⇄", "Replace (shows the replace row)", cx => { this.replaceOpen = !this.replaceOpen; cx.notify(); })
@@ -915,6 +1012,10 @@ export default class Files extends View {
       .on_key_down((e, cx) => {
         if (e.modifiers.platform && e.key.toLowerCase() === "s" && this.code) { this.save(cx); cx.stop_propagation(); }
         else if (e.modifiers.platform && e.key.toLowerCase() === "f" && this.findMode()) { this.openFind(cx); cx.stop_propagation(); }
+        // ⌘G / F3: next hit, with Shift previous. ⌘L or Ctrl+G: go to line. F12: definition of the name at the caret (Python, editor).
+        else if (((e.modifiers.platform && e.key.toLowerCase() === "g") || e.key === "f3") && this.find.list.length) { this.stepFind(e.modifiers.shift ? -1 : 1, cx); cx.stop_propagation(); }
+        else if (((e.modifiers.platform && e.key.toLowerCase() === "l") || (e.modifiers.control && e.key.toLowerCase() === "g")) && (this.code || this.lines)) { this.openGoto(cx); cx.stop_propagation(); }
+        else if (e.key === "f12" && this.code && path.endsWith(".py")) { this.editorDefinition(cx); cx.stop_propagation(); }
       })
       .child(h_flex().h(36).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .when(this.back.length > 0 || this.fwd.length > 0, el => el
@@ -924,6 +1025,10 @@ export default class Files extends View {
             .tooltip("Forward (⌘] or Ctrl+Shift+-)").on_click((_e, cx) => this.goForward(cx)).child("→")))
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.dim).child(path + (this.dirty ? " ●" : "")))
         .when(Boolean(this.findMode()), el => el.child(this.findBar(t)))
+        .when(this.dirty, el => el.child(button("files-revert", this.confirmRevert ? "Discard edits?" : "Revert", "Drop the edits and load the file from disk (click twice)", cx => this.revert(cx))))
+        .when(Boolean(this.code) && this.editable, el => el.child(button("files-auto", this.autosave ? "Auto-save ✓" : "Auto-save", "Save 1.5 s after the last edit (remembered)",
+          cx => { this.autosave = !this.autosave; try { localStorage.setItem("files-copy.autosave", this.autosave ? "1" : "0"); } catch {} if (this.autosave && this.dirty) this.save(cx); cx.notify(); })))
+        .when(Boolean(this.code) && !this.preview && /\.(md|markdown)$/i.test(path), el => el.child(button("files-split", this.split ? "Single" : "Split", "Show the rendered Markdown beside the editor", cx => { this.split = !this.split; cx.notify(); })))
         .when(this.dirty, el => el.child(button("files-save", this.saving ? "Saving…" : "Save", "Save (⌘S)", cx => this.save(cx))))
         // Markdown: Preview shows it rendered (read-only, selectable; with unsaved edits as typed), Source goes back.
         // SVG: Preview shows the picture as saved.
@@ -938,11 +1043,15 @@ export default class Files extends View {
         .child(div().id("files-close").size(26).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer().text_color(t.dim)
           .hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip("Close")
           .on_click(() => { const tab = this.shownTab(); if (tab) run("tab.close", { id: tab, confirmed: true }); }).child(svg("mods/files-copy/close.svg").size(12))))
+      .when(this.gotoOpen && !this.preview && Boolean(this.code || this.lines), el => el.child(this.gotoRow(t)))
       .when(this.replaceOpen && this.find.mode === "editor" && this.editable && !this.preview, el => el.child(this.replaceRow(t)))
       .child(this.raster || (isSvg && this.preview && (this.code || this.lines)) ? this.imageView(t, cx)
         : this.preview && (this.code || this.lines) ? this.mdPane(t, cx)
         // A fixed box (absolute, inset 0) instead of flex sizing: sized by flex the editor grew with its text,
         // so nothing overflowed and the wheel didn't scroll (as with the Changes list).
+        : this.split && this.code && /\.(md|markdown)$/i.test(path) ? h_flex().flex_1().min_h(0)
+          .child(div().flex_1().min_w(0).h_full().relative().child(Editor.new(this.code).absolute().inset_0()))
+          .child(div().w(1).h_full().flex_none().bg(t.border)).child(this.mdPane(t, cx))
         : this.code ? div().flex_1().min_h(0).relative().child(Editor.new(this.code).absolute().inset_0())
         : this.lines ? this.codeView(t)
         : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…"))
