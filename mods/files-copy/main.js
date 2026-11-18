@@ -968,16 +968,19 @@ export default class Files extends View {
     const f = this.find, n = f.list.length;
     const btn = (id, label, tip, act) => div().id(id).size(22).flex_none().flex().items_center().justify_center().rounded(4).cursor_pointer()
       .text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip(tip).on_click((_e, cx) => act(cx)).child(label);
-    // Search options (remembered): each toggles one flag and searches again.
-    const opt = (id, label, tip, flag) => div().id(id).h(22).px(5).flex_none().flex().items_center().rounded(4).cursor_pointer().text_size(11)
-      .text_color(f[flag] ? t.foreground : t.dim).when(Boolean(f[flag]), e => e.bg(t.selected)).hover(s => s.bg(t.hover)).tooltip(tip)
+    // Search options (remembered): one joined, bordered group; each cell toggles a flag (active tinted) and searches again.
+    const opt = (id, label, tip, flag, first) => div().id(id).w(26).h(20).flex().items_center().justify_center().text_size(11).tooltip(tip)
+      .when(!first, e => e.border_l(1).border_color(t.border))
+      .text_color(f[flag] ? t.foreground : t.dim).when(Boolean(f[flag]), e => e.bg(t.selected)).when(!f[flag], e => e.cursor_pointer().hover(s => s.bg(t.hover)))
       .on_click((_e, cx) => { f[flag] = !f[flag]; try { localStorage.setItem("files-copy.find", JSON.stringify({ case: f.case, word: f.word, regex: f.regex })); } catch {} f.cur = 0; this.runFind(cx, true); }).child(label);
+    const options = h_flex().flex_none().rounded(6).border_1().border_color(t.border).overflow_hidden()
+      .child(opt("files-find-case", "Aa", "Match case", "case", true)).child(opt("files-find-word", "W", "Whole word", "word")).child(opt("files-find-re", ".*", "Regular expression", "regex"));
     return h_flex().flex_none().gap(6).items_center()
       .child(div().id("files-find").h(24).w(210).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_text()
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_key_down((e, cx) => { if (e.keystroke === "escape") { this.closeFind(cx); cx.stop_propagation(); } })
         .child(Input.new(this.findInput).flex_1().h_full().text_size(12).text_color(t.foreground)))
-      .child(opt("files-find-case", "Aa", "Match case", "case")).child(opt("files-find-word", "W", "Whole word", "word")).child(opt("files-find-re", ".*", "Regular expression", "regex"))
+      .child(options)
       .child(div().flex_none().text_size(11).text_color(f.bad ? t.ansi1 : t.dim).child(f.bad ? "Invalid regex" : f.q ? (n ? `${f.cur + 1}/${n}${f.capped ? "+" : ""}` : "No results") : ""))
       .child(btn("files-find-prev", "↑", "Previous (⇧Enter)", cx => this.stepFind(-1, cx)))
       .child(btn("files-find-next", "↓", "Next (Enter)", cx => this.stepFind(1, cx)))
