@@ -6,7 +6,7 @@ install: copy the folder mods/files-copy into ~/.config/herdr-app/mods/files-cop
 place: none
 needs: [sh, git, find (filter outside git), uv (uvx fetches jedi on first use; Python go-to-definition only), curl (web images in Markdown)]
 shared_keys: [files-copy.open]
-reads_keys: []
+reads_keys: [wb.diff.request (root of the focused diff tab; optional)]
 commands: [tab.new (files-copy with props), tab.select, tab.rename]
 ---
 
@@ -26,6 +26,8 @@ the highlighted file, or the first match when none is.
 Esc or the × in the input clears the filter and brings back the normal tree. Each place (space and
 folder) keeps its own filter text, open folders and last file while the panel lives; switching spaces
 swaps them.
+
+The panel follows the focused terminal's folder; while a file tab (or a `wb-diff` tab, via `wb.diff.request`) is focused it stays on that tab's root folder, and while another mod's tab is focused it keeps the folder it had.
 
 A click on a file opens it in a tab: a syntax-highlighted editor at full height. One tab per space is reused, as Changes does with its diff tab; the tab is named after the file.
 

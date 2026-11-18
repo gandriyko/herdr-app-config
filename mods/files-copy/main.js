@@ -121,10 +121,17 @@ const mdVisible = (md) => md.replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/\[([^
 function location() {
   const space = spaces().find(s => s.active), f = focused();
   const pane = f?.pane ? panes().find(p => p.pane === f.pane) : null;
+  // A mod tab (the file tab, a diff tab) has no folder of its own (its cwd is null): the panel stays on the folder of the file
+  // it shows, taken from that tab's request; any other mod tab leaves the panel where it is (null).
+  if (pane?.mod) {
+    // contract: wb.diff.request is written by changes-copy; optional, then the panel just stays put
+    const r = pane.mod === "files-copy" ? shared(REQUEST) : pane.mod === "wb-diff" ? shared("wb.diff.request") : null;
+    return r?.root ? { cwd: r.root, on: r.on ?? null, space: space?.id } : null;
+  }
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
   return { cwd: pane?.cwd || f?.cwd || space?.folder, on, space: space?.id };
 }
-const key = () => JSON.stringify(location());
+const key = () => { const l = location(); return l ? JSON.stringify(l) : null; }; // null: keep the current folder
 const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", toml: "yaml", jsonc: "json", svelte: "html", vue: "html" };
 const PER_FOLDER = 500, TOTAL = 5000, ALL = 20000, MATCHES = 500;
 
@@ -219,7 +226,8 @@ export default class Files extends View {
   }
 
   current(context) {
-    return this.context === context && key() === context.key;
+    const k = key();
+    return this.context === context && (k === null || k === context.key);
   }
 
   async loadFolder(path, context) {
@@ -232,7 +240,9 @@ export default class Files extends View {
   }
 
   refresh(cx) {
-    const { cwd, on } = location(), next = key();
+    const loc = location();
+    if (!loc) return; // focus is on a tab with no folder of its own: stay
+    const { cwd, on } = loc, next = key();
     if (next !== this.context?.key) {
       // Each place (space + folder) keeps its own open folders, file and filter text.
       if (this.context) this.saved.set(this.context.key, { folders: this.folders, file: this.file, query: this.search.value() });
@@ -1071,7 +1081,8 @@ export default class Files extends View {
     const t = theme();
     if (props()?.unsaved) return this.saveDialog(t);
     if (this.tab) { this.pickRequest(cx); return this.renderTab(t, cx); }
-    if (key() !== this.context?.key) this.refresh(cx);
+    const k = key();
+    if (k !== null && k !== this.context?.key) this.refresh(cx);
     return v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child("Files"))
