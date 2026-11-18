@@ -8,7 +8,9 @@ import { highlight, languageFor } from "./highlight.js";
 
 const PY = languageFor("x.py");
 // ponytail: CHAR_W assumes a monospace font at 0.6 em (JetBrains Mono, Menlo, SF Mono); another font puts the underline off.
-const FONT = 13, ROW = 20, CHAR_W = FONT * 0.6;
+// The view is drawn to match the built-in editor (measured from screenshots): row 21, gutter numbers at the code's size,
+// code 49 px from the left for a 2-digit gutter, faint indent guides every 2 columns, the editor's syntax colours.
+const FONT = 13, ROW = 21, CHAR_W = FONT * 0.6;
 
 // argv: project root, file, line (1-based), column. Prints [{path, line, col}]; uses the project's .venv/venv when present.
 const GOTO = `import sys, os, json, jedi
@@ -117,6 +119,46 @@ function findAll(text, re) {
 // What a Markdown block shows as words: link targets, image sources, tags and markers left out, so a hit is something readable.
 const mdVisible = (md) => md.replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/<[^>]+>/g, "")
   .replace(/^\s{0,3}(?:#{1,6}|>+|[-*+]|\d+[.)])\s+/gm, "").replace(/[`*~]/g, "").replace(/(^|\W)_+|_+(?=\W|$)/g, "$1");
+
+// The editor colours a few tokens its own way (read off screenshots of both views): operators and the words and/or/not/new in
+// #56b6c2, true/false in #e5c07b, null/None in the theme's ansi6, this/self plain, a Capitalised name or a member after "." plain
+// unless it is a built-in type or follows `class`. highlight.js can't tell those apart, so its pieces are adjusted here.
+const OP_COLOR = "#56b6c2", BOOL_COLOR = "#e5c07b";
+const BUILTIN_TYPES = new Set(["int", "str", "float", "bool", "list", "dict", "set", "tuple", "bytes", "object", "string", "number", "boolean", "void", "any"]);
+const CODE_EXT = /\.(js|jsx|mjs|cjs|ts|tsx|py|go|rs|java|c|h|cpp|hpp|cs|php|rb|kt|swift|sh|zsh|bash)$/i;
+function editorColors(pieces, t, path) {
+  const code = CODE_EXT.test(path), py = /\.py$/i.test(path), typed = /\.(py|ts|tsx)$/i.test(path), out = [];
+  let before = "";
+  const add = (text, color) => { if (text) out.push({ text, color }); };
+  for (const sp of pieces) {
+    const w = sp.text.trim();
+    if (/^(true|false|True|False)$/.test(w)) add(sp.text, BOOL_COLOR);
+    else if (/^(null|undefined|None|nil)$/.test(w)) add(sp.text, t.ansi6);
+    else if (/^(this|self|cls)$/.test(w)) add(sp.text, undefined);
+    else if (code && /^(and|or|not|new)$/.test(w)) add(sp.text, OP_COLOR);
+    else if (sp.color && sp.color === t.ansi3) { // highlight.js's "type or member" colour, here remapped to ansi3
+      add(sp.text, BUILTIN_TYPES.has(w) || (/\bclass\s*$/.test(before) && !before.endsWith(".")) ? t.ansi3 : undefined);
+    }
+    else if (py && sp.color === t.ansi2 && /^("""|''').*\1?$/.test(w)) { // a one-line docstring: quotes plain, text as a comment
+      const q = w.slice(0, 3), end = w.length > 5 && w.endsWith(q) ? q : "";
+      add(q, undefined); add(w.slice(3, w.length - end.length), t.dim); add(end, undefined);
+    }
+    else if (!sp.color && code) {
+      // types in annotations (Python, TypeScript) as the editor colours them
+      const parts = sp.text.split(typed ? /([+\-*/%=<>!&|^~?]+|\b(?:int|str|float|bool|list|dict|set|tuple|bytes|object|string|number|boolean|void|any)\b)/ : /([+\-*/%=<>!&|^~?]+)/);
+      for (const part of parts) add(part, /^[+\-*/%=<>!&|^~?]+$/.test(part) && part !== "->" ? OP_COLOR : typed && BUILTIN_TYPES.has(part) ? t.ansi3 : undefined);
+    }
+    else add(sp.text, sp.color);
+    before += sp.text;
+  }
+  return out;
+}
+
+// a toward b by w (0..1), both "#rrggbb"; a when either isn't.
+function mixHex(a, b, w) {
+  const p = (c) => /^#[0-9a-f]{6}/i.test(c) ? [1, 3, 5].map(i => parseInt(c.slice(i, i + 2), 16)) : null, x = p(a), y = p(b);
+  return x && y ? "#" + x.map((v, i) => Math.round(v * w + y[i] * (1 - w)).toString(16).padStart(2, "0")).join("") : a;
+}
 
 function location() {
   const space = spaces().find(s => s.active), f = focused();
@@ -444,7 +486,6 @@ export default class Files extends View {
         // Editable when whole and on this machine (writeTextFile writes local files only).
         this.editable = text.length <= 400000 && !req.on;
         this.text = text = text.length > 400000 ? text.slice(0, 400000) + "\n… (file truncated)" : text;
-        if (!this.pyView()) { this.makeEditor(); return; }
         // ponytail: a tab drawn as 4 spaces; jedi's column on such a line is off by 3 per tab (Python code rarely has them).
         this.lines = text.split("\n").map(l => l.replace(/\r$/, "").replace(/\t/g, "    "));
         // History entries carry `top` (their mark may be null: a file opened from the panel has none).
@@ -452,16 +493,14 @@ export default class Files extends View {
         else if (at) { this.mark = { line: at.line, ...wordAt(this.lines[at.line] ?? "", at.col) }; this.centre = at.line; }
         this.caretToMark();
         this.handle.focus();
+        if (req.edit && this.editable) this.editFile(cx); // props.edit: open straight in the editor
       } catch { if (this.req === req) this.fileError = "Cannot preview this file (binary, too large, or unreadable)"; }
       finally { if (this.req === req && this.find.open) this.runFind(cx, false); cx.notify(); }
     });
   }
 
-  // Python is drawn by the mod (it knows which name is under the pointer); other files use the editor.
-  // .env files too: highlight.js colours each line on its own, so an unbalanced quote in one value
-  // (PASS=it's) can't paint the rest of the file as a string, as the editor's bash grammar would.
-  // Markdown too: the editor shows it uncoloured (its theme has no colours for headings, code, links).
-  pyView() { const name = this.req.path.split("/").pop(); return /\.(py|md|markdown)$/i.test(name) || name.startsWith(".env"); }
+  // Every text file opens in the mod's own view (read-only; it can tint search hits, and ⌘-click jumps in Python). The Edit button
+  // switches to the editor (View comes back); nothing is typed into this view.
 
   caretToMark() { if (this.mark && this.lines?.[this.mark.line] !== undefined) this.caret = this.anchor = { line: this.mark.line, col: this.mark.start }; }
 
@@ -499,10 +538,6 @@ export default class Files extends View {
   // Read-only keys: caret moves (Shift extends the selection), ⌘A, ⌘C, Ctrl+- back. Nothing edits.
   key(e, cx) {
     const m = e.modifiers, k = e.key.toLowerCase(), L = this.lines, n = L.length, { line, col } = this.caret;
-    // Typing here (an editable file): switch to the editor at the caret and apply the key there.
-    if (this.editable && !m.platform && !m.control && (["enter", "backspace", "delete", "tab"].includes(k) || e.key_char)) {
-      this.typeIntoEditor(k, e.key_char, cx); cx.stop_propagation(); return;
-    }
     const at = (l, c) => { l = Math.max(0, Math.min(n - 1, l)); return { line: l, col: Math.max(0, Math.min(L[l].length, c)) }; };
     const page = Math.max(1, Math.floor(this.viewH / ROW) - 2);
     const moves = m.platform
@@ -543,9 +578,9 @@ export default class Files extends View {
   }
 
   // The file in the built-in editor: editable when `editable`, ⌘S (or the Save button) writes it.
-  makeEditor() {
+  makeEditor(focus = true) {
     const t = theme(), path = this.req.path, name = path.split("/").pop(), ext = name.includes(".") ? name.split(".").pop() : "txt";
-    // .env while editing: plain text (see pyView: a grammar spanning lines breaks on one bad quote).
+    // .env while editing: plain text (a grammar spanning lines breaks on one bad quote).
     const language = name.startsWith(".env") ? "text" : LANG[ext] ?? ext;
     this.code = EditorState.new({ language, readonly: !this.editable, value: this.text,
       font_family: settings().font_family, font_size: FONT,
@@ -558,30 +593,35 @@ export default class Files extends View {
       if (this.autosave && dirty) { const g = ++this.autoGen; cx.timer.after(1500, acx => { if (g === this.autoGen && this.dirty && this.code) this.save(acx); }); }
       if (this.split) { const g = ++this.splitGen; cx.timer.after(250, acx => { if (g === this.splitGen) acx.notify(); }); }
     });
-    this.code.focus();
+    if (focus) this.code.focus();
   }
 
-  // Python opens in the mod's own view (⌘-click definitions); Edit switches it to the editor.
-  editPython(cx) { this.lines = null; this.spans = []; this.preview = false; this.makeEditor(); if (this.find.open) this.runFind(cx, false); cx.notify(); }
-
-  // A key typed in the own view: the editor takes over with the same selection (or caret), then gets the key.
-  typeIntoEditor(k, char, cx) {
-    const sel = this.selection() ?? { s: this.caret, e: this.caret }, orig = this.text.split("\n");
-    // The own view's (line, col) as an offset in the file's text: its lines dropped \r and drew a tab as 4 columns.
-    const offset = ({ line, col }) => {
-      let at = 0;
-      for (let i = 0; i < line; i++) at += orig[i].length + 1;
-      const s = orig[line] ?? "";
-      for (let i = 0, w = 0; i < s.length && w < col; i++, at++) w += s[i] === "\t" ? 4 : 1;
-      return at;
-    };
-    let start = offset(sel.s), end = offset(sel.e);
-    this.editPython(cx);
-    if (start === end && k === "backspace") start = Math.max(0, start - 1);
-    if (start === end && k === "delete") end = Math.min(this.text.length, end + 1);
+  // The own view's (line, col) as an offset in the file's text: its lines dropped \r and drew a tab as 4 columns.
+  offsetOf({ line, col }) {
+    const orig = this.text.split("\n");
+    let at = 0;
+    for (let i = 0; i < line; i++) at += (orig[i] ?? "").length + 1;
+    const s = orig[line] ?? "";
+    for (let i = 0, w = 0; i < s.length && w < col; i++, at++) w += s[i] === "\t" ? 4 : 1;
+    return at;
+  }
+  // Edit: the editor takes over with the same selection (or caret).
+  editFile(cx) {
+    const sel = this.selection() ?? { s: this.caret, e: this.caret }, start = this.offsetOf(sel.s), end = this.offsetOf(sel.e);
+    this.lines = null; this.spans = []; this.preview = false; this.makeEditor();
     this.code.set_selected_range({ start, end });
-    this.code.replace(k === "backspace" || k === "delete" ? "" : k === "enter" ? "\n" : k === "tab" ? "\t" : char);
-    this.dirty = this.code.value() !== this.text; cx.notify();
+    if (this.find.open) this.runFind(cx, false);
+    cx.notify();
+  }
+  // View: back to the own view (only with nothing unsaved), at the editor's caret.
+  showView(cx) {
+    if (!this.code || this.dirty) return;
+    const text = this.code.value(), before = text.slice(0, this.code.selected_range().start).split("\n");
+    this.lines = text.split("\n").map(l => l.replace(/\r$/, "").replace(/\t/g, "    "));
+    this.code.release(); this.code = null; this.spans = []; this.longest = undefined; this.lang = null; this.mark = null; this.split = false;
+    this.caret = this.anchor = { line: before.length - 1, col: before.at(-1).length }; this.centre = this.caret.line; this.scrollX = 0;
+    if (this.find.open) this.runFind(cx, false);
+    cx.notify();
   }
 
   // Writes the editor's text, only if the file on disk is still what was read (else says so and keeps the edits).
@@ -707,7 +747,7 @@ export default class Files extends View {
 
   // One line's colored pieces: the hovered name underlined, the marked one tinted, the selection shaded.
   lineSpans(i, t, sel) {
-    const spans = this.spans[i] ??= this.lines[i].length > 1000 ? [{ text: this.lines[i] }] : highlight(this.lines[i], this.lang ??= languageFor(this.req.path) ?? PY, t);
+    const spans = this.spans[i] ??= this.lines[i].length > 1000 ? [{ text: this.lines[i] }] : (this.lang ??= languageFor(this.req.path) ?? (/\.(py|md|markdown)$/i.test(this.req.path) || this.req.path.split("/").pop().startsWith(".env") ? PY : null)) ? editorColors(highlight(this.lines[i], this.lang, { ...t, ansi3: t.ansi1, ansi6: t.ansi3 }), t, this.req.path) : [{ text: this.lines[i] }];
     const sr = sel && i >= sel.s.line && i <= sel.e.line ? { line: i, start: i === sel.s.line ? sel.s.col : 0, end: i === sel.e.line ? sel.e.col : Infinity } : null;
     const ms = this.fmap?.get(i) ?? [], cuts = [this.hover, this.mark, sr].filter(w => w?.line === i).concat(ms);
     const inside = (w, a, b) => w?.line === i && a >= w.start && b <= w.end;
@@ -721,7 +761,7 @@ export default class Files extends View {
         const a = edges[k], b = edges[k + 1], hov = inside(this.hover, a, b);
         out.push(div().flex_none().text_color(hov ? t.accent : s.color ?? t.foreground)
           .when(hov, el => el.underline()).when(inside(this.mark, a, b), el => el.bg(t.accent + "44").rounded(2))
-          .when(Boolean(ms.length) && ms.some(m => a >= m.start && b <= m.end), el => el.bg(ms.find(m => a >= m.start && b <= m.end).k === this.find.cur ? t.accent + "88" : t.accent + "33").rounded(2))
+          .when(Boolean(ms.length) && ms.some(m => a >= m.start && b <= m.end), el => el.bg(ms.find(m => a >= m.start && b <= m.end).k === this.find.cur ? t.ansi3 + "cc" : t.ansi3 + "55").rounded(2))
           .when(inside(sr, a, b), el => el.bg(t.selection))
           .child(s.text.slice(a - pos, b - pos)));
       }
@@ -732,9 +772,16 @@ export default class Files extends View {
     return out;
   }
 
+  // Faint vertical lines at every 2nd column inside a line's indent (from column 0), as the editor draws them.
+  guides(i, t) {
+    const l = this.lines[i], ind = l.length - l.trimStart().length, out = [];
+    for (let k = 0; k * 2 < ind && k < 40; k++) out.push(div().absolute().left(k * 2 * CHAR_W - 2.5).top(0).w(1).h(ROW).bg(t.border));
+    return out;
+  }
+
   codeView(t) {
     const n = this.lines.length, H = this.viewH;
-    this.gutter = String(n).length * CHAR_W + 28;
+    this.gutter = Math.max(2, String(n).length) * CHAR_W + 33.5;
     this.longest ??= this.lines.reduce((m, l) => Math.max(m, l.length), 0);
     if (Number.isInteger(this.centre) && this.sized) { // the found line in the middle of the view
       this.scrollY = Math.max(0, Math.min((n + 2) * ROW - H, this.centre * ROW - (H - ROW) / 2)); this.centre = null;
@@ -744,8 +791,8 @@ export default class Files extends View {
     const rows = [], sel = this.selection();
     for (let i = first; i < last; i++) rows.push(h_flex().h(ROW).flex_none().items_center().whitespace_nowrap()
       .when(this.mark?.line === i, el => el.bg(t.hover))
-      .child(div().w(this.gutter - 12).mr(12).flex_none().text_right().text_size(11).text_color(this.caret.line === i ? t.foreground : t.dim).child(String(i + 1)))
-      .child(div().flex_1().min_w(0).overflow_hidden().child(h_flex().relative().left(-this.scrollX).children(this.lineSpans(i, t, sel)))));
+      .child(div().w(this.gutter - 25.6).mr(25.6).flex_none().text_right().text_size(FONT).text_color(this.fmap?.has(i) ? t.ansi3 : this.caret.line === i ? t.foreground : mixHex(t.foreground, t.background, 0.6)).when(Boolean(this.fmap?.has(i)), e => e.font_semibold()).child(String(i + 1)))
+      .child(div().flex_1().min_w(0).overflow_hidden().child(h_flex().relative().left(-this.scrollX).children([...this.guides(i, t), ...this.lineSpans(i, t, sel)]))));
     const z = () => settings().zoom || 1, caretX = this.gutter + this.caret.col * CHAR_W - this.scrollX;
     return div().id("files-py").flex_1().min_h(0).relative().overflow_hidden().track_focus(this.handle)
       .font_family(settings().font_family ?? "JetBrains Mono").text_size(FONT)
@@ -763,7 +810,7 @@ export default class Files extends View {
       .on_scroll_wheel((e, cx) => { this.scroll(-e.delta.y / z(), -e.delta.x / z(), cx); cx.stop_propagation(); })
       .on_key_down((e, cx) => this.key(e, cx))
       .child(v_flex().absolute().left(0).right(0).top(first * ROW - this.scrollY).children(rows))
-      .when(caretX >= this.gutter, el => el.child(div().absolute().left(caretX).top(this.caret.line * ROW - this.scrollY + 2).w(2).h(ROW - 4).bg(t.foreground)))
+      .when(caretX >= this.gutter, el => el.child(div().absolute().left(caretX).top(this.caret.line * ROW - this.scrollY + 1.5).w(1.5).h(ROW - 3).bg(t.foreground)))
       .when(thumb > 0, el => el.child(div().absolute().right(2).top(this.scrollY / Math.max(1, total - H) * (H - thumb)).w(6).h(thumb).rounded(3).bg(t.border)));
   }
 
@@ -1085,7 +1132,8 @@ export default class Files extends View {
         .when(Boolean(this.code || this.lines) && /\.(md|markdown|svg)$/i.test(path), el => el.child(button("files-preview", this.preview ? "Source" : "Preview",
           this.preview ? "Back to the source" : isSvg ? "Show the picture (as saved)" : "Show the rendered Markdown (read-only)", cx => { this.preview = !this.preview; if (this.find.open) this.runFind(cx, true); else cx.notify(); })))
         // Not over the rendered Markdown: editing there would change nothing on screen (Source first).
-        .when(Boolean(this.lines) && this.editable && !this.preview, el => el.child(button("files-edit", "Edit", "Edit this file (⌘-click definitions are off while editing)", cx => this.editPython(cx))))
+        .when(Boolean(this.lines) && this.editable && !this.preview, el => el.child(button("files-edit", "Edit", "Edit this file (the view is read-only; ⌘-click definitions are off while editing)", cx => this.editFile(cx))))
+        .when(Boolean(this.code) && !this.dirty && !this.preview && !this.split, el => el.child(button("files-view", "View", "Back to the read-only view (search hits are tinted there)", cx => this.showView(cx))))
         .when(this.finding, el => el.child(h_flex().flex_none().gap(6).items_center().text_size(11).text_color(t.accent)
           .child(svg("mods/files-copy/spinner.svg").size(12).spin(900)).child("Finding definition…")))
         .when(!this.finding && py && !this.code, el => el.child(div().flex_none().text_size(11).text_color(this.cmd ? t.accent : t.dim).child("⌘-click: definition")))

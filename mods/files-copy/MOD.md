@@ -29,7 +29,7 @@ swaps them.
 
 The panel follows the focused terminal's folder; while a file tab (or a `wb-diff` tab, via `wb.diff.request`) is focused it stays on that tab's root folder, and while another mod's tab is focused it keeps the folder it had.
 
-A click on a file opens it in a tab: a syntax-highlighted editor at full height. One tab per space is reused, as Changes does with its diff tab; the tab is named after the file.
+A click on a file opens it in a tab, always first in the mod's own read-only view (syntax-coloured, full height; the Edit button switches to the built-in editor, View comes back when nothing is unsaved). One tab per space is reused, as Changes does with its diff tab; the tab is named after the file.
 
 Editing: local files under 400,000 chars are editable (a remote space's or a truncated file is read-only).
 Unsaved edits put ● after the path and a Save button in the header; ⌘S or Save writes the file with
@@ -50,7 +50,9 @@ view can't highlight words. For this, Markdown is cut into blocks at blank lines
 
 While a file is edited in the editor, the ⇄ button after the find field shows a replace row (collapsed by default; Esc in its field hides it) under the header with a Replace field and Replace (current hit; Enter in the field does the same) and All buttons; Replace all is one edit (not several undo steps).
 
-The editor can't mark text, so while a search has hits a thin strip beside it shows a tick for each hit at its line position (the current one stronger and wider); a click on the strip goes to the nearest hit, and the current hit is selected in the editor.
+While a search has hits in the editor, a thin strip beside it shows a tick for each hit at its line position (the current one stronger and wider); a click on the strip goes to the nearest hit, and the current hit is selected in the editor.
+
+Search hits in the view (every hit tinted yellow, the current one stronger; the line numbers of lines with hits yellow and bold) are the normal case, since the view is the default. Press Edit and the editor takes over (it can't mark text); the find field keeps working there, with the strip beside the editor and the replace row.
 
 Find options (remembered): `Aa` match case, `W` whole word, `.*` regular expression (an invalid one says so; Replace may use `$1`, `$&`). Ctrl-F (⌘F is the app's terminal search) focuses the field, also in the editor, where the binding is made in the editor's context so other mods' editors lose their own Ctrl-F and takes a one-line selection as the query. ⌘G / F3 step to the next hit, with Shift the previous. Replace all is one edit.
 
@@ -77,7 +79,7 @@ highlight.js's line-by-line Markdown colours (headings, `code`, **bold**, links,
 rules, so one unbalanced quote in a value (`PASS=it's`) colours only its own line, not the rest of the file
 as a multi-line grammar would; their Edit opens the editor as plain text for the same reason.
 
-Other files use the built-in editor. A `.py` file is drawn by the mod itself (fixed row height and
+Every text file is drawn by the mod itself (languages the highlighter lacks in plain colours). In the view of a `.py` file (fixed row height and
 character width, own scrolling), so it knows which name is under the pointer: with ⌘ held that name is
 underlined and the pointer is a hand. ⌘-click opens its definition: in the same file, or the tab switches
 to another file, including files outside the folder (stdlib, site-packages). The clicked name stays tinted
@@ -87,11 +89,7 @@ back and forward through jumps (file and scroll position); a new jump drops the 
 side buttons work only when mapped to ⌘[ / ⌘] (Logi Options+, SteerMouse, BetterTouchTool): the mod API
 reports only the left, right and middle buttons. The view is read-only with a caret: a click places it, drag or Shift+click selects,
 double-click selects a word, triple-click a line; arrows (Shift extends), Home/End, PageUp/PageDown,
-⌘←/⌘→ (line indent/end), ⌘↑/⌘↓ (file start/end) move it; ⌘A selects all and ⌘C copies. Typing changes
-nothing there by itself: in an editable file a typed key (a character, Enter, Tab, Backspace, Delete) switches
-to the built-in editor with the same caret or selection and applies the key there; the Edit button does the
-switch too (⌘-click definitions
-are off until the file is opened again). The wheel scrolls. Other languages have no go-to-definition.
+⌘←/⌘→ (line indent/end), ⌘↑/⌘↓ (file start/end) move it; ⌘A selects all and ⌘C copies. Typing changes nothing there: the Edit button switches to the built-in editor with the same caret or selection (⌘-click definitions are off until View). The wheel scrolls. Other languages have no go-to-definition.
 
 ## Files
 - main.js: the panel (tree), the file tab (same class, opened with props) and go-to-definition (the jedi
