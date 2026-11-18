@@ -46,6 +46,8 @@ markup excluded) and marks the block that holds the hit with an accent edge and 
 view can't highlight words. For this, Markdown is cut into blocks at blank lines before a paragraph or heading
 (never inside a fence or HTML block, or when the file has reference links).
 
+While a file is edited in the editor, a Replace field with Replace (current hit; Enter in the field does the same) and All buttons follows the find field; Replace all is one edit (not several undo steps).
+
 Rendered Markdown opens behind a "Loading…" cover until its pictures are fetched and the text has settled
 (150 ms after the last picture, at most 3 s), then shows in one redraw instead of popping in piece by piece.
 

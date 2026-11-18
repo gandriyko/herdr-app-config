@@ -157,6 +157,8 @@ export default class Files extends View {
       this.findInput = InputState.new({ placeholder: "Find in file" });
       this.findInput.on("change", (_e, cx) => { this.find.q = this.findInput.value().toLowerCase(); this.find.cur = 0; this.runFind(cx, true); });
       this.findInput.on("submit", (e, cx) => this.stepFind(e?.shift ? -1 : 1, cx));
+      this.replaceInput = InputState.new({ placeholder: "Replace with" }); // shown while editing; Enter replaces the current hit
+      this.replaceInput.on("submit", (_e, cx) => this.replaceOne(cx));
       this.applied = Math.max(p.ts ?? 0, shared(REQUEST)?.ts ?? 0);
       this.open(p, cx);
       return;
@@ -852,6 +854,24 @@ export default class Files extends View {
     }
     cx.notify();
   }
+  // Replace (editor mode, editable file): the current hit, or every hit (case-insensitive, one edit through set_value).
+  replaceOne(cx) {
+    const f = this.find, m = f.list[f.cur];
+    if (!m || f.mode !== "editor" || !this.editable) return;
+    const rv = this.replaceInput.value();
+    this.code.set_selected_range({ start: m.s, end: m.e });
+    this.code.replace(rv);
+    // A replacement that holds the query again would be found again: step past it.
+    if (rv.toLowerCase().includes(f.q)) f.cur++;
+    this.runFind(cx, true);
+  }
+  replaceAll(cx) {
+    const f = this.find;
+    if (!f.q || !f.list.length || f.mode !== "editor" || !this.editable) return;
+    const rv = this.replaceInput.value(), text = this.code.value();
+    this.code.set_value(text.replace(new RegExp(f.q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi"), () => rv));
+    f.cur = 0; this.runFind(cx, false);
+  }
   findBar(t) {
     const f = this.find, n = f.list.length;
     const btn = (id, label, tip, act) => div().id(id).size(22).flex_none().flex().items_center().justify_center().rounded(4).cursor_pointer()
@@ -864,7 +884,18 @@ export default class Files extends View {
       .child(div().flex_none().text_size(11).text_color(t.dim).child(f.q ? (n ? `${f.cur + 1}/${n}${f.capped ? "+" : ""}` : "No results") : ""))
       .child(btn("files-find-prev", "↑", "Previous (⇧Enter)", cx => this.stepFind(-1, cx)))
       .child(btn("files-find-next", "↓", "Next (Enter)", cx => this.stepFind(1, cx)))
-      .child(btn("files-find-close", "×", "Clear (Esc)", cx => this.closeFind(cx)));
+      .child(btn("files-find-close", "×", "Clear (Esc)", cx => this.closeFind(cx)))
+      .when(f.mode === "editor" && this.editable, el => {
+        const act = (id, label, tip, run) => div().id(id).flex_none().px(6).h(22).flex().items_center().rounded(4).border_1().border_color(t.border).text_size(11)
+          .text_color(n ? t.foreground : t.border).when(n > 0, e => e.cursor_pointer().hover(s => s.bg(t.hover))).tooltip(tip)
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => { if (n) run(cx); }).child(label);
+        return el.child(div().id("files-replace").h(24).w(170).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_text()
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_key_down((e, cx) => { if (e.keystroke === "escape") { this.closeFind(cx); cx.stop_propagation(); } })
+          .child(Input.new(this.replaceInput).flex_1().h_full().text_size(12).text_color(t.foreground)))
+          .child(act("files-replace-one", "Replace", "Replace the current hit (Enter in the field)", cx => this.replaceOne(cx)))
+          .child(act("files-replace-all", "All", "Replace every hit", cx => this.replaceAll(cx)));
+      });
   }
 
   renderTab(t, cx) {
