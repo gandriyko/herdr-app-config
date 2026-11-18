@@ -173,6 +173,9 @@ export default class Files extends View {
       this.gotoInput.on("submit", (_e, cx) => this.goLine(cx));
       this.confirmRevert = false; this.split = false; this.autoGen = 0; this.splitGen = 0; this.checking = false;
       try { this.autosave = localStorage.getItem("files-copy.autosave") === "1"; } catch { this.autosave = false; }
+      // The editor has a find of its own on ⌘F / Ctrl-F (it marks every hit of the selection and shows no field of ours):
+      // inside this tab's editor those chords mean our find bar instead, filled with the selection.
+      cx.bind_keys([{ keystroke: "cmd-f", action: "files-copy.find", context: "Editor && FilesCopyTab" }, { keystroke: "ctrl-f", action: "files-copy.find", context: "Editor && FilesCopyTab" }]);
       this.replaceOpen = false; this.replaceInput = InputState.new({ placeholder: "Replace with" }); // shown while editing; Enter replaces the current hit
       this.replaceInput.on("submit", (_e, cx) => this.replaceOne(cx));
       this.applied = Math.max(p.ts ?? 0, shared(REQUEST)?.ts ?? 0);
@@ -902,6 +905,9 @@ export default class Files extends View {
   }
   openFind(cx) {
     if (!this.findMode()) return;
+    // A selection (one line) becomes the query; the field shows it.
+    const sel = this.code ? this.code.value().slice(this.code.selected_range().start, this.code.selected_range().end) : this.selectedText();
+    if (sel && !sel.includes("\n") && sel.length < 200 && sel !== this.find.q) { this.findInput.set_value(sel); this.find.q = sel; this.find.cur = 0; }
     this.find.open = true; this.findInput.focus(); this.runFind(cx, Boolean(this.find.q));
   }
   // Esc or ×: the text is cleared (the bar stays) and the keyboard goes back to the view.
@@ -1011,10 +1017,10 @@ export default class Files extends View {
     const path = this.req.path, py = path.endsWith(".py"), isSvg = /\.svg$/i.test(path);
     const button = (id, label, tip, act) => div().id(id).flex_none().px(8).py(2).rounded(5).border_1().border_color(t.border).text_size(11)
       .cursor_pointer().hover(s => s.bg(t.hover)).tooltip(tip).on_click((_e, cx) => act(cx)).child(label);
-    return v_flex().id("files-tab").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
+    return v_flex().id("files-tab").key_context("FilesCopyTab").on_action("files-copy.find", (_e, cx) => this.openFind(cx)).size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
       .on_key_down((e, cx) => {
         if (e.modifiers.platform && e.key.toLowerCase() === "s" && this.code) { this.save(cx); cx.stop_propagation(); }
-        else if (e.modifiers.platform && e.key.toLowerCase() === "f" && this.findMode()) { this.openFind(cx); cx.stop_propagation(); }
+        else if ((e.modifiers.platform || e.modifiers.control) && e.key.toLowerCase() === "f" && this.findMode()) { this.openFind(cx); cx.stop_propagation(); }
         // ⌘G / F3: next hit, with Shift previous. ⌘L or Ctrl+G: go to line. F12: definition of the name at the caret (Python, editor).
         else if (((e.modifiers.platform && e.key.toLowerCase() === "g") || e.key === "f3") && this.find.list.length) { this.stepFind(e.modifiers.shift ? -1 : 1, cx); cx.stop_propagation(); }
         else if (((e.modifiers.platform && e.key.toLowerCase() === "l") || (e.modifiers.control && e.key.toLowerCase() === "g")) && (this.code || this.lines)) { this.openGoto(cx); cx.stop_propagation(); }

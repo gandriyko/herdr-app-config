@@ -476,6 +476,8 @@ export default class DiffView extends View {
 
   openFind(cx) {
     if (!this.rows.length) return;
+    const sel = this.selectedText(); // a selection (one line) becomes the query
+    if (sel && !sel.includes("\n") && sel.length < 200 && sel !== this.find.q) { this.findInput.set_value(sel); this.find.q = sel; this.find.cur = 0; }
     this.find.open = true; this.findInput.focus(); this.runFind(cx, Boolean(this.find.q));
   }
   // Esc or ×: the text is cleared (the bar stays) and the keyboard goes back to the diff.
@@ -865,7 +867,7 @@ export default class DiffView extends View {
         if ((down || up) && e.modifiers.alt && e.modifiers.shift) { this.jumpFile(down ? 1 : -1, cx); cx.stop_propagation(); }
         else if ((down || up) && e.modifiers.alt) { this.jump(down ? 1 : -1, cx); cx.stop_propagation(); }
         else if (e.key === "c" && e.modifiers.platform) { const s = this.selectedText(); if (s) { cx.write_to_clipboard(s); cx.stop_propagation(); } }
-        else if (e.key === "f" && e.modifiers.platform) { this.openFind(cx); cx.stop_propagation(); }
+        else if (e.key === "f" && (e.modifiers.platform || e.modifiers.control)) { this.openFind(cx); cx.stop_propagation(); }
         else if (e.key === "escape" && this.find.q) { this.closeFind(cx); cx.stop_propagation(); }
         // Esc closes the diff tab on screen, and only a diff tab: anywhere else the key is left alone.
         else if (e.key === "escape") { const tab = this.shownTab(); if (tab) { run("tab.close", { id: tab, confirmed: true }); cx.stop_propagation(); } }

@@ -48,7 +48,7 @@ view can't highlight words. For this, Markdown is cut into blocks at blank lines
 
 While a file is edited in the editor, the ⇄ button after the find field shows a replace row (collapsed by default; Esc in its field hides it) under the header with a Replace field and Replace (current hit; Enter in the field does the same) and All buttons; Replace all is one edit (not several undo steps).
 
-Find options (remembered): `Aa` match case, `W` whole word, `.*` regular expression (an invalid one says so; Replace may use `$1`, `$&`). ⌘G / F3 step to the next hit, with Shift the previous. Replace all is one edit.
+Find options (remembered): `Aa` match case, `W` whole word, `.*` regular expression (an invalid one says so; Replace may use `$1`, `$&`). ⌘F or Ctrl-F focuses the field (in the editor too, replacing the editor's own find) and takes a one-line selection as the query. ⌘G / F3 step to the next hit, with Shift the previous. Replace all is one edit.
 
 Editing helpers: ⌘L or Ctrl+G opens a go-to-line field under the header (Enter jumps). Revert (shown with unsaved edits; click twice within 3 s) drops the edits and loads the file from disk. Auto-save (header toggle, remembered in localStorage `files-copy.autosave`) saves 1.5 s after the last edit. The open local file is read again every 3 s while its tab is on screen: if it changed on disk it reloads when untouched, otherwise the footer says so and Revert loads it. F12 in the editor on a Python name jumps to its definition (jedi reads the saved file; the caret moves there). For Markdown in the editor, Split shows the rendered text beside it, following the typing.
 
