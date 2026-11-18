@@ -4,7 +4,7 @@ summary: File tree (clone of files) that opens a file in its own tab to view or 
 source: https://github.com/gandriyko/herdr-app-config/tree/main/mods/files-copy
 install: copy the folder mods/files-copy into ~/.config/herdr-app/mods/files-copy
 place: none
-needs: [sh, git, find (filter outside git), uv (uvx fetches jedi on first use; Python go-to-definition only)]
+needs: [sh, git, find (filter outside git), uv (uvx fetches jedi on first use; Python go-to-definition only), curl (web images in Markdown)]
 shared_keys: [files-copy.open]
 reads_keys: []
 commands: [tab.new (files-copy with props), tab.select, tab.rename]
@@ -37,6 +37,17 @@ file open. Closing the tab with unsaved edits opens a "Save changes?" dialog (th
 in its props): Save writes them with the same guard, Don't save or Esc drops them. On app quit there is no
 dialog and unsaved edits are lost. A Markdown file (`.md`, `.markdown`) opens rendered (read-only, text
 selectable, unsaved edits included); the Source button shows its text, Preview goes back. Edit shows only with the source, not over the rendered view.
+
+Images: the app draws pictures only from its own folder, so each one is copied into `data/files-copy/images`
+(a local file named by path hash and mtime; a web image downloaded with `curl`, 20 s / 20 MB limits, kept by
+URL) and drawn from there; the folder keeps the newest 300 files. In rendered Markdown a line holding images
+(`![alt](src)`, linked ones, `<img src=… width=…>`) becomes its own row of pictures, with the rest of the line
+(e.g. a heading's text) beside them; relative sources resolve against the file's folder. TextView itself draws
+no images, so the text around them is rendered in separate blocks (a paragraph with an image inside is split
+there; fenced code is left alone). A picture that can't be had (missing, `data:`, a remote space's file, more
+than 200 in one document) shows as `[alt]`. Picture files (png, jpg, gif, webp, bmp, ico, tiff) open as the
+picture, scaled down to the width (local only); an `.svg` opens as the picture too, with Source/Preview as for
+Markdown (Preview shows it as saved).
 
 Markdown (`.md`, `.markdown`) is drawn by the mod's own view too (the editor leaves it uncoloured), with
 highlight.js's line-by-line Markdown colours (headings, `code`, **bold**, links, fences).
@@ -71,6 +82,7 @@ are off until the file is opened again). The wheel scrolls. Other languages have
 - Shared state `files-copy.open` ({ space, root, on, path, ts }): written by the panel on a click (and by
   wb-diff's Open in Files button: a documented contract, keep the shape), read by that space's file tab.
 - `localStorage` `files-copy.hidden`: "1" when dot files are shown.
+- `data/files-copy/images/`: copies of the pictures shown (newest 300 kept); safe to delete.
 - The jedi run uses the project's `.venv` or `venv` (in the pane's folder) when present, otherwise the
   Python uvx picks. Imports resolve from the folder above the file's top package (the first parent
   without `__init__.py`, e.g. a service folder inside a monorepo), with the pane's folder on `sys.path`.

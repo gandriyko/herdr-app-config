@@ -1,9 +1,9 @@
 // A lazy file tree for the focused pane's folder. A click opens the file in a tab (this same mod, opened
 // with props), one tab per space reused through shared("files-copy.open"), like changes-copy and wb-diff.
 // In the tab, Python files: ⌘-click (or F12) a name to jump to its definition (jedi via uvx).
-import { View, div, svg } from "gpui-kit";
+import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, TextView, ScrollHandle, Editor, EditorState, Input, InputState } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, run, shared, setShared, props, openOverlay, closeOverlay } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, run, shared, setShared, props, openOverlay, closeOverlay, appHome } from "herdr";
 import { highlight, languageFor } from "./highlight.js";
 
 const PY = languageFor("x.py");
@@ -34,6 +34,55 @@ const wordAt = (text, offset) => {
   return { start, end };
 };
 const REQUEST = "files-copy.open"; // { space, root, on, path, ts }: written by the panel, read by the tab
+
+// Images. The app draws pictures only from its own folder, so each one is copied (a local file, named by
+// path and mtime) or downloaded (a web URL, kept by URL) into IMG_DIR and drawn from there; the newest 300 stay.
+const RASTER = /\.(png|jpe?g|gif|webp|bmp|ico|tiff?)$/i;
+const IMG_DIR = "data/files-copy/images";
+// argv: source (path or http(s) URL), cache folder, base name, extension. Prints the cached file's name.
+const IMG_SCRIPT = `src=$1; dir=$2; base=$3; ext=$4
+mkdir -p "$dir" || exit 1
+case $src in
+http://*|https://*)
+  for f in "$dir/$base".*; do case $f in *.part) continue;; esac; [ -s "$f" ] && { touch "$f"; echo "\${f##*/}"; exit 0; }; done
+  tmp="$dir/$base.part"
+  ct=$(curl -fsSL -m 20 --max-filesize 20000000 -o "$tmp" -w '%{content_type}' "$src") || { rm -f "$tmp"; exit 1; }
+  case $ct in *svg*) ext=svg;; *png*) ext=png;; *jpeg*) ext=jpg;; *gif*) ext=gif;; *webp*) ext=webp;; esac
+  name="$base.$ext"; mv "$tmp" "$dir/$name" || exit 1;;
+*)
+  [ -f "$src" ] || exit 1
+  m=$(stat -f %m "$src" 2>/dev/null || stat -c %Y "$src") || exit 1
+  name="$base-$m.$ext"
+  if [ -s "$dir/$name" ]; then touch "$dir/$name"; else cp "$src" "$dir/$name.part" && mv "$dir/$name.part" "$dir/$name" || exit 1; fi;;
+esac
+ls -t "$dir" | tail -n +301 | while IFS= read -r f; do rm -f "$dir/$f"; done
+echo "$name"`;
+const fnv = (s) => { let h = 0x811c9dc5; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 0x01000193); return (h >>> 0).toString(16) + s.length.toString(16); };
+const extOf = (src) => (src.split(/[?#]/)[0].match(/\.([a-z0-9]{2,5})$/i)?.[1] ?? "img").toLowerCase();
+const MD_IMG = /\[?!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+["'][^"']*["'])?\s*\)(?:\]\([^)]*\))?/g; // ![alt](src "title"), maybe inside [..](link)
+// Markdown cut into blocks for TextView (which draws no images): runs of plain lines, and each line holding images
+// (![alt](src), linked ones, <img src=… width=…>) as { imgs, md: the rest of the line when it has words }. Fenced code stays text.
+function mdBlocks(text) {
+  const out = []; let buf = [], fence = null;
+  const flush = () => { if (buf.length) out.push({ md: buf.join("\n") }); buf = []; };
+  for (const line of text.split("\n")) {
+    const f = line.match(/^\s*(`{3,}|~{3,})/);
+    if (f) { if (!fence) fence = f[1][0]; else if (f[1][0] === fence) fence = null; }
+    if (f || fence || !/!\[[^\]]*\]\(|<img\b/i.test(line.replace(/`[^`]*`/g, ""))) { buf.push(line); continue; }
+    const imgs = [];
+    const rest = line.replace(MD_IMG, (_m, alt, src) => { imgs.push({ src, alt }); return ""; })
+      .replace(/<img\b[^>]*>/gi, (tag) => {
+        const src = tag.match(/\bsrc\s*=\s*["']([^"']+)["']/i)?.[1];
+        if (src) imgs.push({ src, alt: tag.match(/\balt\s*=\s*["']([^"']*)["']/i)?.[1] ?? "", width: Number(tag.match(/\bwidth\s*=\s*["']?(\d+)/i)?.[1]) || null });
+        return "";
+      }).replace(/<[^>]+>/g, "");
+    if (!imgs.length) { buf.push(line); continue; }
+    flush();
+    out.push({ imgs, md: /[\p{L}\p{N}]/u.test(rest) ? rest : "" });
+  }
+  flush();
+  return out;
+}
 
 function location() {
   const space = spaces().find(s => s.active), f = focused();
@@ -77,6 +126,7 @@ export default class Files extends View {
     if (p?.path) { // the file tab
       this.tab = true; this.back = []; this.fwd = []; this.space = p.space ?? null;
       this.handle = cx.focus_handle(); this.viewH = 400; this.viewW = 800;
+      this.imgs = new Map(); this.imgQueue = []; this.imgBusy = false; // source → cached file (false: failed, null: loading)
       this.applied = Math.max(p.ts ?? 0, shared(REQUEST)?.ts ?? 0);
       this.open(p, cx);
       return;
@@ -311,9 +361,13 @@ export default class Files extends View {
     // Unsaved edits are saved before another file replaces them (as IDEs do); a failed save keeps the file open.
     if (this.dirty) { this.save(cx, (ok, acx) => { if (ok) this.open(req, acx, at); }); return; }
     this.code?.release(); this.code = null; this.req = req; this.fileError = null; this.status = null; this.dirty = false; this.editable = false; this.lang = null;
-    this.preview = /\.(md|markdown)$/i.test(req.path); // Markdown opens rendered; Source shows the text
+    this.preview = /\.(md|markdown|svg)$/i.test(req.path); // Markdown and SVG open rendered; Source shows the text
     this.text = null; this.lines = null; this.spans = []; this.hover = null; this.mark = null; this.scrollY = 0; this.scrollX = 0; this.centre = null; this.longest = undefined;
     this.caret = this.anchor = { line: 0, col: 0 }; this.dragging = false; // the selection runs from anchor to caret
+    this.imgs = new Map(); this.mdCache = null; // pictures are copied again per opened file: an edited one shows anew
+    // A picture is shown, not read as text (local files only: the app draws from its own folder).
+    this.raster = RASTER.test(req.path);
+    if (this.raster) { if (req.on) this.fileError = "Images on another machine can't be shown"; cx.notify(); return; }
     cx.spawn(async cx => {
       try {
         let text = await readTextFile(this.full(req.path), { on: req.on });
@@ -470,7 +524,7 @@ export default class Files extends View {
       try { await writeTextFile(this.full(req.path), value, this.text); ok = true; }
       catch (e) { this.status = `Not saved: ${String(e).includes("stale") ? "the file changed on disk since it was opened" : e}`; }
       this.saving = false;
-      if (ok && this.req === req) { this.text = value; this.dirty = this.code?.value() !== value; this.status = "Saved"; }
+      if (ok && this.req === req) { this.text = value; this.dirty = this.code?.value() !== value; this.status = "Saved"; this.imgs.delete(this.full(req.path)); }
       cx.notify();
       then?.(ok, cx);
     });
@@ -636,8 +690,64 @@ export default class Files extends View {
       .when(thumb > 0, el => el.child(div().absolute().right(2).top(this.scrollY / Math.max(1, total - H) * (H - thumb)).w(6).h(thumb).rounded(3).bg(t.border)));
   }
 
-  renderTab(t) {
-    const path = this.req.path, py = path.endsWith(".py");
+  // ---- tab: images ----
+
+  // The cached file for a picture (a path under the app folder), false when it can't be had, null while it's
+  // fetched; asks for it the first time. Fetches run one at a time, from a timer (render's cx can't spawn).
+  want(src, cx) {
+    if (!this.imgs.has(src)) {
+      if (this.imgs.size >= 200) return false; // ponytail: a document with more pictures shows the rest as text
+      this.imgs.set(src, null); this.imgQueue.push(src);
+      if (!this.imgBusy) { this.imgBusy = true; cx.timer.after(0, acx => this.fetchImages(acx)); }
+    }
+    return this.imgs.get(src);
+  }
+  fetchImages(cx) {
+    cx.spawn(async cx => {
+      while (this.imgQueue.length) {
+        const src = this.imgQueue.shift();
+        let file = false;
+        try {
+          const r = await exec("sh", ["-c", IMG_SCRIPT, "files-img", src, `${appHome()}/${IMG_DIR}`, fnv(src), extOf(src)], { timeout: 30000 });
+          if (r.code === 0 && r.stdout.trim()) file = `${IMG_DIR}/${r.stdout.trim()}`;
+        } catch {}
+        if (this.imgs.get(src) === null) { this.imgs.set(src, file); cx.notify(); }
+      }
+      this.imgBusy = false;
+    });
+  }
+  // A picture's source as a fetchable path or URL; null when it can't be shown (data: URIs, a file on another machine).
+  imgSource(src) {
+    if (/^https?:\/\//i.test(src)) return src;
+    if (/^[a-z][a-z0-9+.-]*:/i.test(src) || this.req.on) return null;
+    let p = src.split(/[?#]/)[0];
+    try { p = decodeURIComponent(p); } catch {}
+    return p.startsWith("/") ? p : `${this.full(this.req.path).replace(/\/[^/]*$/, "")}/${p}`;
+  }
+  picture(src, alt, width, t, cx) {
+    const file = src ? this.want(src, cx) : false;
+    if (file) return image(file).max_w_full().when(Boolean(width), e => e.w(width));
+    return div().text_size(12).text_color(t.dim).child(`[${alt || "image"}${file === null ? " …" : ""}]`);
+  }
+  // Rendered Markdown with its pictures (blocks cached by the text).
+  mdView(text, t, cx) {
+    if (this.mdCache?.text !== text) this.mdCache = { text, blocks: mdBlocks(text) };
+    const id = `files-md-${this.req.path}`;
+    return this.mdCache.blocks.map((b, i) => b.imgs
+      ? h_flex().flex_wrap().items_center().gap(8).py(4)
+        .children(b.imgs.map(im => this.picture(this.imgSource(im.src), im.alt, im.width, t, cx)))
+        .when(Boolean(b.md), el => el.child(div().flex_1().min_w(0).child(TextView.markdown(`${id}-${i}`, b.md).selectable(true))))
+      : TextView.markdown(`${id}-${i}`, b.md).selectable(true));
+  }
+  // A picture file, scaled down to the view's width (the view scrolls when it's taller).
+  imageView(t, cx) {
+    const file = this.fileError ? false : this.want(this.full(this.req.path), cx);
+    return div().id("files-img").flex_1().min_h(0).overflow_y_scrollbar().p(16)
+      .child(file ? image(file).max_w_full() : div().text_color(t.dim).child(this.fileError || (file === null ? "Loading image…" : "Cannot show this image")));
+  }
+
+  renderTab(t, cx) {
+    const path = this.req.path, py = path.endsWith(".py"), isSvg = /\.svg$/i.test(path);
     const button = (id, label, tip, act) => div().id(id).flex_none().px(8).py(2).rounded(5).border_1().border_color(t.border).text_size(11)
       .cursor_pointer().hover(s => s.bg(t.hover)).tooltip(tip).on_click((_e, cx) => act(cx)).child(label);
     return v_flex().id("files-tab").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
@@ -651,15 +761,17 @@ export default class Files extends View {
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.dim).child(path + (this.dirty ? " ●" : "")))
         .when(this.dirty, el => el.child(button("files-save", this.saving ? "Saving…" : "Save", "Save (⌘S)", cx => this.save(cx))))
         // Markdown: Preview shows it rendered (read-only, selectable; with unsaved edits as typed), Source goes back.
-        .when(Boolean(this.code || this.lines) && /\.(md|markdown)$/i.test(path), el => el.child(button("files-preview", this.preview ? "Source" : "Preview",
-          this.preview ? "Back to the source" : "Show the rendered Markdown (read-only)", cx => { this.preview = !this.preview; cx.notify(); })))
+        // SVG: Preview shows the picture as saved.
+        .when(Boolean(this.code || this.lines) && /\.(md|markdown|svg)$/i.test(path), el => el.child(button("files-preview", this.preview ? "Source" : "Preview",
+          this.preview ? "Back to the source" : isSvg ? "Show the picture (as saved)" : "Show the rendered Markdown (read-only)", cx => { this.preview = !this.preview; cx.notify(); })))
         // Not over the rendered Markdown: editing there would change nothing on screen (Source first).
         .when(Boolean(this.lines) && this.editable && !this.preview, el => el.child(button("files-edit", "Edit", "Edit this file (⌘-click definitions are off while editing)", cx => this.editPython(cx))))
         .when(this.finding, el => el.child(h_flex().flex_none().gap(6).items_center().text_size(11).text_color(t.accent)
           .child(svg("mods/files-copy/spinner.svg").size(12).spin(900)).child("Finding definition…")))
         .when(!this.finding && py && !this.code, el => el.child(div().flex_none().text_size(11).text_color(this.cmd ? t.accent : t.dim).child("⌘-click: definition"))))
-      .child(this.preview && (this.code || this.lines) ? div().id("files-md").flex_1().min_h(0).overflow_y_scrollbar().px(24).py(16)
-          .child(TextView.markdown(`files-md-${path}`, this.code ? this.code.value() : this.text).selectable(true))
+      .child(this.raster || (isSvg && this.preview && (this.code || this.lines)) ? this.imageView(t, cx)
+        : this.preview && (this.code || this.lines) ? div().id("files-md").flex_1().min_h(0).overflow_y_scrollbar().px(24).py(16)
+          .children(this.mdView(this.code ? this.code.value() : this.text, t, cx))
         // A fixed box (absolute, inset 0) instead of flex sizing: sized by flex the editor grew with its text,
         // so nothing overflowed and the wheel didn't scroll (as with the Changes list).
         : this.code ? div().flex_1().min_h(0).relative().child(Editor.new(this.code).absolute().inset_0())
@@ -671,7 +783,7 @@ export default class Files extends View {
   render(cx) {
     const t = theme();
     if (props()?.unsaved) return this.saveDialog(t);
-    if (this.tab) { this.pickRequest(cx); return this.renderTab(t); }
+    if (this.tab) { this.pickRequest(cx); return this.renderTab(t, cx); }
     if (key() !== this.context?.key) this.refresh(cx);
     return v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
