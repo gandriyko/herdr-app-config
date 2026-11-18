@@ -63,9 +63,20 @@ const MD_IMG = /\[?!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+["'][^"']*["'])?\s*\)(?
 // Markdown cut into blocks for TextView (which draws no images): runs of plain lines, and each line holding images
 // (![alt](src), linked ones, <img src=… width=…>) as { imgs, md: the rest of the line when it has words }. Fenced code stays text.
 function mdBlocks(text) {
-  const out = []; let buf = [], fence = null;
+  const out = []; let buf = [], fence = null, blank = false, html = 0;
   const flush = () => { if (buf.length) out.push({ md: buf.join("\n") }); buf = []; };
+  // Plain runs are cut at a blank line followed by a paragraph or heading, so a search hit has a block to scroll to.
+  // Not inside a fence or an open HTML block, not before a list item/indent/quote/table row (it would restart
+  // numbering or end the list), and never when the file has reference links ([id]: url), which need the whole text.
+  const split = !/^ {0,3}\[[^\]]+\]:\s*\S/m.test(text);
   for (const line of text.split("\n")) {
+    const was = fence;
+    if (split && !was && html === 0) {
+      if (blank && line.trim() && !/^\s|^([-*+]|\d+[.)])\s|^>|^\|/.test(line)) flush();
+      else if (/^#{1,6}\s/.test(line)) flush();
+    }
+    blank = !line.trim();
+    if (!was) html = Math.max(0, html + (line.match(/<(details|div|p|table|center|blockquote|ul|ol)\b(?:[^>]*[^/>])?>/gi)?.length ?? 0) - (line.match(/<\/(details|div|p|table|center|blockquote|ul|ol)>/gi)?.length ?? 0));
     const f = line.match(/^\s*(`{3,}|~{3,})/);
     if (f) { if (!fence) fence = f[1][0]; else if (f[1][0] === fence) fence = null; }
     if (f || fence || !/!\[[^\]]*\]\(|<img\b/i.test(line.replace(/`[^`]*`/g, ""))) { buf.push(line); continue; }
@@ -83,6 +94,18 @@ function mdBlocks(text) {
   flush();
   return out;
 }
+
+// ---- find in the tab ----
+const FIND_CAP = 1000;
+// Every case-insensitive hit of q in text, as [start, end) pairs (at most FIND_CAP + 1: the extra one says "capped").
+function findAll(text, q) {
+  const out = [], hay = text.toLowerCase(), n = q.length;
+  for (let at = hay.indexOf(q); at >= 0 && out.length <= FIND_CAP; at = hay.indexOf(q, at + n)) out.push([at, at + n]);
+  return out;
+}
+// What a Markdown block shows as words: link targets, image sources, tags and markers left out, so a hit is something readable.
+const mdVisible = (md) => md.replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/<[^>]+>/g, "")
+  .replace(/^\s{0,3}(?:#{1,6}|>+|[-*+]|\d+[.)])\s+/gm, "").replace(/[`*~]/g, "").replace(/(^|\W)_+|_+(?=\W|$)/g, "$1");
 
 function location() {
   const space = spaces().find(s => s.active), f = focused();
@@ -127,6 +150,13 @@ export default class Files extends View {
       this.tab = true; this.back = []; this.fwd = []; this.space = p.space ?? null;
       this.handle = cx.focus_handle(); this.viewH = 400; this.viewW = 800;
       this.imgs = new Map(); this.imgQueue = []; this.imgBusy = false; // source → cached file (false: failed, null: loading)
+      // Find bar (⌘F): list = hits in the shown view (lines, editor offsets, or Markdown blocks), cur = the current one.
+      this.find = { open: false, q: "", list: [], cur: 0, mode: null, capped: false };
+      this.fmap = null; this.mdHits = new Set(); this.mdScroll = ScrollHandle.new();
+      this.hold = false; this.holdCap = false; this.holdTimer = false; this.pending = false;
+      this.findInput = InputState.new({ placeholder: "Find in file" });
+      this.findInput.on("change", (_e, cx) => { this.find.q = this.findInput.value().toLowerCase(); this.find.cur = 0; this.runFind(cx, true); });
+      this.findInput.on("submit", (e, cx) => this.stepFind(e?.shift ? -1 : 1, cx));
       this.applied = Math.max(p.ts ?? 0, shared(REQUEST)?.ts ?? 0);
       this.open(p, cx);
       return;
@@ -365,6 +395,9 @@ export default class Files extends View {
     this.text = null; this.lines = null; this.spans = []; this.hover = null; this.mark = null; this.scrollY = 0; this.scrollX = 0; this.centre = null; this.longest = undefined;
     this.caret = this.anchor = { line: 0, col: 0 }; this.dragging = false; // the selection runs from anchor to caret
     this.imgs = new Map(); this.mdCache = null; // pictures are copied again per opened file: an edited one shows anew
+    // Markdown stays covered until its pictures are in and the text has settled, so nothing pops in (see mdPane).
+    this.hold = this.preview && /\.(md|markdown)$/i.test(req.path); this.holdCap = false; this.holdTimer = false; this.pending = false;
+    this.find.list = []; this.fmap = null; this.mdHits = new Set(); this.find.cur = 0;
     // A picture is shown, not read as text (local files only: the app draws from its own folder).
     this.raster = RASTER.test(req.path);
     if (this.raster) { if (req.on) this.fileError = "Images on another machine can't be shown"; cx.notify(); return; }
@@ -386,7 +419,7 @@ export default class Files extends View {
         this.caretToMark();
         this.handle.focus();
       } catch { if (this.req === req) this.fileError = "Cannot preview this file (binary, too large, or unreadable)"; }
-      finally { cx.notify(); }
+      finally { if (this.req === req && this.find.open) this.runFind(cx, false); cx.notify(); }
     });
   }
 
@@ -486,12 +519,13 @@ export default class Files extends View {
     this.code.on("change", (_e, cx) => {
       const dirty = this.code.value() !== this.text;
       if (dirty !== this.dirty) { this.dirty = dirty; if (dirty) this.status = null; cx.notify(); }
+      if (this.find.open && this.find.q && this.findMode() === "editor") this.runFind(cx, false);
     });
-    this.code.focus();
+    if (!this.find.open) this.code.focus();
   }
 
   // Python opens in the mod's own view (⌘-click definitions); Edit switches it to the editor.
-  editPython(cx) { this.lines = null; this.spans = []; this.preview = false; this.makeEditor(); cx.notify(); }
+  editPython(cx) { this.lines = null; this.spans = []; this.preview = false; this.makeEditor(); if (this.find.open) this.runFind(cx, false); cx.notify(); }
 
   // A key typed in the own view: the editor takes over with the same selection (or caret), then gets the key.
   typeIntoEditor(k, char, cx) {
@@ -633,7 +667,7 @@ export default class Files extends View {
   lineSpans(i, t, sel) {
     const spans = this.spans[i] ??= this.lines[i].length > 1000 ? [{ text: this.lines[i] }] : highlight(this.lines[i], this.lang ??= languageFor(this.req.path) ?? PY, t);
     const sr = sel && i >= sel.s.line && i <= sel.e.line ? { line: i, start: i === sel.s.line ? sel.s.col : 0, end: i === sel.e.line ? sel.e.col : Infinity } : null;
-    const cuts = [this.hover, this.mark, sr].filter(w => w?.line === i);
+    const ms = this.fmap?.get(i) ?? [], cuts = [this.hover, this.mark, sr].filter(w => w?.line === i).concat(ms);
     const inside = (w, a, b) => w?.line === i && a >= w.start && b <= w.end;
     const out = [];
     let pos = 0;
@@ -645,6 +679,7 @@ export default class Files extends View {
         const a = edges[k], b = edges[k + 1], hov = inside(this.hover, a, b);
         out.push(div().flex_none().text_color(hov ? t.accent : s.color ?? t.foreground)
           .when(hov, el => el.underline()).when(inside(this.mark, a, b), el => el.bg(t.accent + "44").rounded(2))
+          .when(Boolean(ms.length) && ms.some(m => a >= m.start && b <= m.end), el => el.bg(ms.find(m => a >= m.start && b <= m.end).k === this.find.cur ? t.accent + "88" : t.accent + "33").rounded(2))
           .when(inside(sr, a, b), el => el.bg(t.selection))
           .child(s.text.slice(a - pos, b - pos)));
       }
@@ -726,18 +761,42 @@ export default class Files extends View {
   }
   picture(src, alt, width, t, cx) {
     const file = src ? this.want(src, cx) : false;
+    if (file === null) this.pending = true;
     if (file) return image(file).max_w_full().when(Boolean(width), e => e.w(width));
     return div().text_size(12).text_color(t.dim).child(`[${alt || "image"}${file === null ? " …" : ""}]`);
   }
   // Rendered Markdown with its pictures (blocks cached by the text).
-  mdView(text, t, cx) {
+  mdBlocksOf(text) {
     if (this.mdCache?.text !== text) this.mdCache = { text, blocks: mdBlocks(text) };
-    const id = `files-md-${this.req.path}`;
-    return this.mdCache.blocks.map((b, i) => b.imgs
-      ? h_flex().flex_wrap().items_center().gap(8).py(4)
-        .children(b.imgs.map(im => this.picture(this.imgSource(im.src), im.alt, im.width, t, cx)))
-        .when(Boolean(b.md), el => el.child(div().flex_1().min_w(0).child(TextView.markdown(`${id}-${i}`, b.md).selectable(true))))
-      : TextView.markdown(`${id}-${i}`, b.md).selectable(true));
+    return this.mdCache.blocks;
+  }
+  mdView(text, t, cx) {
+    const blocks = this.mdBlocksOf(text), id = `files-md-${this.req.path}`;
+    this.pending = false; // set by picture() while a picture is still being fetched
+    const marks = this.find.open && this.find.mode === "md", cur = this.find.list[this.find.cur]?.block;
+    return blocks.map((b, i) => {
+      const el = b.imgs
+        ? h_flex().flex_wrap().items_center().gap(8).py(4)
+          .children(b.imgs.map(im => this.picture(this.imgSource(im.src), im.alt, im.width, t, cx)))
+          .when(Boolean(b.md), el => el.child(div().flex_1().min_w(0).child(TextView.markdown(`${id}-${i}`, b.md).selectable(true))))
+        : TextView.markdown(`${id}-${i}`, b.md).selectable(true);
+      // The block holding the current hit is shaded, blocks holding others get a thin accent edge (TextView can't mark words).
+      return marks ? div().pl(10).border_l(2).border_color(i === cur ? t.accent : this.mdHits.has(i) ? t.accent + "55" : t.background)
+        .when(i === cur, e => e.bg(t.accent + "18")).child(el) : el;
+    });
+  }
+  // The rendered view with a cover over it until it is complete: the first frame lays everything out under the
+  // cover, so the text and pictures are already in place when it lifts (one redraw, not one per picture).
+  mdPane(t, cx) {
+    const blocks = this.mdView(this.code ? this.code.value() : this.text, t, cx), req = this.req;
+    const hold = this.hold;
+    if (hold) {
+      if (!this.holdCap) { this.holdCap = true; cx.timer.after(3000, acx => { if (this.req === req && this.hold) { this.hold = false; acx.notify(); } }); } // a slow picture can't keep it hidden
+      if (!this.pending && !this.holdTimer) { this.holdTimer = true; cx.timer.after(150, acx => { this.holdTimer = false; if (this.req === req && this.hold && !this.pending) { this.hold = false; acx.notify(); } }); }
+    }
+    return v_flex().flex_1().min_h(0).relative()
+      .child(div().id("files-md").flex_1().min_h(0).overflow_y_scrollbar().track_scroll(this.mdScroll).px(24).py(16).children(blocks))
+      .when(hold, el => el.child(div().absolute().inset_0().flex().items_center().justify_center().bg(t.background).text_color(t.dim).child("Loading…")));
   }
   // A picture file, scaled down to the view's width (the view scrolls when it's taller).
   imageView(t, cx) {
@@ -746,12 +805,79 @@ export default class Files extends View {
       .child(file ? image(file).max_w_full() : div().text_color(t.dim).child(this.fileError || (file === null ? "Loading image…" : "Cannot show this image")));
   }
 
+  // ---- tab: find ----
+
+  // Which view a search runs over: the mod's line view, the editor, or the rendered Markdown (null: nothing to search).
+  findMode() {
+    if (this.raster) return null;
+    if (this.preview) return /\.svg$/i.test(this.req.path) || !(this.code || this.lines) ? null : "md";
+    return this.code ? "editor" : this.lines ? "lines" : null;
+  }
+  openFind(cx) {
+    if (!this.findMode()) return;
+    this.find.open = true; this.findInput.focus(); this.runFind(cx, Boolean(this.find.q));
+  }
+  closeFind(cx) {
+    this.find.open = false; this.find.list = []; this.fmap = null; this.mdHits = new Set();
+    if (this.lines && !this.preview) this.handle.focus();
+    cx.notify();
+  }
+  // Recomputes the hits for the shown view (not from render); jump moves the view to the current one.
+  runFind(cx, jump) {
+    const f = this.find, q = f.q, mode = this.findMode();
+    f.mode = mode; f.list = []; f.capped = false; this.fmap = null; this.mdHits = new Set();
+    if (f.open && q && mode) {
+      let raw = [];
+      if (mode === "editor") raw = findAll(this.code.value(), q).map(([s, e]) => ({ s, e }));
+      else if (mode === "lines") this.lines.forEach((l, line) => { if (raw.length <= FIND_CAP) for (const [start, end] of findAll(l, q)) raw.push({ line, start, end }); });
+      else this.mdBlocksOf(this.code ? this.code.value() : this.text).forEach((b, block) => { if (raw.length <= FIND_CAP) for (const [start] of findAll(mdVisible(b.md ?? ""), q)) raw.push({ block, start }); });
+      f.capped = raw.length > FIND_CAP; f.list = raw.slice(0, FIND_CAP);
+      if (mode === "lines") { this.fmap = new Map(); f.list.forEach((m, k) => { m.k = k; if (!this.fmap.has(m.line)) this.fmap.set(m.line, []); this.fmap.get(m.line).push(m); }); }
+      if (mode === "md") this.mdHits = new Set(f.list.map(m => m.block));
+      f.cur = Math.min(f.cur, Math.max(0, f.list.length - 1));
+    }
+    if (jump) this.goFind(cx); else cx.notify();
+  }
+  stepFind(dir, cx) {
+    const f = this.find, n = f.list.length;
+    if (!n) return;
+    f.cur = (f.cur + dir + n) % n; this.goFind(cx);
+  }
+  goFind(cx) {
+    const f = this.find, m = f.list[f.cur];
+    if (m) {
+      if (f.mode === "lines") { this.centre = m.line; this.caret = this.anchor = { line: m.line, col: m.start }; }
+      else if (f.mode === "editor") this.code.set_selected_range({ start: m.s, end: m.e });
+      else if (f.mode === "md") this.mdScroll.scroll_to_item(m.block);
+    }
+    cx.notify();
+  }
+  findBar(t) {
+    const f = this.find, n = f.list.length;
+    const btn = (id, label, tip, act) => div().id(id).size(22).flex_none().flex().items_center().justify_center().rounded(4).cursor_pointer()
+      .text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip(tip).on_click((_e, cx) => act(cx)).child(label);
+    return h_flex().h(34).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
+      .child(div().id("files-find").h(24).w(260).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_text()
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_key_down((e, cx) => { if (e.keystroke === "escape") { this.closeFind(cx); cx.stop_propagation(); } })
+        .child(Input.new(this.findInput).flex_1().h_full().text_size(12).text_color(t.foreground)))
+      .child(div().flex_none().text_size(11).text_color(t.dim).child(f.q ? (n ? `${f.cur + 1}/${n}${f.capped ? "+" : ""}` : "No results") : ""))
+      .child(btn("files-find-prev", "↑", "Previous (⇧Enter)", cx => this.stepFind(-1, cx)))
+      .child(btn("files-find-next", "↓", "Next (Enter)", cx => this.stepFind(1, cx)))
+      .child(div().flex_1())
+      .when(f.mode === "md" && n > 0, el => el.child(div().flex_none().text_size(11).text_color(t.dim).child("Rendered view: the block with the hit is marked")))
+      .child(btn("files-find-close", "×", "Close (Esc)", cx => this.closeFind(cx)));
+  }
+
   renderTab(t, cx) {
     const path = this.req.path, py = path.endsWith(".py"), isSvg = /\.svg$/i.test(path);
     const button = (id, label, tip, act) => div().id(id).flex_none().px(8).py(2).rounded(5).border_1().border_color(t.border).text_size(11)
       .cursor_pointer().hover(s => s.bg(t.hover)).tooltip(tip).on_click((_e, cx) => act(cx)).child(label);
     return v_flex().id("files-tab").size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
-      .on_key_down((e, cx) => { if (e.modifiers.platform && e.key.toLowerCase() === "s" && this.code) { this.save(cx); cx.stop_propagation(); } })
+      .on_key_down((e, cx) => {
+        if (e.modifiers.platform && e.key.toLowerCase() === "s" && this.code) { this.save(cx); cx.stop_propagation(); }
+        else if (e.modifiers.platform && e.key.toLowerCase() === "f" && this.findMode()) { this.openFind(cx); cx.stop_propagation(); }
+      })
       .child(h_flex().h(36).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .when(this.back.length > 0 || this.fwd.length > 0, el => el
           .child(div().id("files-back").w(20).text_color(this.back.length ? t.muted : t.border).when(this.back.length > 0, e => e.cursor_pointer())
@@ -763,15 +889,16 @@ export default class Files extends View {
         // Markdown: Preview shows it rendered (read-only, selectable; with unsaved edits as typed), Source goes back.
         // SVG: Preview shows the picture as saved.
         .when(Boolean(this.code || this.lines) && /\.(md|markdown|svg)$/i.test(path), el => el.child(button("files-preview", this.preview ? "Source" : "Preview",
-          this.preview ? "Back to the source" : isSvg ? "Show the picture (as saved)" : "Show the rendered Markdown (read-only)", cx => { this.preview = !this.preview; cx.notify(); })))
+          this.preview ? "Back to the source" : isSvg ? "Show the picture (as saved)" : "Show the rendered Markdown (read-only)", cx => { this.preview = !this.preview; if (this.find.open) this.runFind(cx, true); else cx.notify(); })))
+        .when(Boolean(this.findMode()), el => el.child(button("files-find-open", "Find", "Find in this file (⌘F)", cx => this.find.open ? this.closeFind(cx) : this.openFind(cx))))
         // Not over the rendered Markdown: editing there would change nothing on screen (Source first).
         .when(Boolean(this.lines) && this.editable && !this.preview, el => el.child(button("files-edit", "Edit", "Edit this file (⌘-click definitions are off while editing)", cx => this.editPython(cx))))
         .when(this.finding, el => el.child(h_flex().flex_none().gap(6).items_center().text_size(11).text_color(t.accent)
           .child(svg("mods/files-copy/spinner.svg").size(12).spin(900)).child("Finding definition…")))
         .when(!this.finding && py && !this.code, el => el.child(div().flex_none().text_size(11).text_color(this.cmd ? t.accent : t.dim).child("⌘-click: definition"))))
+      .when(this.find.open && Boolean(this.findMode()), el => el.child(this.findBar(t)))
       .child(this.raster || (isSvg && this.preview && (this.code || this.lines)) ? this.imageView(t, cx)
-        : this.preview && (this.code || this.lines) ? div().id("files-md").flex_1().min_h(0).overflow_y_scrollbar().px(24).py(16)
-          .children(this.mdView(this.code ? this.code.value() : this.text, t, cx))
+        : this.preview && (this.code || this.lines) ? this.mdPane(t, cx)
         // A fixed box (absolute, inset 0) instead of flex sizing: sized by flex the editor grew with its text,
         // so nothing overflowed and the wheel didn't scroll (as with the Changes list).
         : this.code ? div().flex_1().min_h(0).relative().child(Editor.new(this.code).absolute().inset_0())

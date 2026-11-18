@@ -38,6 +38,18 @@ in its props): Save writes them with the same guard, Don't save or Esc drops the
 dialog and unsaved edits are lost. A Markdown file (`.md`, `.markdown`) opens rendered (read-only, text
 selectable, unsaved edits included); the Source button shows its text, Preview goes back. Edit shows only with the source, not over the rendered view.
 
+Find in file: the Find button in the tab header or ⌘F opens a find bar (case-insensitive, Enter next, ⇧Enter
+previous, Esc or × closes, counter `3/12`, first 1,000 hits, then `+`). It searches whatever the tab shows:
+the line view (Python, `.env`, Markdown source) tints every hit and centres the current one; the editor
+selects the current hit; rendered Markdown matches the visible words only (link targets, image sources and
+markup excluded) and marks the block that holds the hit with an accent edge and scrolls to it, because the text
+view can't highlight words. For this, Markdown is cut into blocks at blank lines before a paragraph or heading
+(never inside a fence or HTML block, or when the file has reference links).
+
+Rendered Markdown opens behind a "Loading…" cover until its pictures are fetched and the text has settled
+(150 ms after the last picture, at most 3 s), then shows in one redraw instead of popping in piece by piece.
+
+
 Images: the app draws pictures only from its own folder, so each one is copied into `data/files-copy/images`
 (a local file named by path hash and mtime; a web image downloaded with `curl`, 20 s / 20 MB limits, kept by
 URL) and drawn from there; the folder keeps the newest 300 files. In rendered Markdown a line holding images
