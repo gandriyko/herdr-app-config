@@ -29,7 +29,7 @@ swaps them.
 
 The panel follows the focused terminal's folder; while a file tab (or a `wb-diff` tab, via `wb.diff.request`) is focused it stays on that tab's root folder, and while another mod's tab is focused it keeps the folder it had.
 
-A click on a file opens it in a tab, always first in the mod's own read-only view (syntax-coloured, full height; the Edit button switches to the built-in editor, View comes back when nothing is unsaved). One tab per space is reused, as Changes does with its diff tab; the tab is named after the file.
+A click on a file opens it in a tab, always first in the mod's own read-only view (syntax-coloured, full height; the mode group in the header — `View | Edit`, and `Preview | View | Edit` for Markdown and SVG — switches between the read-only text, the built-in editor and the rendered result; View is off while edits are unsaved). One tab per space is reused, as Changes does with its diff tab; the tab is named after the file.
 
 Editing: local files under 400,000 chars are editable (a remote space's or a truncated file is read-only).
 Unsaved edits put ● after the path and a Save button in the header; ⌘S or Save writes the file with
@@ -38,7 +38,7 @@ edits stay). Opening another file in the tab or going back/forward saves first; 
 file open. Closing the tab with unsaved edits opens a "Save changes?" dialog (this mod, kind dialog, the edits
 in its props): Save writes them with the same guard, Don't save or Esc drops them. On app quit there is no
 dialog and unsaved edits are lost. A Markdown file (`.md`, `.markdown`) opens rendered (read-only, text
-selectable, unsaved edits included); the Source button shows its text, Preview goes back. The × at the end of the header closes the tab (unsaved edits ask first). Edit shows only with the source, not over the rendered view.
+selectable, unsaved edits included); the group's View shows its text, Preview goes back. The × at the end of the header closes the tab (unsaved edits ask first). Edit from the rendered view opens the editor.
 
 Find in file: a find field (with counter and ↑/↓) sits in the tab header for a searchable file (⌘F focuses it; case-insensitive, Enter next, ⇧Enter
 previous, Esc clears it, counter `3/12`, first 1,000 hits, then `+`). It searches whatever the tab shows:
@@ -70,7 +70,7 @@ URL) and drawn from there; the folder keeps the newest 300 files. In rendered Ma
 no images, so the text around them is rendered in separate blocks (a paragraph with an image inside is split
 there; fenced code is left alone). A picture that can't be had (missing, `data:`, a remote space's file, more
 than 200 in one document) shows as `[alt]`. Picture files (png, jpg, gif, webp, bmp, ico, tiff) open as the
-picture, scaled down to the width (local only); an `.svg` opens as the picture too, with Source/Preview as for
+picture, scaled down to the width (local only); an `.svg` opens as the picture too, with Preview/View as for
 Markdown (Preview shows it as saved).
 
 Markdown (`.md`, `.markdown`) is drawn by the mod's own view too (the editor leaves it uncoloured), with

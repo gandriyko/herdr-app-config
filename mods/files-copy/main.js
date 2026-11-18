@@ -1101,6 +1101,24 @@ export default class Files extends View {
       .child(act("files-replace-all", "All", "Replace every hit", cx => this.replaceAll(cx)));
   }
 
+  // The mode group in the header (as the find options): the active mode is tinted, an unavailable one dimmed.
+  modeGroup(t, path, isSvg) {
+    const hasPreview = /\.(md|markdown|svg)$/i.test(path), editing = Boolean(this.code) && !this.preview;
+    const cell = (id, label, tip, on, enabled, act) => div().id(id).h(20).px(8).flex().items_center().text_size(11).tooltip(tip)
+      .when(id !== "files-mode-first", e => e.border_l(1).border_color(t.border))
+      .text_color(on ? t.foreground : enabled ? t.muted : t.border).when(on, e => e.bg(t.selected))
+      .when(!on && enabled, e => e.cursor_pointer().hover(s => s.bg(t.hover)))
+      .on_click((_e, cx) => { if (enabled && !on) act(cx); }).child(label);
+    const rerun = (cx) => { if (this.find.open) this.runFind(cx, true); else cx.notify(); };
+    const cells = [];
+    if (hasPreview) cells.push(["files-mode-first", "Preview", isSvg ? "Show the picture (as saved)" : "Show the rendered Markdown (read-only)", this.preview, true, cx => { this.preview = true; rerun(cx); }]);
+    cells.push([hasPreview ? "files-mode-view" : "files-mode-first", "View", "The read-only text (search hits are tinted here)", !this.preview && !this.code, Boolean(this.lines) || (Boolean(this.code) && !this.dirty),
+      cx => { this.preview = false; if (this.code) this.showView(cx); else rerun(cx); }]);
+    cells.push(["files-mode-edit", "Edit", "Edit this file (⌘-click definitions are off while editing)", editing, this.editable,
+      cx => { if (this.code) { this.preview = false; rerun(cx); } else this.editFile(cx); }]);
+    return h_flex().flex_none().rounded(6).border_1().border_color(t.border).overflow_hidden().children(cells.map(c => cell(...c)));
+  }
+
   renderTab(t, cx) {
     const path = this.req.path, py = path.endsWith(".py"), isSvg = /\.svg$/i.test(path);
     const button = (id, label, tip, act) => div().id(id).flex_none().px(8).py(2).rounded(5).border_1().border_color(t.border).text_size(11)
@@ -1127,13 +1145,9 @@ export default class Files extends View {
           cx => { this.autosave = !this.autosave; try { localStorage.setItem("files-copy.autosave", this.autosave ? "1" : "0"); } catch {} if (this.autosave && this.dirty) this.save(cx); cx.notify(); })))
         .when(Boolean(this.code) && !this.preview && /\.(md|markdown)$/i.test(path), el => el.child(button("files-split", this.split ? "Single" : "Split", "Show the rendered Markdown beside the editor", cx => { this.split = !this.split; cx.notify(); })))
         .when(this.dirty, el => el.child(button("files-save", this.saving ? "Saving…" : "Save", "Save (⌘S)", cx => this.save(cx))))
-        // Markdown: Preview shows it rendered (read-only, selectable; with unsaved edits as typed), Source goes back.
-        // SVG: Preview shows the picture as saved.
-        .when(Boolean(this.code || this.lines) && /\.(md|markdown|svg)$/i.test(path), el => el.child(button("files-preview", this.preview ? "Source" : "Preview",
-          this.preview ? "Back to the source" : isSvg ? "Show the picture (as saved)" : "Show the rendered Markdown (read-only)", cx => { this.preview = !this.preview; if (this.find.open) this.runFind(cx, true); else cx.notify(); })))
-        // Not over the rendered Markdown: editing there would change nothing on screen (Source first).
-        .when(Boolean(this.lines) && this.editable && !this.preview, el => el.child(button("files-edit", "Edit", "Edit this file (the view is read-only; ⌘-click definitions are off while editing)", cx => this.editFile(cx))))
-        .when(Boolean(this.code) && !this.dirty && !this.preview && !this.split, el => el.child(button("files-view", "View", "Back to the read-only view (search hits are tinted there)", cx => this.showView(cx))))
+        // One mode group for every file: View (the read-only text), Edit (the editor), and for Markdown and SVG also Preview
+        // (rendered / the picture as saved; with unsaved edits as typed). View is off while edits are unsaved.
+        .when(Boolean(this.code || this.lines) && !this.raster, el => el.child(this.modeGroup(t, path, isSvg)))
         .when(this.finding, el => el.child(h_flex().flex_none().gap(6).items_center().text_size(11).text_color(t.accent)
           .child(svg("mods/files-copy/spinner.svg").size(12).spin(900)).child("Finding definition…")))
         .when(!this.finding && py && !this.code, el => el.child(div().flex_none().text_size(11).text_color(this.cmd ? t.accent : t.dim).child("⌘-click: definition")))
