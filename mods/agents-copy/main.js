@@ -726,8 +726,23 @@ export default class Agents extends View {
     const urgency = new Map(list.map((a) => [a.address, Math.max(this.rank(a), ...treeOf(a.address).map((s) => RANK[kidStatus(s.t, this.listed)] ?? 0))]));
     const rankOf = (a) => urgency.get(a.address);
     if (byPriority) list = [...list].sort((x, y) => SECTION_ORDER[sectionOf(rankOf(x) || RANK.idle)] - SECTION_ORDER[sectionOf(rankOf(y) || RANK.idle)] || rankOf(y) - rankOf(x) || this.since(y) - this.since(x) || y.seq - x.seq);
+    // Grouped view: worktrees of one repo (same git common dir, resolved for PR chips) share a group,
+    // named after the space on the main worktree (else its folder); other agents group by space.
+    const groupOf = new Map();
+    for (const a of list) {
+      const c = this.common.get(placeOf.get(a.address)?.cwd);
+      if (!c) { groupOf.set(a.address, { id: `sp-${a.space}`, label: a.space_name || "" }); continue; }
+      const root = c.replace(/\/\.git\/?$/, "");
+      groupOf.set(a.address, { id: `rp-${c}`, label: spaceList.find((s) => s.folder === root)?.name ?? root.split("/").pop() });
+    }
     const pinned = list.filter((a) => a.pinned);
     const rest = list.filter((a) => !a.pinned);
+    if (!byPriority) {
+      // Stable sort: a group sits where its first agent was; inside it, agents keep their order.
+      const first = new Map();
+      rest.forEach((a, i) => first.has(groupOf.get(a.address).id) || first.set(groupOf.get(a.address).id, i));
+      rest.sort((x, y) => first.get(groupOf.get(x.address).id) - first.get(groupOf.get(y.address).id));
+    }
     list = [...pinned, ...rest];
     // Only when the order changed: the host keeps it (in memory) between calls.
     const order = list.map((a) => a.address);
@@ -854,7 +869,8 @@ export default class Agents extends View {
         .child(svg(`mods/agents-copy/${isPinned ? "pin-off" : "pin"}.svg`).size(13));
       // Under a space header the space goes without saying; an automatic tab number says nothing.
       // Without a space header above (priority, pinned) the row names its space.
-      const full = byPriority || isPinned;
+      // A worktree's agent under its repo's header names its own space.
+      const full = byPriority || isPinned || groupOf.get(a.address).label !== a.space_name;
       const name = full ? a.space_name || label(a) : more ?? (/^\d+$/.test(label(a)) ? a.program?.name || label(a) : label(a));
       const hover = (el) => el
         .on_hover((on, cx) => {
@@ -949,14 +965,15 @@ export default class Agents extends View {
         .when(subs.length > 0 && !this.folded.has(a.address), (el) => el.children(subs.map((x) => this.subRow(t, x, shown, byPriority))));
     };
 
-    // Groups in list order: spaces (grouped) or priority sections. Agents of a
-    // space are next to each other in agents(), so neighbours make a group.
+    // Groups in list order: repos/spaces (grouped) or priority sections. `rest` is
+    // sorted so a group's agents are neighbours.
     const groups = pinned.length ? [{ id: "pinned", label: "Pinned", status: null, members: pinned }] : [];
     for (const a of rest) {
       const r = byPriority ? sectionOf(rankOf(a) || RANK.idle) : 0;
-      const id = byPriority ? `sec-${r}` : `sp-${a.space}`;
+      const g = groupOf.get(a.address);
+      const id = byPriority ? `sec-${r}` : g.id;
       if (groups.at(-1)?.id === id) groups.at(-1).members.push(a);
-      else groups.push({ id, label: byPriority ? SECTION[r] : a.space_name || "", status: byPriority ? SECTION_STATUS[r] : null, members: [a] });
+      else groups.push({ id, label: byPriority ? SECTION[r] : g.label, status: byPriority ? SECTION_STATUS[r] : null, members: [a] });
     }
 
     // A group's header; it folds the group. Folded, it says how many and the most urgent state.
