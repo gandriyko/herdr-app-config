@@ -431,7 +431,7 @@ export default class Files extends View {
     this.imgs = new Map(); this.mdCache = null; // pictures are copied again per opened file: an edited one shows anew
     // Markdown stays covered until its pictures are in and the text has settled, so nothing pops in (see mdPane).
     this.hold = this.preview && /\.(md|markdown)$/i.test(req.path); this.holdCap = false; this.holdTimer = false; this.pending = false;
-    this.find.list = []; this.fmap = null; this.mdHits = new Set(); this.find.cur = 0; this.confirmRevert = false; this.split = false; this.diskChanged = null;
+    this.find.list = []; this.fmap = null; this.mdHits = new Set(); this.find.cur = 0; this.confirmRevert = false; this.split = false; this.diskChanged = null; this.viaFind = false;
     // A picture is shown, not read as text (local files only: the app draws from its own folder).
     this.raster = RASTER.test(req.path);
     if (this.raster) { if (req.on) this.fileError = "Images on another machine can't be shown"; cx.notify(); return; }
@@ -543,7 +543,7 @@ export default class Files extends View {
   }
 
   // The file in the built-in editor: editable when `editable`, ⌘S (or the Save button) writes it.
-  makeEditor() {
+  makeEditor(focus = true) {
     const t = theme(), path = this.req.path, name = path.split("/").pop(), ext = name.includes(".") ? name.split(".").pop() : "txt";
     // .env while editing: plain text (see pyView: a grammar spanning lines breaks on one bad quote).
     const language = name.startsWith(".env") ? "text" : LANG[ext] ?? ext;
@@ -558,11 +558,11 @@ export default class Files extends View {
       if (this.autosave && dirty) { const g = ++this.autoGen; cx.timer.after(1500, acx => { if (g === this.autoGen && this.dirty && this.code) this.save(acx); }); }
       if (this.split) { const g = ++this.splitGen; cx.timer.after(250, acx => { if (g === this.splitGen) acx.notify(); }); }
     });
-    this.code.focus();
+    if (focus) this.code.focus();
   }
 
   // Python opens in the mod's own view (⌘-click definitions); Edit switches it to the editor.
-  editPython(cx) { this.lines = null; this.spans = []; this.preview = false; this.makeEditor(); if (this.find.open) this.runFind(cx, false); cx.notify(); }
+  editPython(cx) { this.viaFind = false; this.lines = null; this.spans = []; this.preview = false; this.makeEditor(); if (this.find.open) this.runFind(cx, false); cx.notify(); }
 
   // A key typed in the own view: the editor takes over with the same selection (or caret), then gets the key.
   typeIntoEditor(k, char, cx) {
@@ -707,7 +707,7 @@ export default class Files extends View {
 
   // One line's colored pieces: the hovered name underlined, the marked one tinted, the selection shaded.
   lineSpans(i, t, sel) {
-    const spans = this.spans[i] ??= this.lines[i].length > 1000 ? [{ text: this.lines[i] }] : highlight(this.lines[i], this.lang ??= languageFor(this.req.path) ?? PY, t);
+    const spans = this.spans[i] ??= this.lines[i].length > 1000 ? [{ text: this.lines[i] }] : (this.lang ??= languageFor(this.req.path) ?? (this.viaFind ? null : PY)) ? highlight(this.lines[i], this.lang, t) : [{ text: this.lines[i] }];
     const sr = sel && i >= sel.s.line && i <= sel.e.line ? { line: i, start: i === sel.s.line ? sel.s.col : 0, end: i === sel.e.line ? sel.e.col : Infinity } : null;
     const ms = this.fmap?.get(i) ?? [], cuts = [this.hover, this.mark, sr].filter(w => w?.line === i).concat(ms);
     const inside = (w, a, b) => w?.line === i && a >= w.start && b <= w.end;
@@ -927,7 +927,18 @@ export default class Files extends View {
     if (this.lines && !this.preview) this.handle.focus(); else if (this.code) this.code.focus();
   }
   // Recomputes the hits for the shown view (not from render); jump moves the view to the current one.
+  // The editor can't mark hits, so while a search is on (and nothing is unsaved) the file is shown in the mod's own line
+  // view, which tints every hit; clearing the search, or typing into the text, brings the editor back.
+  toLines() {
+    this.lines = this.code.value().split("\n").map(l => l.replace(/\r$/, "").replace(/\t/g, "    "));
+    this.code.release(); this.code = null; this.spans = []; this.longest = undefined; this.lang = null; this.mark = null;
+    this.caret = this.anchor = { line: 0, col: 0 }; this.scrollY = 0; this.scrollX = 0; this.viaFind = true;
+  }
+  toEditor() { this.lines = null; this.spans = []; this.viaFind = false; this.makeEditor(false); }
   runFind(cx, jump) {
+    const f0 = this.find;
+    if (f0.open && f0.q && this.code && !this.dirty && !this.preview && !this.replaceOpen && findRegex(f0.q, f0)) this.toLines();
+    else if (this.viaFind && !f0.q && !this.code) this.toEditor();
     const f = this.find, mode = this.findMode(), re = findRegex(f.q, f), q = re;
     f.bad = Boolean(f.q) && !re;
     f.mode = mode; f.list = []; f.capped = false; this.fmap = null; this.mdHits = new Set();
@@ -1001,7 +1012,11 @@ export default class Files extends View {
       .child(div().flex_none().text_size(11).text_color(f.bad ? t.ansi1 : t.dim).child(f.bad ? "Invalid regex" : f.q ? (n ? `${f.cur + 1}/${n}${f.capped ? "+" : ""}` : "No results") : ""))
       .child(btn("files-find-prev", "↑", "Previous (⇧Enter)", cx => this.stepFind(-1, cx)))
       .child(btn("files-find-next", "↓", "Next (Enter)", cx => this.stepFind(1, cx)))
-      .when(f.mode === "editor" && this.editable, el => el.child(btn("files-replace-toggle", "⇄", "Replace (shows the replace row)", cx => { this.replaceOpen = !this.replaceOpen; cx.notify(); })
+      .when((f.mode === "editor" || this.viaFind) && this.editable, el => el.child(btn("files-replace-toggle", "⇄", "Replace (shows the replace row; the editor is shown while it is open)", cx => {
+        this.replaceOpen = !this.replaceOpen;
+        if (this.replaceOpen && this.viaFind) this.toEditor(); // replacing needs the editor
+        this.runFind(cx, false);
+      })
         .when(this.replaceOpen, e => e.bg(t.selected).text_color(t.foreground))));
   }
   // The tab on screen if it is a file tab of this mod (else null), asked at the moment of use.
