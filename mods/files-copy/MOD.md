@@ -36,17 +36,17 @@ edits stay). Opening another file in the tab or going back/forward saves first; 
 file open. Closing the tab with unsaved edits opens a "Save changes?" dialog (this mod, kind dialog, the edits
 in its props): Save writes them with the same guard, Don't save or Esc drops them. On app quit there is no
 dialog and unsaved edits are lost. A Markdown file (`.md`, `.markdown`) opens rendered (read-only, text
-selectable, unsaved edits included); the Source button shows its text, Preview goes back. Edit shows only with the source, not over the rendered view.
+selectable, unsaved edits included); the Source button shows its text, Preview goes back. The × at the end of the header closes the tab (unsaved edits ask first). Edit shows only with the source, not over the rendered view.
 
-Find in file: a find field (with counter, ↑/↓, ×) sits in the tab header for a searchable file (⌘F focuses it; case-insensitive, Enter next, ⇧Enter
-previous, Esc or × clears it, counter `3/12`, first 1,000 hits, then `+`). It searches whatever the tab shows:
+Find in file: a find field (with counter and ↑/↓) sits in the tab header for a searchable file (⌘F focuses it; case-insensitive, Enter next, ⇧Enter
+previous, Esc clears it, counter `3/12`, first 1,000 hits, then `+`). It searches whatever the tab shows:
 the line view (Python, `.env`, Markdown source) tints every hit and centres the current one; the editor
 selects the current hit; rendered Markdown matches the visible words only (link targets, image sources and
 markup excluded) and marks the block that holds the hit with an accent edge and scrolls to it, because the text
 view can't highlight words. For this, Markdown is cut into blocks at blank lines before a paragraph or heading
 (never inside a fence or HTML block, or when the file has reference links).
 
-While a file is edited in the editor, a Replace field with Replace (current hit; Enter in the field does the same) and All buttons follows the find field; Replace all is one edit (not several undo steps).
+While a file is edited in the editor, the ⇄ button after the find field shows a replace row (collapsed by default; Esc in its field hides it) under the header with a Replace field and Replace (current hit; Enter in the field does the same) and All buttons; Replace all is one edit (not several undo steps).
 
 Rendered Markdown opens behind a "Loading…" cover until its pictures are fetched and the text has settled
 (150 ms after the last picture, at most 3 s), then shows in one redraw instead of popping in piece by piece.

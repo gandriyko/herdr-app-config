@@ -157,7 +157,7 @@ export default class Files extends View {
       this.findInput = InputState.new({ placeholder: "Find in file" });
       this.findInput.on("change", (_e, cx) => { this.find.q = this.findInput.value().toLowerCase(); this.find.cur = 0; this.runFind(cx, true); });
       this.findInput.on("submit", (e, cx) => this.stepFind(e?.shift ? -1 : 1, cx));
-      this.replaceInput = InputState.new({ placeholder: "Replace with" }); // shown while editing; Enter replaces the current hit
+      this.replaceOpen = false; this.replaceInput = InputState.new({ placeholder: "Replace with" }); // shown while editing; Enter replaces the current hit
       this.replaceInput.on("submit", (_e, cx) => this.replaceOne(cx));
       this.applied = Math.max(p.ts ?? 0, shared(REQUEST)?.ts ?? 0);
       this.open(p, cx);
@@ -884,18 +884,27 @@ export default class Files extends View {
       .child(div().flex_none().text_size(11).text_color(t.dim).child(f.q ? (n ? `${f.cur + 1}/${n}${f.capped ? "+" : ""}` : "No results") : ""))
       .child(btn("files-find-prev", "↑", "Previous (⇧Enter)", cx => this.stepFind(-1, cx)))
       .child(btn("files-find-next", "↓", "Next (Enter)", cx => this.stepFind(1, cx)))
-      .child(btn("files-find-close", "×", "Clear (Esc)", cx => this.closeFind(cx)))
-      .when(f.mode === "editor" && this.editable, el => {
-        const act = (id, label, tip, run) => div().id(id).flex_none().px(6).h(22).flex().items_center().rounded(4).border_1().border_color(t.border).text_size(11)
-          .text_color(n ? t.foreground : t.border).when(n > 0, e => e.cursor_pointer().hover(s => s.bg(t.hover))).tooltip(tip)
-          .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => { if (n) run(cx); }).child(label);
-        return el.child(div().id("files-replace").h(24).w(170).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_text()
-          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-          .on_key_down((e, cx) => { if (e.keystroke === "escape") { this.closeFind(cx); cx.stop_propagation(); } })
-          .child(Input.new(this.replaceInput).flex_1().h_full().text_size(12).text_color(t.foreground)))
-          .child(act("files-replace-one", "Replace", "Replace the current hit (Enter in the field)", cx => this.replaceOne(cx)))
-          .child(act("files-replace-all", "All", "Replace every hit", cx => this.replaceAll(cx)));
-      });
+      .when(f.mode === "editor" && this.editable, el => el.child(btn("files-replace-toggle", "⇄", "Replace (shows the replace row)", cx => { this.replaceOpen = !this.replaceOpen; cx.notify(); })
+        .when(this.replaceOpen, e => e.bg(t.selected).text_color(t.foreground))));
+  }
+  // The tab on screen if it is a file tab of this mod (else null), asked at the moment of use.
+  shownTab() {
+    const tab = spaces().find(s => s.active)?.tabs.find(t => t.active);
+    return tab && panes().some(p => p.mod === "files-copy" && p.tab === tab.id) ? tab.id : null;
+  }
+  // The replace row under the header: shown by the ⇄ button, only while editing.
+  replaceRow(t) {
+    const n = this.find.list.length;
+    const act = (id, label, tip, run) => div().id(id).flex_none().px(8).h(22).flex().items_center().rounded(5).border_1().border_color(t.border).text_size(11)
+      .text_color(n ? t.foreground : t.border).when(n > 0, e => e.cursor_pointer().hover(s => s.bg(t.hover))).tooltip(tip)
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => { if (n) run(cx); }).child(label);
+    return h_flex().h(34).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
+      .child(div().id("files-replace").h(24).w(260).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_text()
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_key_down((e, cx) => { if (e.keystroke === "escape") { this.replaceOpen = false; cx.notify(); cx.stop_propagation(); } })
+        .child(Input.new(this.replaceInput).flex_1().h_full().text_size(12).text_color(t.foreground)))
+      .child(act("files-replace-one", "Replace", "Replace the current hit (Enter in the field)", cx => this.replaceOne(cx)))
+      .child(act("files-replace-all", "All", "Replace every hit", cx => this.replaceAll(cx)));
   }
 
   renderTab(t, cx) {
@@ -924,7 +933,12 @@ export default class Files extends View {
         .when(Boolean(this.lines) && this.editable && !this.preview, el => el.child(button("files-edit", "Edit", "Edit this file (⌘-click definitions are off while editing)", cx => this.editPython(cx))))
         .when(this.finding, el => el.child(h_flex().flex_none().gap(6).items_center().text_size(11).text_color(t.accent)
           .child(svg("mods/files-copy/spinner.svg").size(12).spin(900)).child("Finding definition…")))
-        .when(!this.finding && py && !this.code, el => el.child(div().flex_none().text_size(11).text_color(this.cmd ? t.accent : t.dim).child("⌘-click: definition"))))
+        .when(!this.finding && py && !this.code, el => el.child(div().flex_none().text_size(11).text_color(this.cmd ? t.accent : t.dim).child("⌘-click: definition")))
+        // Closes this tab (unsaved edits ask first, see close()), always the last thing in the header.
+        .child(div().id("files-close").size(26).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer().text_color(t.dim)
+          .hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip("Close")
+          .on_click(() => { const tab = this.shownTab(); if (tab) run("tab.close", { id: tab, confirmed: true }); }).child(svg("mods/files-copy/close.svg").size(12))))
+      .when(this.replaceOpen && this.find.mode === "editor" && this.editable && !this.preview, el => el.child(this.replaceRow(t)))
       .child(this.raster || (isSvg && this.preview && (this.code || this.lines)) ? this.imageView(t, cx)
         : this.preview && (this.code || this.lines) ? this.mdPane(t, cx)
         // A fixed box (absolute, inset 0) instead of flex sizing: sized by flex the editor grew with its text,

@@ -518,8 +518,7 @@ export default class DiffView extends View {
         .child(Input.new(this.findInput).flex_1().h_full().text_size(12).text_color(t.foreground)))
       .child(div().flex_none().text_size(11).text_color(t.dim).child(f.q ? (n ? `${f.cur + 1}/${n}${f.capped ? "+" : ""}` : "No results") : ""))
       .child(btn("diff-find-prev", "↑", "Previous (⇧Enter)", (cx) => this.stepFind(-1, cx)))
-      .child(btn("diff-find-next", "↓", "Next (Enter)", (cx) => this.stepFind(1, cx)))
-      .child(btn("diff-find-close", "×", "Clear (Esc)", (cx) => this.closeFind(cx)));
+      .child(btn("diff-find-next", "↓", "Next (Enter)", (cx) => this.stepFind(1, cx)));
   }
 
   // Next / previous change across all files, wrapping around.
