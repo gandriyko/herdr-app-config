@@ -5,7 +5,7 @@
 // only scrolls to it. Side-by-side or unified rows; hunk separators reveal more context lines.
 
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex } from "gpui-base";
+import { v_flex, h_flex, Input, InputState } from "gpui-base";
 import { highlight, languageFor } from "./highlight.js";
 import { props, shared, setShared, spaces, panes, theme, settings, exec, readTextFile, run, notify, appHome } from "herdr";
 
@@ -14,6 +14,14 @@ const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.a
 const FONT = 13, ROW = 22, HEAD = 32, CHAR_W = FONT * 0.6;
 // Caps: lines per file, lines in all, files per view; STEP context lines per reveal click.
 const MAX_LINES = 20000, MAX_TOTAL = 100000, MAX_FILES = 300, STEP = 20;
+
+// Find: every case-insensitive hit of q in text as [start, end) pairs (at most FIND_CAP + 1: the extra one says "capped").
+const FIND_CAP = 1000;
+function findAll(text, q) {
+  const out = [], hay = text.toLowerCase(), n = q.length;
+  for (let at = hay.indexOf(q); at >= 0 && out.length <= FIND_CAP; at = hay.indexOf(q, at + n)) out.push([at, at + n]);
+  return out;
+}
 
 // The hunks of one file's unified diff (lines from its first @@ on). os/ns: first line of each side
 // (a side with no lines sits after line o/n), oe/ne: one past its last.
@@ -200,6 +208,11 @@ export default class DiffView extends View {
     // A tab opened with its own file must not be overwritten by an older request still sitting in shared state.
     this.applied = Math.max(this.req?.ts ?? 0, props()?.path ? shared("wb.diff.request")?.ts ?? 0 : 0); this.thumbDrag = null;
     this.sel = null; this.selecting = false;
+    // Find bar (⌘F): list = hits { i: row, side, a, b, k } in row order, cur = the current one, fmap = "row:side" → its hits.
+    this.find = { open: false, q: "", list: [], cur: 0, capped: false, rows: null }; this.fmap = null;
+    this.findInput = InputState.new({ placeholder: "Find in diff" });
+    this.findInput.on("change", (_e, cx) => { this.find.q = this.findInput.value().toLowerCase(); this.find.cur = 0; this.runFind(cx, true); });
+    this.findInput.on("submit", (e, cx) => this.stepFind(e?.shift ? -1 : 1, cx));
     this.handle = cx.focus_handle();
     // Once its tab is really on screen it takes the keyboard (Alt+↑/↓ and Esc work without a click first).
     cx.timer.after(300, () => { if (this.shownTab()) this.handle.focus(); });
@@ -448,6 +461,67 @@ export default class DiffView extends View {
   // Where a jump to change run k puts the scroll (three rows of context above it).
   targetY(k) { return Math.max(0, this.yOf(this.targets[k]) - 3 * ROW); }
 
+  // ---- find ----
+
+  openFind(cx) {
+    if (!this.rows.length) return;
+    this.find.open = true; this.findInput.focus(); this.runFind(cx, Boolean(this.find.q));
+  }
+  closeFind(cx) { this.find.open = false; this.find.list = []; this.fmap = null; this.find.rows = null; this.handle.focus(); cx.notify(); }
+  // Hits over the shown rows' code (headers, separators and notes excluded). A split row of unchanged code shows the same
+  // text on both sides: one hit, drawn on both. Rerun by render() when the rows are rebuilt (cached by `rows`); jump moves the view.
+  runFind(cx, jump) {
+    const f = this.find, q = f.q, split = this.layout === "split";
+    f.list = []; f.capped = false; this.fmap = null; f.rows = this.rows;
+    if (f.open && q) {
+      const raw = [];
+      for (let i = 0; i < this.rows.length && raw.length <= FIND_CAP; i++) {
+        const r = this.rows[i];
+        for (const side of split ? (r.kind === " " ? ["left"] : ["left", "right"]) : ["unified"]) {
+          const text = this.textOf(i, side);
+          if (text) for (const [a, b] of findAll(text, q)) raw.push({ i, side, a, b });
+        }
+      }
+      f.capped = raw.length > FIND_CAP; f.list = raw.slice(0, FIND_CAP);
+      this.fmap = new Map();
+      f.list.forEach((m, k) => {
+        m.k = k;
+        for (const key of m.side === "left" && this.rows[m.i].kind === " " && split ? [`${m.i}:left`, `${m.i}:right`] : [`${m.i}:${m.side}`]) {
+          if (!this.fmap.has(key)) this.fmap.set(key, []);
+          this.fmap.get(key).push(m);
+        }
+      });
+      f.cur = Math.min(f.cur, Math.max(0, f.list.length - 1));
+    }
+    if (jump) this.goFind(cx); else if (cx) cx.notify();
+  }
+  stepFind(dir, cx) {
+    const f = this.find, n = f.list.length;
+    if (!n) return;
+    f.cur = (f.cur + dir + n) % n; this.goFind(cx);
+  }
+  // The current hit in the middle of the view.
+  goFind(cx) {
+    const m = this.find.list[this.find.cur];
+    if (m) this.scrollY = Math.max(0, this.yOf(m.i) - (this.viewH - ROW) / 2);
+    cx.notify();
+  }
+  findBar(t) {
+    const f = this.find, n = f.list.length;
+    const btn = (id, label, tip, act) => div().id(id).size(22).flex_none().flex().items_center().justify_center().rounded(4).cursor_pointer()
+      .text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(tip).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => act(cx)).child(label);
+    return h_flex().h(34).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
+      .child(div().id("diff-find").h(24).w(260).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_text()
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_key_down((e, cx) => { if (e.keystroke === "escape") { this.closeFind(cx); cx.stop_propagation(); } })
+        .child(Input.new(this.findInput).flex_1().h_full().text_size(12).text_color(t.foreground)))
+      .child(div().flex_none().text_size(11).text_color(t.dim).child(f.q ? (n ? `${f.cur + 1}/${n}${f.capped ? "+" : ""}` : "No results") : ""))
+      .child(btn("diff-find-prev", "↑", "Previous (⇧Enter)", (cx) => this.stepFind(-1, cx)))
+      .child(btn("diff-find-next", "↓", "Next (Enter)", (cx) => this.stepFind(1, cx)))
+      .child(div().flex_1())
+      .child(btn("diff-find-close", "×", "Close (Esc)", (cx) => this.closeFind(cx)));
+  }
+
   // Next / previous change across all files, wrapping around.
   jump(dir, cx) {
     const n = this.targets.length;
@@ -479,15 +553,18 @@ export default class DiffView extends View {
     const end = Math.min(b, len), w = (end - a) * CHAR_W + (b === Infinity ? CHAR_W / 2 : 0);
     return w > 0 ? div().absolute().top(0).bottom(0).left(a * CHAR_W).w(w).bg(t.selection) : null;
   }
-  cell(text, lang, t, marks, sel) {
+  // A find hit as a box behind the text, the current one stronger.
+  hitBox(a, b, k, t) { return div().absolute().top(0).bottom(0).left(a * CHAR_W).w((b - a) * CHAR_W).rounded(2).bg(t.ansi3 + (k === this.find.cur ? "99" : "44")); }
+  cell(text, lang, t, marks, sel, hits) {
     const box = sel && this.selBox(sel[0], sel[1], sel[2], t);
     return h_flex().flex_1().min_w(0).h_full().items_center().overflow_hidden().whitespace_nowrap().relative()
+      .children((hits ?? []).map((h) => this.hitBox(h.a, h.b, h.k, t)))
       .when(Boolean(box), (e) => e.child(box))
       .children(this.spans(text, lang, t, marks).map((p) => this.span(p)));
   }
 
   // The same line, cut into lines of `cols` characters (colors kept), each its own ROW-tall line.
-  wrapCell(text, lang, t, marks, sel) {
+  wrapCell(text, lang, t, marks, sel, hits) {
     const cols = this.cols, lines = [];
     let cur = [], n = 0;
     for (const p of this.spans(text, lang, t, marks)) {
@@ -506,15 +583,17 @@ export default class DiffView extends View {
       const a = Math.max(sel[0], s), b = last ? sel[1] : Math.min(sel[1], s + cols);
       return a < b ? this.selBox(a - s, b - s, Math.max(0, Math.min(cols, sel[2] - s)), t) : null;
     };
+    const hitBoxes = (L) => (hits ?? []).flatMap((h) => { const s = L * cols, a = Math.max(h.a, s), b = Math.min(h.b, s + cols); return a < b ? [this.hitBox(a - s, b - s, h.k, t)] : []; });
     return v_flex().flex_1().min_w(0).children(lines.map((l, L) => { const bx = box(L); return h_flex().h(ROW).items_center().whitespace_nowrap().relative()
+      .children(hitBoxes(L))
       .when(Boolean(bx), (e) => e.child(bx))
       .children(l.length ? l.map((p) => this.span(p)) : [div().child(" ")]); }));
   }
 
   // `sel`: [start, end) of the line's selection (end may be Infinity); its real length is added for the box.
-  code(text, lang, t, marks, sel) {
+  code(text, lang, t, marks, sel, hits) {
     const s = sel && [sel[0], sel[1], (text ?? "").length];
-    return this.wrap ? this.wrapCell(text || " ", lang, t, marks, s) : this.cell(text || " ", lang, t, marks, s);
+    return this.wrap ? this.wrapCell(text || " ", lang, t, marks, s, hits) : this.cell(text || " ", lang, t, marks, s, hits);
   }
 
   // Text selection: a drag in one code column (unified, left or right) from `a` to `b`, each { i: row, c: char };
@@ -572,14 +651,14 @@ export default class DiffView extends View {
       if ((del || add) && r.pair && r.words === undefined) { const w = wordDiff(del ? r.text : r.pair.text, del ? r.pair.text : r.text); r.words = w ? w[del ? 0 : 1] : null; r.pair.words = w ? w[del ? 1 : 0] : null; }
       return h_flex().w(width).h(h).flex_none().gap(10).when(del || add, (e) => e.bg(del ? t.delBg : t.addBg))
         .child(this.num(r.o, t)).child(this.num(r.n, t))
-        .child(this.code(r.text, lang, t, r.words ? { ranges: r.words, bg: del ? t.delWord : t.addWord } : null, sr));
+        .child(this.code(r.text, lang, t, r.words ? { ranges: r.words, bg: del ? t.delWord : t.addWord } : null, sr, this.fmap?.get(`${i}:unified`)));
     }
     const c = r[name], left = name === "left";
     if (r.kind === "x" && r.left && r.right && r.words === undefined) r.words = wordDiff(r.left.text, r.right.text);
     const on = r.kind === "x" && c;
     return h_flex().w(width).h(h).flex_none().gap(10).when(Boolean(on), (e) => e.bg(left ? t.delBg : t.addBg))
       .child(this.num(c?.num, t))
-      .child(this.code(c ? c.text : "", lang, t, on && r.words ? { ranges: r.words[left ? 0 : 1], bg: left ? t.delWord : t.addWord } : null, sr));
+      .child(this.code(c ? c.text : "", lang, t, on && r.words ? { ranges: r.words[left ? 0 : 1], bg: left ? t.delWord : t.addWord } : null, sr, this.fmap?.get(`${i}:${name}`)));
   }
 
   // A file header: fold chevron, status, name, folder, added/removed counts, Open in Files. A click folds or opens the file.
@@ -717,6 +796,7 @@ export default class DiffView extends View {
     // Rows span at least the whole column, so tints don't stop where the longest line ends.
     // A drag over a column selects its text; local positions are inside the horizontally scrolled content.
     const sel = this.selection();
+    if (this.find.open && this.find.rows !== this.rows) this.runFind(null, false); // rows rebuilt (fold, reveal, layout, reload)
     const at = (e, name, floor) => this.posAt(e.local_position.x / z, e.local_position.y / z + off, name, floor);
     const column = (name, w) => { const width = Math.max(w, colW); return div().id(`diff-${name}`).flex_1().min_w(0).h_full().overflow_x_scrollbar()
       .child(div().min_w(width).h_full().relative().cursor_text()
@@ -765,6 +845,8 @@ export default class DiffView extends View {
         if ((down || up) && e.modifiers.alt && e.modifiers.shift) { this.jumpFile(down ? 1 : -1, cx); cx.stop_propagation(); }
         else if ((down || up) && e.modifiers.alt) { this.jump(down ? 1 : -1, cx); cx.stop_propagation(); }
         else if (e.key === "c" && e.modifiers.platform) { const s = this.selectedText(); if (s) { cx.write_to_clipboard(s); cx.stop_propagation(); } }
+        else if (e.key === "f" && e.modifiers.platform) { this.openFind(cx); cx.stop_propagation(); }
+        else if (e.key === "escape" && this.find.open) { this.closeFind(cx); cx.stop_propagation(); }
         // Esc closes the diff tab on screen, and only a diff tab: anywhere else the key is left alone.
         else if (e.key === "escape") { const tab = this.shownTab(); if (tab) { run("tab.close", { id: tab, confirmed: true }); cx.stop_propagation(); } }
       })
@@ -776,6 +858,9 @@ export default class DiffView extends View {
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(nf > 1 && ci >= 0 ? `file ${ci + 1} of ${nf}` : (top?.path ?? r?.path ?? "").includes("/") ? (top?.path ?? r.path).replace(/\/[^/]*$/, "") : ""))
         .when(whole, (e) => e.child(div().flex_none().text_size(11).text_color(t.dim).child("new file")))
         .when(Boolean(r), (e) => e.child(group([cell("refresh", "refresh", r.commit ? "Reload the diff" : "Refresh: reload the diff and pick up new or reverted files", false, !this.loading, refresh)])))
+        .child(div().id("diff-find-open").flex_none().h(20).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).text_size(11)
+          .text_color(this.find.open ? t.foreground : t.muted).when(this.find.open, (e) => e.bg(t.selected)).cursor_pointer().hover((s) => s.bg(t.hover))
+          .tooltip("Find in the diff (⌘F)").on_mouse_down("left", stop).on_click((_e, cx) => { if (this.find.open) this.closeFind(cx); else this.openFind(cx); }).child("Find"))
         .child(group([cell("wrap", "wrap", "Wrap long lines", this.wrap, true, toggleWrap)]))
         .child(group([cell("layout-split", "split", "Side by side", split, true, setLayout("split")),
           cell("layout-unified", "unified", "Unified", !split, true, setLayout("unified"))]))
@@ -789,6 +874,7 @@ export default class DiffView extends View {
           .child(group([cell("diff-prev", "chevron-left", "Previous change (Alt+↑; previous file: Alt+Shift+↑)", false, this.targets.length > 0, (cx) => this.jump(-1, cx)),
             cell("diff-next", "chevron-right", "Next change (Alt+↓; next file: Alt+Shift+↓)", false, this.targets.length > 0, (cx) => this.jump(1, cx))])))
         .child(div().id("diff-close").w(26).h(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Close").on_mouse_down("left", stop).on_click(() => { const tab = this.shownTab(); if (tab) run("tab.close", { id: tab, confirmed: true }); }).child(svg("mods/wb-diff/icons/close.svg").size(12))))
+      .when(this.find.open, (e) => e.child(this.findBar(t)))
       .child(div().id("diff-body").flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(FONT)
         .on_size_change((s, cx) => { const h = s.height / z, w = s.width / z; if (h !== this.viewH || w !== this.viewW) { this.viewH = h; this.viewW = w; cx.notify(); } })
         .on_hover((hovered) => { if (!hovered) { this.thumbDrag = null; this.selecting = false; } })
