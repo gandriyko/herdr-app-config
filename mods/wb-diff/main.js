@@ -582,9 +582,16 @@ export default class DiffView extends View {
       .child(this.code(c ? c.text : "", lang, t, on && r.words ? { ranges: r.words[left ? 0 : 1], bg: left ? t.delWord : t.addWord } : null, sr));
   }
 
-  // A file header: fold chevron, status, name, folder, added/removed counts. A click folds or opens the file.
+  // A file header: fold chevron, status, name, folder, added/removed counts, Open in Files. A click folds or opens the file.
   fileHead(fi, t) {
-    const f = this.files[fi], slash = f.path.lastIndexOf("/"), folded = this.collapsed.has(f.path);
+    const f = this.files[fi], slash = f.path.lastIndexOf("/"), folded = this.collapsed.has(f.path), gone = f.status === "D";
+    // Opens this file in files-copy; a deleted file has nothing to open. Its clicks don't reach the header's fold.
+    const open = div().id(`open-${fi}`).w(22).h(18).flex_none().flex().items_center().justify_center().rounded(4)
+      .text_color(gone ? t.lineNo : t.muted).tooltip(gone ? "Deleted: nothing to open" : `Open ${f.path.slice(slash + 1)} in Files`)
+      .when(!gone, (e) => e.cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); if (!gone) this.openInFiles(f.path, cx); })
+      .child(svg("mods/wb-diff/icons/open-file.svg").size(13));
     return h_flex().id(`head-${fi}`).size_full().px(12).gap(8).items_center().bg(t.raised).border_y(1).border_color(t.border).cursor_pointer()
       .tooltip(folded ? "Show this file's changes" : "Fold this file")
       .on_click((_e, cx) => this.toggleFile(fi, cx))
@@ -593,7 +600,8 @@ export default class DiffView extends View {
       .child(div().flex_none().max_w(360).truncate().font_semibold().text_size(13).child(f.path.slice(slash + 1)))
       .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(slash > 0 ? f.path.slice(0, slash) : ""))
       .when(f.plus > 0, (e) => e.child(div().flex_none().text_size(11).text_color(t.ansi2).child(`+${f.plus}`)))
-      .when(f.minus > 0, (e) => e.child(div().flex_none().text_size(11).text_color(t.ansi1).child(`−${f.minus}`)));
+      .when(f.minus > 0, (e) => e.child(div().flex_none().text_size(11).text_color(t.ansi1).child(`−${f.minus}`)))
+      .child(open);
   }
 
   // Opens the file in files-copy's tab for this space. Contract: the request goes through files-copy's
@@ -662,7 +670,7 @@ export default class DiffView extends View {
     const scroll = (to) => { this.scrollY = Math.max(0, Math.min(max, to)); };
     // The file at the top of the view, and how far through the changes the view is.
     const fi = this.rows[first]?.fi ?? -1, cf = this.files[fi];
-    // The file the toolbar names and opens. Scrolled to the end, short last files can't reach the top, so the top
+    // The file the toolbar names. Scrolled to the end, short last files can't reach the top, so the top
     // row is still an earlier file's: then it's the requested file if its header is in view, else the last header in view.
     let ci = fi;
     if (max > 0 && off >= max - 1) {
@@ -768,9 +776,6 @@ export default class DiffView extends View {
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(nf > 1 && ci >= 0 ? `file ${ci + 1} of ${nf}` : (top?.path ?? r?.path ?? "").includes("/") ? (top?.path ?? r.path).replace(/\/[^/]*$/, "") : ""))
         .when(whole, (e) => e.child(div().flex_none().text_size(11).text_color(t.dim).child("new file")))
         .when(Boolean(r), (e) => e.child(group([cell("refresh", "refresh", r.commit ? "Reload the diff" : "Refresh: reload the diff and pick up new or reverted files", false, !this.loading, refresh)])))
-        // The file the toolbar names (or the requested one before the diff loads); a deleted file has nothing to open.
-        .when(Boolean(r), (e) => { const p = top?.path ?? r.path, gone = (top?.status ?? r.status) === "D";
-          return e.child(group([cell("open-files", "open-file", gone ? "Deleted: nothing to open" : `Open ${p.split("/").pop()} in Files`, false, Boolean(p) && !gone, (cx) => this.openInFiles(p, cx))])); })
         .child(group([cell("wrap", "wrap", "Wrap long lines", this.wrap, true, toggleWrap)]))
         .child(group([cell("layout-split", "split", "Side by side", split, true, setLayout("split")),
           cell("layout-unified", "unified", "Unified", !split, true, setLayout("unified"))]))
