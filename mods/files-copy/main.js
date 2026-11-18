@@ -150,8 +150,8 @@ export default class Files extends View {
       this.tab = true; this.back = []; this.fwd = []; this.space = p.space ?? null;
       this.handle = cx.focus_handle(); this.viewH = 400; this.viewW = 800;
       this.imgs = new Map(); this.imgQueue = []; this.imgBusy = false; // source → cached file (false: failed, null: loading)
-      // Find bar (⌘F): list = hits in the shown view (lines, editor offsets, or Markdown blocks), cur = the current one.
-      this.find = { open: false, q: "", list: [], cur: 0, mode: null, capped: false };
+      // Find bar (always shown; ⌘F focuses it, Esc clears it): list = hits in the shown view (lines, editor offsets, or Markdown blocks), cur = the current one.
+      this.find = { open: true, q: "", list: [], cur: 0, mode: null, capped: false };
       this.fmap = null; this.mdHits = new Set(); this.mdScroll = ScrollHandle.new();
       this.hold = false; this.holdCap = false; this.holdTimer = false; this.pending = false;
       this.findInput = InputState.new({ placeholder: "Find in file" });
@@ -521,7 +521,7 @@ export default class Files extends View {
       if (dirty !== this.dirty) { this.dirty = dirty; if (dirty) this.status = null; cx.notify(); }
       if (this.find.open && this.find.q && this.findMode() === "editor") this.runFind(cx, false);
     });
-    if (!this.find.open) this.code.focus();
+    this.code.focus();
   }
 
   // Python opens in the mod's own view (⌘-click definitions); Edit switches it to the editor.
@@ -773,7 +773,7 @@ export default class Files extends View {
   mdView(text, t, cx) {
     const blocks = this.mdBlocksOf(text), id = `files-md-${this.req.path}`;
     this.pending = false; // set by picture() while a picture is still being fetched
-    const marks = this.find.open && this.find.mode === "md", cur = this.find.list[this.find.cur]?.block;
+    const marks = Boolean(this.find.q) && this.find.mode === "md", cur = this.find.list[this.find.cur]?.block;
     return blocks.map((b, i) => {
       const el = b.imgs
         ? h_flex().flex_wrap().items_center().gap(8).py(4)
@@ -817,10 +817,10 @@ export default class Files extends View {
     if (!this.findMode()) return;
     this.find.open = true; this.findInput.focus(); this.runFind(cx, Boolean(this.find.q));
   }
+  // Esc or ×: the text is cleared (the bar stays) and the keyboard goes back to the view.
   closeFind(cx) {
-    this.find.open = false; this.find.list = []; this.fmap = null; this.mdHits = new Set();
-    if (this.lines && !this.preview) this.handle.focus();
-    cx.notify();
+    this.findInput.set_value(""); this.find.q = ""; this.find.cur = 0; this.runFind(cx, false);
+    if (this.lines && !this.preview) this.handle.focus(); else if (this.code) this.code.focus();
   }
   // Recomputes the hits for the shown view (not from render); jump moves the view to the current one.
   runFind(cx, jump) {
@@ -866,7 +866,7 @@ export default class Files extends View {
       .child(btn("files-find-next", "↓", "Next (Enter)", cx => this.stepFind(1, cx)))
       .child(div().flex_1())
       .when(f.mode === "md" && n > 0, el => el.child(div().flex_none().text_size(11).text_color(t.dim).child("Rendered view: the block with the hit is marked")))
-      .child(btn("files-find-close", "×", "Close (Esc)", cx => this.closeFind(cx)));
+      .child(btn("files-find-close", "×", "Clear (Esc)", cx => this.closeFind(cx)));
   }
 
   renderTab(t, cx) {
@@ -890,13 +890,12 @@ export default class Files extends View {
         // SVG: Preview shows the picture as saved.
         .when(Boolean(this.code || this.lines) && /\.(md|markdown|svg)$/i.test(path), el => el.child(button("files-preview", this.preview ? "Source" : "Preview",
           this.preview ? "Back to the source" : isSvg ? "Show the picture (as saved)" : "Show the rendered Markdown (read-only)", cx => { this.preview = !this.preview; if (this.find.open) this.runFind(cx, true); else cx.notify(); })))
-        .when(Boolean(this.findMode()), el => el.child(button("files-find-open", "Find", "Find in this file (⌘F)", cx => this.find.open ? this.closeFind(cx) : this.openFind(cx))))
         // Not over the rendered Markdown: editing there would change nothing on screen (Source first).
         .when(Boolean(this.lines) && this.editable && !this.preview, el => el.child(button("files-edit", "Edit", "Edit this file (⌘-click definitions are off while editing)", cx => this.editPython(cx))))
         .when(this.finding, el => el.child(h_flex().flex_none().gap(6).items_center().text_size(11).text_color(t.accent)
           .child(svg("mods/files-copy/spinner.svg").size(12).spin(900)).child("Finding definition…")))
         .when(!this.finding && py && !this.code, el => el.child(div().flex_none().text_size(11).text_color(this.cmd ? t.accent : t.dim).child("⌘-click: definition"))))
-      .when(this.find.open && Boolean(this.findMode()), el => el.child(this.findBar(t)))
+      .when(Boolean(this.findMode()), el => el.child(this.findBar(t)))
       .child(this.raster || (isSvg && this.preview && (this.code || this.lines)) ? this.imageView(t, cx)
         : this.preview && (this.code || this.lines) ? this.mdPane(t, cx)
         // A fixed box (absolute, inset 0) instead of flex sizing: sized by flex the editor grew with its text,

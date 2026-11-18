@@ -208,8 +208,8 @@ export default class DiffView extends View {
     // A tab opened with its own file must not be overwritten by an older request still sitting in shared state.
     this.applied = Math.max(this.req?.ts ?? 0, props()?.path ? shared("wb.diff.request")?.ts ?? 0 : 0); this.thumbDrag = null;
     this.sel = null; this.selecting = false;
-    // Find bar (⌘F): list = hits { i: row, side, a, b, k } in row order, cur = the current one, fmap = "row:side" → its hits.
-    this.find = { open: false, q: "", list: [], cur: 0, capped: false, rows: null }; this.fmap = null;
+    // Find bar (always shown; ⌘F focuses it, Esc clears it): list = hits { i: row, side, a, b, k } in row order, cur = the current one, fmap = "row:side" → its hits.
+    this.find = { open: true, q: "", list: [], cur: 0, capped: false, rows: null }; this.fmap = null;
     this.findInput = InputState.new({ placeholder: "Find in diff" });
     this.findInput.on("change", (_e, cx) => { this.find.q = this.findInput.value().toLowerCase(); this.find.cur = 0; this.runFind(cx, true); });
     this.findInput.on("submit", (e, cx) => this.stepFind(e?.shift ? -1 : 1, cx));
@@ -467,7 +467,8 @@ export default class DiffView extends View {
     if (!this.rows.length) return;
     this.find.open = true; this.findInput.focus(); this.runFind(cx, Boolean(this.find.q));
   }
-  closeFind(cx) { this.find.open = false; this.find.list = []; this.fmap = null; this.find.rows = null; this.handle.focus(); cx.notify(); }
+  // Esc or ×: the text is cleared (the bar stays) and the keyboard goes back to the diff.
+  closeFind(cx) { this.findInput.set_value(""); this.find.q = ""; this.find.cur = 0; this.runFind(cx, false); this.handle.focus(); }
   // Hits over the shown rows' code (headers, separators and notes excluded). A split row of unchanged code shows the same
   // text on both sides: one hit, drawn on both. Rerun by render() when the rows are rebuilt (cached by `rows`); jump moves the view.
   runFind(cx, jump) {
@@ -519,7 +520,7 @@ export default class DiffView extends View {
       .child(btn("diff-find-prev", "↑", "Previous (⇧Enter)", (cx) => this.stepFind(-1, cx)))
       .child(btn("diff-find-next", "↓", "Next (Enter)", (cx) => this.stepFind(1, cx)))
       .child(div().flex_1())
-      .child(btn("diff-find-close", "×", "Close (Esc)", (cx) => this.closeFind(cx)));
+      .child(btn("diff-find-close", "×", "Clear (Esc)", (cx) => this.closeFind(cx)));
   }
 
   // Next / previous change across all files, wrapping around.
@@ -846,7 +847,7 @@ export default class DiffView extends View {
         else if ((down || up) && e.modifiers.alt) { this.jump(down ? 1 : -1, cx); cx.stop_propagation(); }
         else if (e.key === "c" && e.modifiers.platform) { const s = this.selectedText(); if (s) { cx.write_to_clipboard(s); cx.stop_propagation(); } }
         else if (e.key === "f" && e.modifiers.platform) { this.openFind(cx); cx.stop_propagation(); }
-        else if (e.key === "escape" && this.find.open) { this.closeFind(cx); cx.stop_propagation(); }
+        else if (e.key === "escape" && this.find.q) { this.closeFind(cx); cx.stop_propagation(); }
         // Esc closes the diff tab on screen, and only a diff tab: anywhere else the key is left alone.
         else if (e.key === "escape") { const tab = this.shownTab(); if (tab) { run("tab.close", { id: tab, confirmed: true }); cx.stop_propagation(); } }
       })
@@ -858,9 +859,6 @@ export default class DiffView extends View {
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(nf > 1 && ci >= 0 ? `file ${ci + 1} of ${nf}` : (top?.path ?? r?.path ?? "").includes("/") ? (top?.path ?? r.path).replace(/\/[^/]*$/, "") : ""))
         .when(whole, (e) => e.child(div().flex_none().text_size(11).text_color(t.dim).child("new file")))
         .when(Boolean(r), (e) => e.child(group([cell("refresh", "refresh", r.commit ? "Reload the diff" : "Refresh: reload the diff and pick up new or reverted files", false, !this.loading, refresh)])))
-        .child(div().id("diff-find-open").flex_none().h(20).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).text_size(11)
-          .text_color(this.find.open ? t.foreground : t.muted).when(this.find.open, (e) => e.bg(t.selected)).cursor_pointer().hover((s) => s.bg(t.hover))
-          .tooltip("Find in the diff (⌘F)").on_mouse_down("left", stop).on_click((_e, cx) => { if (this.find.open) this.closeFind(cx); else this.openFind(cx); }).child("Find"))
         .child(group([cell("wrap", "wrap", "Wrap long lines", this.wrap, true, toggleWrap)]))
         .child(group([cell("layout-split", "split", "Side by side", split, true, setLayout("split")),
           cell("layout-unified", "unified", "Unified", !split, true, setLayout("unified"))]))
@@ -874,7 +872,7 @@ export default class DiffView extends View {
           .child(group([cell("diff-prev", "chevron-left", "Previous change (Alt+↑; previous file: Alt+Shift+↑)", false, this.targets.length > 0, (cx) => this.jump(-1, cx)),
             cell("diff-next", "chevron-right", "Next change (Alt+↓; next file: Alt+Shift+↓)", false, this.targets.length > 0, (cx) => this.jump(1, cx))])))
         .child(div().id("diff-close").w(26).h(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Close").on_mouse_down("left", stop).on_click(() => { const tab = this.shownTab(); if (tab) run("tab.close", { id: tab, confirmed: true }); }).child(svg("mods/wb-diff/icons/close.svg").size(12))))
-      .when(this.find.open, (e) => e.child(this.findBar(t)))
+      .when(n > 0, (e) => e.child(this.findBar(t)))
       .child(div().id("diff-body").flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(FONT)
         .on_size_change((s, cx) => { const h = s.height / z, w = s.width / z; if (h !== this.viewH || w !== this.viewW) { this.viewH = h; this.viewW = w; cx.notify(); } })
         .on_hover((hovered) => { if (!hovered) { this.thumbDrag = null; this.selecting = false; } })
