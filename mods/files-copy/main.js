@@ -176,7 +176,7 @@ export default class Files extends View {
       this.findInput = InputState.new({ placeholder: "Find in file" });
       this.findInput.on("change", (_e, cx) => { this.find.q = this.findInput.value(); this.find.cur = 0; this.runFind(cx, true); });
       this.findInput.on("submit", (e, cx) => this.stepFind(e?.shift ? -1 : 1, cx));
-      this.gotoOpen = false; this.gotoInput = InputState.new({ placeholder: "Line number" });
+      this.rulerH = 300; this.gotoOpen = false; this.gotoInput = InputState.new({ placeholder: "Line number" });
       this.gotoInput.on("submit", (_e, cx) => this.goLine(cx));
       this.confirmRevert = false; this.split = false; this.autoGen = 0; this.splitGen = 0; this.checking = false;
       try { this.autosave = localStorage.getItem("files-copy.autosave") === "1"; } catch { this.autosave = false; }
@@ -933,7 +933,16 @@ export default class Files extends View {
     f.mode = mode; f.list = []; f.capped = false; this.fmap = null; this.mdHits = new Set();
     if (f.open && q && mode) {
       let raw = [];
-      if (mode === "editor") raw = findAll(this.code.value(), q).map(([s, e]) => ({ s, e }));
+      if (mode === "editor") {
+        const text = this.code.value(), starts = [0];
+        for (let i = text.indexOf("\n"); i >= 0; i = text.indexOf("\n", i + 1)) starts.push(i + 1);
+        f.nLines = starts.length;
+        raw = findAll(text, q).map(([s, e]) => { // its line, for the ruler (binary search over line starts)
+          let lo = 0, hi = starts.length - 1;
+          while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (starts[mid] <= s) lo = mid; else hi = mid - 1; }
+          return { s, e, line: lo };
+        });
+      }
       else if (mode === "lines") this.lines.forEach((l, line) => { if (raw.length <= FIND_CAP) for (const [start, end] of findAll(l, q)) raw.push({ line, start, end }); });
       else this.mdBlocksOf(this.code ? this.code.value() : this.text).forEach((b, block) => { if (raw.length <= FIND_CAP) for (const [start] of findAll(mdVisible(b.md ?? ""), q)) raw.push({ block, start }); });
       f.capped = raw.length > FIND_CAP; f.list = raw.slice(0, FIND_CAP);
@@ -980,6 +989,27 @@ export default class Files extends View {
     if (!re) return;
     this.code.set_value(text.replace(re, f.regex ? rv : () => rv));
     f.cur = 0; this.runFind(cx, false);
+  }
+  // The hits as ticks down a strip beside the editor (which has no way to mark text): position = line / lines,
+  // the current hit stronger; a click goes to the nearest hit. Ticks share a pixel row, so at most `height` are drawn.
+  ruler(t) {
+    const f = this.find, H = this.rulerH, n = Math.max(1, f.nLines || 1), z = settings().zoom || 1, ticks = new Map();
+    f.list.forEach((m, k) => { const y = Math.round((m.line + 0.5) / n * H); ticks.set(y, ticks.get(y) || k === f.cur); });
+    return div().id("files-ruler").w(14).h_full().flex_none().relative().bg(t.background).border_l(1).border_color(t.border).cursor_pointer()
+      .on_size_change((sz, cx) => { const h = sz.height / z; if (Math.abs(h - this.rulerH) > 1) { this.rulerH = h; cx.notify(); } })
+      .on_mouse_down("left", (e, cx) => {
+        if (!e.local_position) return;
+        const line = e.local_position.y / z / H * n; let best = 0;
+        f.list.forEach((m, k) => { if (Math.abs(m.line - line) < Math.abs(f.list[best].line - line)) best = k; });
+        f.cur = best; this.goFind(cx);
+      })
+      .children([...ticks].map(([y, cur]) => div().absolute().left(2).right(2).top(y - (cur ? 2 : 1)).h(cur ? 4 : 2).rounded(1).bg(cur ? t.accent : t.ansi3 + "bb")));
+  }
+  // The editor, with the strip of hits beside it while a search has hits.
+  editorPane(t) {
+    return h_flex().flex_1().min_w(0).min_h(0)
+      .child(div().flex_1().min_w(0).h_full().relative().child(Editor.new(this.code).absolute().inset_0()))
+      .when(this.find.mode === "editor" && this.find.list.length > 0, el => el.child(this.ruler(t)));
   }
   findBar(t) {
     const f = this.find, n = f.list.length;
@@ -1070,9 +1100,9 @@ export default class Files extends View {
         // A fixed box (absolute, inset 0) instead of flex sizing: sized by flex the editor grew with its text,
         // so nothing overflowed and the wheel didn't scroll (as with the Changes list).
         : this.split && this.code && /\.(md|markdown)$/i.test(path) ? h_flex().flex_1().min_h(0)
-          .child(div().flex_1().min_w(0).h_full().relative().child(Editor.new(this.code).absolute().inset_0()))
+          .child(this.editorPane(t))
           .child(div().w(1).h_full().flex_none().bg(t.border)).child(this.mdPane(t, cx))
-        : this.code ? div().flex_1().min_h(0).relative().child(Editor.new(this.code).absolute().inset_0())
+        : this.code ? this.editorPane(t)
         : this.lines ? this.codeView(t)
         : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…"))
       .when(Boolean(this.status), el => el.child(div().flex_none().px(14).py(6).border_t(1).border_color(t.border).text_size(11).text_color(t.dim).truncate().child(this.status)));
