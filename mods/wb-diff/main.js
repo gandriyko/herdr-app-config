@@ -15,14 +15,24 @@ const FONT = 13, ROW = 22, HEAD = 32, CHAR_W = FONT * 0.6;
 // Caps: lines per file, lines in all, files per view; STEP context lines per reveal click.
 const MAX_LINES = 20000, MAX_TOTAL = 100000, MAX_FILES = 300, STEP = 20;
 
-// Find: every case-insensitive hit of q in text as [start, end) pairs (at most FIND_CAP + 1: the extra one says "capped").
+// Find: the search as a global RegExp (null when q is empty or an invalid regular expression). o: { case, word, regex }.
 const FIND_CAP = 1000;
-function findAll(text, q) {
-  const out = [], hay = text.toLowerCase(), n = q.length;
-  for (let at = hay.indexOf(q); at >= 0 && out.length <= FIND_CAP; at = hay.indexOf(q, at + n)) out.push([at, at + n]);
+function findRegex(q, o) {
+  if (!q) return null;
+  try {
+    let src = o.regex ? q : q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (o.word) src = `\\b(?:${src})\\b`;
+    return new RegExp(src, "gm" + (o.case ? "" : "i"));
+  } catch { return null; }
+}
+// Every hit of re in text as [start, end) pairs (at most FIND_CAP + 1: the extra one says "capped"); empty matches are skipped.
+function findAll(text, re) {
+  const out = []; re.lastIndex = 0;
+  for (let m = re.exec(text); m && out.length <= FIND_CAP; m = re.exec(text)) {
+    if (m[0] === "") re.lastIndex++; else out.push([m.index, m.index + m[0].length]);
+  }
   return out;
 }
-
 // The hunks of one file's unified diff (lines from its first @@ on). os/ns: first line of each side
 // (a side with no lines sits after line o/n), oe/ne: one past its last.
 function parseHunks(lines) {
@@ -209,9 +219,10 @@ export default class DiffView extends View {
     this.applied = Math.max(this.req?.ts ?? 0, props()?.path ? shared("wb.diff.request")?.ts ?? 0 : 0); this.thumbDrag = null;
     this.sel = null; this.selecting = false;
     // Find bar (always shown; ⌘F focuses it, Esc clears it): list = hits { i: row, side, a, b, k } in row order, cur = the current one, fmap = "row:side" → its hits.
-    this.find = { open: true, q: "", list: [], cur: 0, capped: false, rows: null }; this.fmap = null;
+    this.find = { open: true, q: "", list: [], cur: 0, capped: false, rows: null, case: false, word: false, regex: false, bad: false };
+    try { Object.assign(this.find, JSON.parse(localStorage.getItem("wb-diff.find") ?? "{}")); } catch {} this.fmap = null;
     this.findInput = InputState.new({ placeholder: "Find in diff" });
-    this.findInput.on("change", (_e, cx) => { this.find.q = this.findInput.value().toLowerCase(); this.find.cur = 0; this.runFind(cx, true); });
+    this.findInput.on("change", (_e, cx) => { this.find.q = this.findInput.value(); this.find.cur = 0; this.runFind(cx, true); });
     this.findInput.on("submit", (e, cx) => this.stepFind(e?.shift ? -1 : 1, cx));
     this.handle = cx.focus_handle();
     // Once its tab is really on screen it takes the keyboard (Alt+↑/↓ and Esc work without a click first).
@@ -472,7 +483,8 @@ export default class DiffView extends View {
   // Hits over the shown rows' code (headers, separators and notes excluded). A split row of unchanged code shows the same
   // text on both sides: one hit, drawn on both. Rerun by render() when the rows are rebuilt (cached by `rows`); jump moves the view.
   runFind(cx, jump) {
-    const f = this.find, q = f.q, split = this.layout === "split";
+    const f = this.find, q = findRegex(f.q, f), split = this.layout === "split";
+    f.bad = Boolean(f.q) && !q;
     f.list = []; f.capped = false; this.fmap = null; f.rows = this.rows;
     if (f.open && q) {
       const raw = [];
@@ -511,12 +523,18 @@ export default class DiffView extends View {
     const f = this.find, n = f.list.length;
     const btn = (id, label, tip, act) => div().id(id).size(22).flex_none().flex().items_center().justify_center().rounded(4).cursor_pointer()
       .text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(tip).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => act(cx)).child(label);
+    // Search options (remembered): each toggles one flag and searches again.
+    const opt = (id, label, tip, flag) => div().id(id).h(22).px(5).flex_none().flex().items_center().rounded(4).cursor_pointer().text_size(11)
+      .text_color(f[flag] ? t.foreground : t.dim).when(Boolean(f[flag]), (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover)).tooltip(tip)
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { f[flag] = !f[flag]; try { localStorage.setItem("wb-diff.find", JSON.stringify({ case: f.case, word: f.word, regex: f.regex })); } catch {} f.cur = 0; this.runFind(cx, true); }).child(label);
     return h_flex().flex_none().gap(6).items_center()
       .child(div().id("diff-find").h(24).w(210).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_text()
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_key_down((e, cx) => { if (e.keystroke === "escape") { this.closeFind(cx); cx.stop_propagation(); } })
         .child(Input.new(this.findInput).flex_1().h_full().text_size(12).text_color(t.foreground)))
-      .child(div().flex_none().text_size(11).text_color(t.dim).child(f.q ? (n ? `${f.cur + 1}/${n}${f.capped ? "+" : ""}` : "No results") : ""))
+      .child(opt("diff-find-case", "Aa", "Match case", "case")).child(opt("diff-find-word", "W", "Whole word", "word")).child(opt("diff-find-re", ".*", "Regular expression", "regex"))
+      .child(div().flex_none().text_size(11).text_color(f.bad ? t.ansi1 : t.dim).child(f.bad ? "Invalid regex" : f.q ? (n ? `${f.cur + 1}/${n}${f.capped ? "+" : ""}` : "No results") : ""))
       .child(btn("diff-find-prev", "↑", "Previous (⇧Enter)", (cx) => this.stepFind(-1, cx)))
       .child(btn("diff-find-next", "↓", "Next (Enter)", (cx) => this.stepFind(1, cx)));
   }
