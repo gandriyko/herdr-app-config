@@ -180,9 +180,10 @@ export default class Files extends View {
       this.gotoInput.on("submit", (_e, cx) => this.goLine(cx));
       this.confirmRevert = false; this.split = false; this.autoGen = 0; this.splitGen = 0; this.checking = false;
       try { this.autosave = localStorage.getItem("files-copy.autosave") === "1"; } catch { this.autosave = false; }
-      // The editor has a find of its own on ⌘F / Ctrl-F (it marks every hit of the selection and shows no field of ours):
-      // inside this tab's editor those chords mean our find bar instead, filled with the selection.
-      cx.bind_keys([{ keystroke: "cmd-f", action: "files-copy.find", context: "Editor && FilesCopyTab" }, { keystroke: "ctrl-f", action: "files-copy.find", context: "Editor && FilesCopyTab" }]);
+      // Ctrl-F in the editor (⌘F stays the app's terminal search): the editor's own binding for it (and its automatic
+      // marking of the selection's hits) would otherwise take the key, so it is bound here in the editor's context, deeper
+      // than this tab; the action reaches this tab's root, and elsewhere nothing handles it.
+      cx.bind_keys([{ keystroke: "ctrl-f", action: "files-copy.find", context: "Editor" }, { keystroke: "ctrl-f", action: "files-copy.find", context: "Editor && FilesCopyTab" }]);
       this.replaceOpen = false; this.replaceInput = InputState.new({ placeholder: "Replace with" }); // shown while editing; Enter replaces the current hit
       this.replaceInput.on("submit", (_e, cx) => this.replaceOne(cx));
       this.applied = Math.max(p.ts ?? 0, shared(REQUEST)?.ts ?? 0);
