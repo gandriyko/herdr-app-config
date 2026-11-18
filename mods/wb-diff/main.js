@@ -511,15 +511,14 @@ export default class DiffView extends View {
     const f = this.find, n = f.list.length;
     const btn = (id, label, tip, act) => div().id(id).size(22).flex_none().flex().items_center().justify_center().rounded(4).cursor_pointer()
       .text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(tip).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click((_e, cx) => act(cx)).child(label);
-    return h_flex().h(34).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
-      .child(div().id("diff-find").h(24).w(260).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_text()
+    return h_flex().flex_none().gap(6).items_center()
+      .child(div().id("diff-find").h(24).w(210).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_text()
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_key_down((e, cx) => { if (e.keystroke === "escape") { this.closeFind(cx); cx.stop_propagation(); } })
         .child(Input.new(this.findInput).flex_1().h_full().text_size(12).text_color(t.foreground)))
       .child(div().flex_none().text_size(11).text_color(t.dim).child(f.q ? (n ? `${f.cur + 1}/${n}${f.capped ? "+" : ""}` : "No results") : ""))
       .child(btn("diff-find-prev", "↑", "Previous (⇧Enter)", (cx) => this.stepFind(-1, cx)))
       .child(btn("diff-find-next", "↓", "Next (Enter)", (cx) => this.stepFind(1, cx)))
-      .child(div().flex_1())
       .child(btn("diff-find-close", "×", "Clear (Esc)", (cx) => this.closeFind(cx)));
   }
 
@@ -857,6 +856,7 @@ export default class DiffView extends View {
         .child(svg("mods/wb-diff/icons/diff.svg").size(14).text_color(t.muted))
         .child(div().flex_none().max_w(260).truncate().font_semibold().child((top?.path ?? r?.path)?.split("/").pop() ?? "Diff"))
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(nf > 1 && ci >= 0 ? `file ${ci + 1} of ${nf}` : (top?.path ?? r?.path ?? "").includes("/") ? (top?.path ?? r.path).replace(/\/[^/]*$/, "") : ""))
+        .when(n > 0, (e) => e.child(this.findBar(t)))
         .when(whole, (e) => e.child(div().flex_none().text_size(11).text_color(t.dim).child("new file")))
         .when(Boolean(r), (e) => e.child(group([cell("refresh", "refresh", r.commit ? "Reload the diff" : "Refresh: reload the diff and pick up new or reverted files", false, !this.loading, refresh)])))
         .child(group([cell("wrap", "wrap", "Wrap long lines", this.wrap, true, toggleWrap)]))
@@ -872,7 +872,6 @@ export default class DiffView extends View {
           .child(group([cell("diff-prev", "chevron-left", "Previous change (Alt+↑; previous file: Alt+Shift+↑)", false, this.targets.length > 0, (cx) => this.jump(-1, cx)),
             cell("diff-next", "chevron-right", "Next change (Alt+↓; next file: Alt+Shift+↓)", false, this.targets.length > 0, (cx) => this.jump(1, cx))])))
         .child(div().id("diff-close").w(26).h(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip("Close").on_mouse_down("left", stop).on_click(() => { const tab = this.shownTab(); if (tab) run("tab.close", { id: tab, confirmed: true }); }).child(svg("mods/wb-diff/icons/close.svg").size(12))))
-      .when(n > 0, (e) => e.child(this.findBar(t)))
       .child(div().id("diff-body").flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(FONT)
         .on_size_change((s, cx) => { const h = s.height / z, w = s.width / z; if (h !== this.viewH || w !== this.viewW) { this.viewH = h; this.viewW = w; cx.notify(); } })
         .on_hover((hovered) => { if (!hovered) { this.thumbDrag = null; this.selecting = false; } })

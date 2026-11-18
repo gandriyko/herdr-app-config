@@ -38,7 +38,7 @@ in its props): Save writes them with the same guard, Don't save or Esc drops the
 dialog and unsaved edits are lost. A Markdown file (`.md`, `.markdown`) opens rendered (read-only, text
 selectable, unsaved edits included); the Source button shows its text, Preview goes back. Edit shows only with the source, not over the rendered view.
 
-Find in file: a find bar is always shown under the tab header for a searchable file (⌘F focuses it; case-insensitive, Enter next, ⇧Enter
+Find in file: a find field (with counter, ↑/↓, ×) sits in the tab header for a searchable file (⌘F focuses it; case-insensitive, Enter next, ⇧Enter
 previous, Esc or × clears it, counter `3/12`, first 1,000 hits, then `+`). It searches whatever the tab shows:
 the line view (Python, `.env`, Markdown source) tints every hit and centres the current one; the editor
 selects the current hit; rendered Markdown matches the visible words only (link targets, image sources and

@@ -856,16 +856,14 @@ export default class Files extends View {
     const f = this.find, n = f.list.length;
     const btn = (id, label, tip, act) => div().id(id).size(22).flex_none().flex().items_center().justify_center().rounded(4).cursor_pointer()
       .text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip(tip).on_click((_e, cx) => act(cx)).child(label);
-    return h_flex().h(34).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
-      .child(div().id("files-find").h(24).w(260).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_text()
+    return h_flex().flex_none().gap(6).items_center()
+      .child(div().id("files-find").h(24).w(210).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_text()
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_key_down((e, cx) => { if (e.keystroke === "escape") { this.closeFind(cx); cx.stop_propagation(); } })
         .child(Input.new(this.findInput).flex_1().h_full().text_size(12).text_color(t.foreground)))
       .child(div().flex_none().text_size(11).text_color(t.dim).child(f.q ? (n ? `${f.cur + 1}/${n}${f.capped ? "+" : ""}` : "No results") : ""))
       .child(btn("files-find-prev", "↑", "Previous (⇧Enter)", cx => this.stepFind(-1, cx)))
       .child(btn("files-find-next", "↓", "Next (Enter)", cx => this.stepFind(1, cx)))
-      .child(div().flex_1())
-      .when(f.mode === "md" && n > 0, el => el.child(div().flex_none().text_size(11).text_color(t.dim).child("Rendered view: the block with the hit is marked")))
       .child(btn("files-find-close", "×", "Clear (Esc)", cx => this.closeFind(cx)));
   }
 
@@ -885,6 +883,7 @@ export default class Files extends View {
           .child(div().id("files-fwd").w(20).text_color(this.fwd.length ? t.muted : t.border).when(this.fwd.length > 0, e => e.cursor_pointer())
             .tooltip("Forward (⌘] or Ctrl+Shift+-)").on_click((_e, cx) => this.goForward(cx)).child("→")))
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.dim).child(path + (this.dirty ? " ●" : "")))
+        .when(Boolean(this.findMode()), el => el.child(this.findBar(t)))
         .when(this.dirty, el => el.child(button("files-save", this.saving ? "Saving…" : "Save", "Save (⌘S)", cx => this.save(cx))))
         // Markdown: Preview shows it rendered (read-only, selectable; with unsaved edits as typed), Source goes back.
         // SVG: Preview shows the picture as saved.
@@ -895,7 +894,6 @@ export default class Files extends View {
         .when(this.finding, el => el.child(h_flex().flex_none().gap(6).items_center().text_size(11).text_color(t.accent)
           .child(svg("mods/files-copy/spinner.svg").size(12).spin(900)).child("Finding definition…")))
         .when(!this.finding && py && !this.code, el => el.child(div().flex_none().text_size(11).text_color(this.cmd ? t.accent : t.dim).child("⌘-click: definition"))))
-      .when(Boolean(this.findMode()), el => el.child(this.findBar(t)))
       .child(this.raster || (isSvg && this.preview && (this.code || this.lines)) ? this.imageView(t, cx)
         : this.preview && (this.code || this.lines) ? this.mdPane(t, cx)
         // A fixed box (absolute, inset 0) instead of flex sizing: sized by flex the editor grew with its text,
