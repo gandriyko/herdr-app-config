@@ -1,26 +1,45 @@
-// Open PRs per repo through gh. Pure helpers: the instance keeps the state from newPrState().
+// Copy of lib/prs.js (agents-copy, agents-board): edit lib/prs.js, then run scripts/sync-lib.
+// Open PRs per repo through gh, and the Jira keys that pick an agent's PR. Pure helpers: the instance
+// keeps the state from newPrState().
 
 export const CHECKS_WORD = { fail: "failing", pass: "passing", pending: "pending", none: "none" };
 const MAX_COMMON = 200;
 const MAX_REPOS = 30;
 const PR_EVERY = 60000;
 const NO_PR_EVERY = 5 * 60000;
+export const RECHECK = 60000; // after an agent stops: past gh's 55 s cache
 const DEFAULT_EVERY = 30 * 60000;
 const GH_DOWN = 10 * 60000;
 const FAIL_RETRY = 5 * 60000;
 
 // The open PRs of the cwd's repo with the head commit's rollup state. gh caches the answer on disk
-// for 55 s keyed by the request, so every mod sending this exact query shares one GitHub call
-// (agents-copy sends the same text). Keep it byte-identical there.
+// for 55 s keyed by the request, so every copy sending this exact query shares one GitHub call.
 const PRS_QUERY = "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){pullRequests(states:OPEN,first:100){nodes{number headRefName commits(last:1){nodes{commit{statusCheckRollup{state}}}}}}}}";
 const PRS_ARGS = ["api", "graphql", "--cache", "55s", "-F", "owner={owner}", "-F", "name={repo}", "-f", `query=${PRS_QUERY}`];
 // GitHub's StatusState of the rollup as "fail" | "pending" | "pass"; no rollup is "none".
 const CHECKS = { FAILURE: "fail", ERROR: "fail", PENDING: "pending", EXPECTED: "pending", SUCCESS: "pass" };
 
+// Jira keys: DA-20457, also in an upper-cased branch name (da-20457-fix -> DA-20457).
+const JIRA_KEY = /[A-Z][A-Z0-9]+-\d+/;
+// The key a branch names, or null.
+export const branchKey = (branch) => branch?.toUpperCase().match(JIRA_KEY)?.[0] ?? null;
+// Every key in a text (upper-case it first).
+export const keysIn = (text) => text.match(new RegExp(JIRA_KEY.source, "g")) ?? [];
+// The projects from the jira mod's settings ({ project: "DA, OPS" }) as ["DA", "OPS"]; [] means any.
+export const jiraProjects = (settings) => String(settings?.project ?? "").toUpperCase().split(/[\s,]+/).filter(Boolean);
+// The first key in a text that belongs to one of the projects (so UTF-8 or GPT-4 is not a key), or null.
+export const projectKey = (text, projects) =>
+  keysIn(text).find((k) => !projects.length || projects.includes(k.split("-")[0])) ?? null;
+// Whether a branch names the Jira key as a whole (DA-2049 is not in da-20493-fix).
+const keyIn = (branch, key) => {
+  const up = branch.toUpperCase(), i = up.indexOf(key);
+  return i >= 0 && !/[A-Z0-9]/.test(up[i - 1] ?? "") && !/\d/.test(up[i + key.length] ?? "");
+};
+
 export function newPrState() {
   return {
     common: new Map(), // cwd -> git common dir ("" when not a repo)
-    repos: new Map(), // common dir -> { cwd, at, next, asked: Set, def, defAt, prs: { branch: { n, c } } }
+    repos: new Map(), // common dir -> { cwd, at, next, recheckAt, asked: Set, def, defAt, prs: { branch: { n, c } } }
     ghDownUntil: 0,
   };
 }
@@ -32,12 +51,6 @@ export function prMap(st) {
   return out;
 }
 
-// Whether a branch names the Jira key as a whole (DA-2049 is not in da-20493-fix).
-const keyIn = (branch, key) => {
-  const up = branch.toUpperCase(), i = up.indexOf(key);
-  return i >= 0 && !/[A-Z0-9]/.test(up[i - 1] ?? "") && !/\d/.test(up[i + key.length] ?? "");
-};
-
 // A place with a Jira key (the agent names it) takes the open PR whose branch has that key; without one,
 // the folder's branch PR, unless that branch names another key.
 export function prOf(st, place) {
@@ -48,9 +61,20 @@ export function prOf(st, place) {
   if (place.key) {
     const b = Object.keys(prs).find((b) => keyIn(b, place.key));
     if (b) return prs[b];
-    if (/[A-Z][A-Z0-9]+-\d+/.test(place.branch?.toUpperCase() ?? "")) return null;
+    if (branchKey(place.branch)) return null;
   }
   return (place.branch && prs[place.branch]) || null;
+}
+
+// An agent with no PR that stopped working may have just opened one: its repo is asked on the next
+// refresh, and once more RECHECK later (gh's 55 s cache can answer the first ask from before the PR).
+// One recheck per repo: agents stopping in the same minute share it. Whether a repo was marked.
+export function askAgain(st, place) {
+  const r = place && !prOf(st, place) && st.repos.get(st.common.get(place.cwd));
+  if (!r) return false;
+  r.next = 0;
+  r.recheckAt = Date.now() + RECHECK;
+  return true;
 }
 
 // places: [{ cwd, branch, key }]. `exec` is herdr's; `alive()` says whether to go on.
@@ -78,7 +102,7 @@ export async function refreshPrs(st, places, exec, alive) {
     let r = st.repos.get(key);
     if (!r) {
       if (st.repos.size >= MAX_REPOS) st.repos.delete(st.repos.keys().next().value);
-      r = { cwd: e.cwd, at: 0, next: 0, asked: new Set(), prs: {}, def: null, defAt: 0 };
+      r = { cwd: e.cwd, at: 0, next: 0, recheckAt: 0, asked: new Set(), prs: {}, def: null, defAt: 0 };
       st.repos.set(key, r);
     }
     r.cwd = e.cwd;
@@ -100,11 +124,14 @@ export async function refreshPrs(st, places, exec, alive) {
     const novel = [...cands, ...keys].some((b) => !r.asked.has(b));
     if (!novel && now < r.next) continue;
     const start = Date.now();
+    if (r.recheckAt && start >= r.recheckAt) r.recheckAt = 0; // this ask is the recheck
     const res = await exec("gh", PRS_ARGS, { cwd: r.cwd, timeout: 15000 }).catch(() => null);
+    if (!alive()) return;
     const at = Date.now();
     r.at = at;
     r.asked = new Set([...cands, ...keys]);
     if (!res) {
+      // gh isn't installed (or the folder is gone): no chips, ask again in 10 minutes.
       st.ghDownUntil = at + GH_DOWN;
       for (const x of st.repos.values()) x.prs = {};
       return;
@@ -115,6 +142,7 @@ export async function refreshPrs(st, places, exec, alive) {
         for (const x of st.repos.values()) x.prs = {};
         return;
       }
+      // Not a GitHub repo, offline: keep the last good answer, try again later.
       r.next = at + FAIL_RETRY;
       continue;
     }
@@ -126,6 +154,7 @@ export async function refreshPrs(st, places, exec, alive) {
       // From when gh started, with slack so the 30 s tick lands on the mark; a PR on a candidate branch is checked every 60 s, none every 5 min.
       const found = cands.some((b) => prs[b]) || keys.some((k) => Object.keys(prs).some((b) => keyIn(b, k)));
       r.next = start + (found ? PR_EVERY : NO_PR_EVERY) - 2000;
+      if (r.recheckAt) r.next = Math.min(r.next, r.recheckAt);
     } catch {
       r.next = at + FAIL_RETRY;
     }

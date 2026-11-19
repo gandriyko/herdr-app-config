@@ -43,6 +43,7 @@ in `lib/` and copied into each mod that has a file of the same name. Edit `lib/<
 | `ai.js` | `wb-ai`, `changes-copy`, `prs` |
 | `highlight.js` | `wb-diff`, `files-copy` |
 | `asking.js` | `agents-copy`, `agents-board` |
+| `prs.js` | `agents-copy`, `agents-board` |
 
 ## Skills
 

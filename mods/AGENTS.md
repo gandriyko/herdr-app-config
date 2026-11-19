@@ -60,7 +60,7 @@ another mod is removed, cloned or updated.
   `mods/pane/…`): shipped mods are replaced on every start and may drop the file.
 - **Shared helpers live in `lib/`, copied into each mod.** Herdr refuses any module outside a mod's
   folder (`../lib/x.js` and symlinks alike), so a helper used by several mods (`ai.js`,
-  `highlight.js`, `asking.js`) has its source in `lib/<file>` and a real copy in each mod. Edit only
+  `highlight.js`, `asking.js`, `prs.js`) has its source in `lib/<file>` and a real copy in each mod. Edit only
   `lib/<file>`, run `scripts/sync-lib` (it copies over every mod's file of that name), and commit
   `lib/` with the copies; check each mod that uses it with `herdr-app check`. A mod starts using a
   helper by having a file of that name (copy it once, then `sync-lib` keeps it); see Sync below.

@@ -5,7 +5,7 @@ import { v_flex, h_flex, InputState, Input, ScrollHandle, TextView } from "gpui-
 import { agents, terminals, panes, spaces, run, theme, settings, shared, setShared, closeOverlay, props, exec, hc } from "herdr";
 import { AskingTracker } from "./asking.js";
 import { isSelectMenu, parseOptions, parseQuestion, parseSuggestion, sameOptions } from "./reply.js";
-import { CHECKS_WORD, newPrState, prMap, prOf, refreshPrs } from "./prs.js";
+import { CHECKS_WORD, branchKey, jiraProjects, newPrState, prMap, prOf, projectKey, refreshPrs } from "./prs.js";
 
 const ICONS = "mods/agents-board/";
 const SEND_TIMEOUT = 3000; // ms a reply `hc send` may wait for the agent's input line to clear (a normal send takes < 1 s)
@@ -608,13 +608,12 @@ export default class Board extends View {
     // contract: jira.settings is written by the jira mod ({ site: "https://x.atlassian.net", project: "DA, OPS", … }); optional.
     const jiraSet = shared("jira.settings");
     const jiraSite = jiraSet?.site;
-    // Keys in the agent's texts count only for the saved projects (so UTF-8 or GPT-4 in a report is not a key); any when none is saved.
-    const projects = String(jiraSet?.project ?? "").toUpperCase().split(/[\s,]+/).filter(Boolean);
+    // Keys in the agent's texts count only for the saved projects; any when none is saved.
+    const projects = jiraProjects(jiraSet);
     // The Jira key the agent names (title, tab, report), or null: its own task, even on a branch another agent made.
     const textKey = (a) => {
       const term = termBy.get(a.address), tb = tabBy.get(a.tab);
-      const text = [term?.title, a.title, tb?.named ? tb.name : null, a.name, term?.report].filter(Boolean).join("\n").toUpperCase();
-      return (text.match(/[A-Z][A-Z0-9]+-\d+/g) ?? []).find((k) => !projects.length || projects.includes(k.split("-")[0])) ?? null;
+      return projectKey([term?.title, a.title, tb?.named ? tb.name : null, a.name, term?.report].filter(Boolean).join("\n").toUpperCase(), projects);
     };
 
     // Where each agent is, for PRs; a remote one has no local gh. `key`: the Jira key it names, whose PR it gets.
@@ -640,7 +639,7 @@ export default class Board extends View {
     const prFor = (a) => prOf(this.pr, placeOf.get(a.address));
     // The Jira pill (only with a site): the key the agent names, else its branch's (da-20457-fix -> DA-20457).
     const jiraFor = (a) =>
-      jiraSite ? textKey(a) ?? placeOf.get(a.address)?.branch?.toUpperCase().match(/[A-Z][A-Z0-9]+-\d+/)?.[0] ?? null : null;
+      jiraSite ? textKey(a) ?? branchKey(placeOf.get(a.address)?.branch) : null;
 
     // One record per agent with everything the card shows.
     const info = (a) => {

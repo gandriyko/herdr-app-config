@@ -4,6 +4,7 @@ import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { AskingTracker } from "./asking.js";
 import { lastMessage } from "./last.js";
+import { CHECKS_WORD, RECHECK, askAgain, branchKey, jiraProjects, keysIn, newPrState, prMap, prOf, projectKey, refreshPrs } from "./prs.js";
 import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, hc, openOverlay, closeOverlay, props, window, layout, exec, notify, playSound, settings } from "herdr";
 
 function find(node, id) {
@@ -77,29 +78,6 @@ const filterOf = () => {
   const f = shared("agents-copy.filter");
   return { space: typeof f?.space === "string" ? f.space : null, pr: PR_FILTERS.some((x) => x.id === f?.pr) ? f.pr : "any" };
 };
-const JIRA_KEY = /[A-Z][A-Z0-9]+-\d+/; // in an upper-cased branch name: da-20457-fix -> DA-20457
-// Whether a branch names the Jira key as a whole (DA-2049 is not in da-20493-fix).
-const keyIn = (branch, key) => {
-  const up = branch.toUpperCase(), i = up.indexOf(key);
-  return i >= 0 && !/[A-Z0-9]/.test(up[i - 1] ?? "") && !/\d/.test(up[i + key.length] ?? "");
-};
-const CHECKS_WORD = { fail: "failing", pass: "passing", pending: "pending", none: "none" };
-
-// The open PRs of the cwd's repo with the head commit's rollup state. gh caches the answer on disk
-// for 55 s keyed by the request, so every mod sending this exact query shares one GitHub call
-// (agents-board sends the same text). Keep it byte-identical there.
-const PRS_QUERY = "query($owner:String!,$name:String!){repository(owner:$owner,name:$name){pullRequests(states:OPEN,first:100){nodes{number headRefName commits(last:1){nodes{commit{statusCheckRollup{state}}}}}}}}";
-const PRS_ARGS = ["api", "graphql", "--cache", "55s", "-F", "owner={owner}", "-F", "name={repo}", "-f", `query=${PRS_QUERY}`];
-// GitHub's StatusState of the rollup as "fail" | "pending" | "pass"; no rollup is "none".
-const CHECKS = { FAILURE: "fail", ERROR: "fail", PENDING: "pending", EXPECTED: "pending", SUCCESS: "pass" };
-const MAX_COMMON = 200;
-const MAX_REPOS = 30;
-const PR_EVERY = 60000;
-const NO_PR_EVERY = 5 * 60000;
-const RECHECK = 60000; // after an agent stops: past gh's 55 s cache
-const DEFAULT_EVERY = 30 * 60000;
-const GH_DOWN = 10 * 60000;
-const FAIL_RETRY = 5 * 60000;
 const SECTION = { 4: "Needs you", 2: "Working", 3: "Done" };
 const SECTION_ORDER = { 4: 0, 2: 1, 3: 2 };
 const MONO = "Menlo";
@@ -154,14 +132,12 @@ export default class Agents extends View {
     this.pendingPins = JSON.parse(localStorage.getItem("pins") ?? "[]");
     if (!this.pendingPins.length) localStorage.removeItem("pins");
     this.migratingPins = new Set();
-    this.common = new Map(); // cwd -> git common dir (or "" when not a repo)
-    this.repos = new Map(); // common dir -> { cwd, at, next, asked: Set, def, defAt, prs: { branch: { n, c } } }
-    this.places = []; // { cwd, branch } of the listed agents
+    this.pr = newPrState(); // open PRs per repo (./prs.js)
+    this.places = []; // { cwd, branch, key } of the listed agents
     this.wasWorking = new Set(); // addresses working at the last render
     this.prJson = "{}";
     this.busy = false;
     this.again = false;
-    this.ghDownUntil = 0;
     this.blocked = new Map(); // address -> { since, last }
     // Agents finished on a menu or a question count as blocked; one screen read per turn.
     this.asking = new AskingTracker(hc, () => this.live);
@@ -339,15 +315,15 @@ export default class Agents extends View {
       this.again = true;
       return;
     }
-    if (Date.now() < this.ghDownUntil || !this.places.length) return;
+    if (Date.now() < this.pr.ghDownUntil || !this.places.length) return;
     this.busy = true;
     cx.spawn(async (cx) => {
       try {
         do {
           this.again = false;
-          await this.refresh();
+          await refreshPrs(this.pr, this.places.slice(), exec, () => this.live);
           if (!this.live) return;
-          const json = JSON.stringify(this.prMap());
+          const json = JSON.stringify(prMap(this.pr));
           if (json !== this.prJson) {
             this.prJson = json;
             cx.notify();
@@ -357,112 +333,6 @@ export default class Agents extends View {
         this.busy = false;
       }
     });
-  }
-
-  // { common dir: { branch: { n, c } } } of what is shown, for compare and lookup.
-  prMap() {
-    const out = {};
-    for (const [k, r] of this.repos) if (Object.keys(r.prs).length) out[k] = r.prs;
-    return out;
-  }
-
-  async refresh() {
-    const places = this.places.slice();
-    const byRepo = new Map();
-    for (const p of places) {
-      if (!this.live) return;
-      let c = this.common.get(p.cwd);
-      if (c === undefined) {
-        const r = await exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: p.cwd, timeout: 5000 }).catch(() => null);
-        c = r?.code === 0 ? r.stdout.trim() : "";
-        if (this.common.size >= MAX_COMMON) this.common.delete(this.common.keys().next().value);
-        this.common.set(p.cwd, c);
-      }
-      if (!c) continue;
-      const e = byRepo.get(c) ?? { cwd: p.cwd, branches: new Set(), keys: new Set() };
-      if (p.branch) e.branches.add(p.branch);
-      if (p.key) e.keys.add(p.key);
-      byRepo.set(c, e);
-    }
-    const now = Date.now();
-    for (const [key, e] of byRepo) {
-      if (!this.live || now < this.ghDownUntil) return;
-      const keys = [...e.keys];
-      let r = this.repos.get(key);
-      if (!r) {
-        if (this.repos.size >= MAX_REPOS) this.repos.delete(this.repos.keys().next().value);
-        r = { cwd: e.cwd, at: 0, next: 0, asked: new Set(), prs: {}, def: null, defAt: 0 };
-        this.repos.set(key, r);
-      }
-      r.cwd = e.cwd;
-      // The repo's default branch (git's origin/HEAD), re-read every 30 min; a failure means main/master only.
-      if (!r.defAt || now - r.defAt > DEFAULT_EVERY) {
-        const d = await exec("git", ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"], { cwd: r.cwd, timeout: 5000 }).catch(() => null);
-        if (!this.live) return;
-        r.def = d?.code === 0 ? d.stdout.trim().replace(/^origin\//, "") || null : null;
-        r.defAt = Date.now();
-      }
-      // Only a feature branch, or a Jira key an agent names (its PR may be on another branch), can have a PR; none, no gh call.
-      const cands = [...e.branches].filter((b) => b && b !== "HEAD" && b !== "main" && b !== "master" && b !== r.def);
-      if (!cands.length && !keys.length) {
-        r.prs = {};
-        r.asked = new Set();
-        r.next = 0;
-        continue;
-      }
-      const novel = [...cands, ...keys].some((b) => !r.asked.has(b));
-      if (!novel && now < r.next) continue;
-      const start = Date.now();
-      if (r.recheckAt && start >= r.recheckAt) r.recheckAt = 0; // this ask is the recheck
-      const res = await exec("gh", PRS_ARGS, { cwd: r.cwd, timeout: 15000 }).catch(() => null);
-      if (!this.live) return;
-      const at = Date.now();
-      r.at = at;
-      r.asked = new Set([...cands, ...keys]);
-      if (!res) {
-        // gh isn't installed (or the folder is gone): no chips, ask again in 10 minutes.
-        this.ghDownUntil = at + GH_DOWN;
-        for (const x of this.repos.values()) x.prs = {};
-        return;
-      }
-      if (res.code !== 0) {
-        if (/auth login|not logged|GH_TOKEN|authenticat/i.test(res.stderr)) {
-          this.ghDownUntil = at + GH_DOWN;
-          for (const x of this.repos.values()) x.prs = {};
-          return;
-        }
-        // Not a GitHub repo, offline: keep the last good answer, try again later.
-        r.next = at + FAIL_RETRY;
-        continue;
-      }
-      try {
-        const prs = {};
-        for (const pr of JSON.parse(res.stdout).data.repository.pullRequests.nodes)
-          prs[pr.headRefName] = { n: pr.number, c: CHECKS[pr.commits.nodes[0]?.commit.statusCheckRollup?.state] ?? "none" };
-        r.prs = prs;
-        // From when gh started, with slack so the 30 s tick lands on the mark; a PR on a candidate branch is checked every 60 s, none every 5 min.
-        const found = cands.some((b) => prs[b]) || keys.some((k) => Object.keys(prs).some((b) => keyIn(b, k)));
-        r.next = start + (found ? PR_EVERY : NO_PR_EVERY) - 2000;
-        if (r.recheckAt) r.next = Math.min(r.next, r.recheckAt);
-      } catch {
-        r.next = at + FAIL_RETRY;
-      }
-    }
-  }
-
-  // The PR chip's data for an agent's place, or null. A place with a Jira key (the agent names it) takes the open PR
-  // whose branch has that key; without one, the folder's branch PR, unless that branch names another key.
-  prOf(place) {
-    if (!place) return null;
-    const c = this.common.get(place.cwd);
-    const prs = c && this.repos.get(c)?.prs;
-    if (!prs) return null;
-    if (place.key) {
-      const b = Object.keys(prs).find((b) => keyIn(b, place.key));
-      if (b) return prs[b];
-      if (place.branch?.toUpperCase().match(JIRA_KEY)) return null;
-    }
-    return (place.branch && prs[place.branch]) || null;
   }
 
   // Stamps agents whose state changed. Done and idle count as one: looking at a
@@ -672,14 +542,13 @@ export default class Agents extends View {
     const spaceBy = new Map(spaceList.map((s) => [s.id, s]));
     const textOf = (a) =>
       [a.title, a.tab_name, a.name, termBy.get(a.address)?.report, termBy.get(a.address)?.title].filter(Boolean).join("\n").toUpperCase();
-    const JIRA_KEYS = new RegExp(JIRA_KEY.source, "g");
     // contract: jira.settings is written by the jira mod ({ site: "https://x.atlassian.net", project: "DA, OPS", … }); optional.
     const jiraSet = shared("jira.settings");
     const jiraSite = jiraSet?.site;
-    // Keys in the agent's texts count only for the saved projects (so UTF-8 or GPT-4 in a report is not a key); any when none is saved.
-    const projects = String(jiraSet?.project ?? "").toUpperCase().split(/[\s,]+/).filter(Boolean);
+    // Keys in the agent's texts count only for the saved projects; any when none is saved.
+    const projects = jiraProjects(jiraSet);
     // The Jira key the agent names (its own task, even on a branch another agent made), or null.
-    const textKey = (a) => (textOf(a).match(JIRA_KEYS) ?? []).find((k) => !projects.length || projects.includes(k.split("-")[0])) ?? null;
+    const textKey = (a) => projectKey(textOf(a), projects);
     const placeOf = new Map();
     for (const a of list) {
       if (a.address.includes("/")) continue; // another machine: no local gh
@@ -704,23 +573,18 @@ export default class Agents extends View {
       if (k) byPlace.set(k, [...(byPlace.get(k) ?? []), a]);
     }
     const mentions = (a, key) => textOf(a).includes(key);
-    const mentionsOther = (a, key) => (textOf(a).match(JIRA_KEYS) ?? []).some((k) => k !== key);
-    // An agent with no PR chip that stops working may have just opened a PR: ask its repo now, not in 5 min, and once
-    // more 60 s later (gh's 55 s cache can hand the first ask an answer from before the PR). One recheck per repo:
-    // agents stopping in the same minute share it.
+    const mentionsOther = (a, key) => keysIn(textOf(a)).some((k) => k !== key);
+    // An agent with no PR chip that stops working may have just opened a PR: ask its repo now and once more
+    // RECHECK later (askAgain in ./prs.js).
     const working = new Set(list.filter((a) => a.status === "working").map((a) => a.address));
     let stopped = false;
-    for (const ad of this.wasWorking) {
-      const p = placeOf.get(ad);
-      const r = !working.has(ad) && p && !this.prOf(p) && this.repos.get(this.common.get(p.cwd));
-      if (r) { r.next = 0; r.recheckAt = Date.now() + RECHECK; stopped = true; }
-    }
+    for (const ad of this.wasWorking) if (!working.has(ad) && askAgain(this.pr, placeOf.get(ad))) stopped = true;
     this.wasWorking = working;
     if (stopped && !collapsed) { this.kick(cx); cx.timer.after(RECHECK + 1000, (cx) => this.kick(cx)); }
     // The Jira key of the agent's branch, when the rule above gives it to this agent (else null).
     const keyFor = (a) => {
       const p = placeOf.get(a.address);
-      const key = p?.branch?.toUpperCase().match(JIRA_KEY)?.[0];
+      const key = branchKey(p?.branch);
       const mates = key ? byPlace.get(placeKey(p)) ?? [] : [];
       if (!key || mates.length < 2) return key ?? null;
       if (mates.some((m) => mentions(m, key))) return mentions(a, key) ? key : null;
@@ -729,8 +593,8 @@ export default class Agents extends View {
     // An agent that names a Jira key gets the PR of that key's branch (prOf); the others share the branch's PR by the rule above.
     const prFor = (a) => {
       const p = placeOf.get(a.address);
-      const pr = this.prOf(p);
-      return pr && (p.key || !p.branch?.toUpperCase().match(JIRA_KEY) || keyFor(a)) ? pr : null;
+      const pr = prOf(this.pr, p);
+      return pr && (p.key || !branchKey(p.branch) || keyFor(a)) ? pr : null;
     };
     // The Jira chip (only with a site): the key the agent names, else its branch's key.
     const jiraFor = (a) => textKey(a) ?? keyFor(a);
@@ -767,7 +631,7 @@ export default class Agents extends View {
     // a space's folder is only where it started, so it named groups after unrelated spaces (and two groups alike).
     const groupOf = new Map();
     for (const a of list) {
-      const c = this.common.get(placeOf.get(a.address)?.cwd);
+      const c = this.pr.common.get(placeOf.get(a.address)?.cwd);
       if (!c) { groupOf.set(a.address, { id: `sp-${a.space}`, label: a.space_name || "" }); continue; }
       groupOf.set(a.address, { id: `rp-${c}`, label: c.replace(/\/\.git\/?$/, "").split("/").pop() });
     }
