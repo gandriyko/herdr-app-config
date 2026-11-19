@@ -108,7 +108,7 @@ function approval(pr) {
     : pr.reviewDecision === "APPROVED" || states.includes("APPROVED") ? "approved" : "";
 }
 
-const FIELDS ="number,title,headRefName,baseRefName,labels,isDraft,reviewDecision,url,statusCheckRollup,reviewRequests,reviews,body,author,isCrossRepository";
+const FIELDS ="number,title,headRefName,baseRefName,labels,mergeable,isDraft,reviewDecision,url,statusCheckRollup,reviewRequests,reviews,body,author,isCrossRepository";
 // `all`: every open PR of the repo; else mine, then those waiting for my review (a second gh call), by number.
 async function list(cwd, on, all) {
   if (all) return listBy(cwd, on, []);
@@ -755,6 +755,9 @@ export default class Prs extends View {
           .tooltip(cpTip).child(level === "asked" ? svg("mods/prs/spinner.svg").size(11).text_color(t.working).spin(900) : "C"))
         .child(div().id(`ap-${pr.number}`).flex_none().size(15).flex().items_center().justify_center().tooltip(apTip)
           .child(svg(`mods/prs/${apIcon}.svg`).size(14).text_color(apColor)))
+        // Merge conflicts with the base branch (gh's mergeable; UNKNOWN while GitHub works it out shows nothing).
+        .when(pr.mergeable === "CONFLICTING", (e) => e.child(div().id(`conflict-${pr.number}`).flex_none().size(15).flex().items_center().justify_center()
+          .tooltip(`Conflicts with ${pr.baseRefName ?? "the base branch"}`).child(svg("mods/prs/conflict.svg").size(13).text_color(mixHex(t.ansi1, t.foreground, 0.6)))))
         // My review is requested: an eye in the theme's "working" colour, so the PR stands out as one to look at.
         .when(Boolean(pr.needMe), (e) => e.child(div().id(`me-${pr.number}`).flex_none().size(15).flex().items_center().justify_center()
           .tooltip("Your review is requested").child(svg("mods/prs/review.svg").size(14).text_color(t.working))))
