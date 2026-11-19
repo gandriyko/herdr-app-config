@@ -727,13 +727,13 @@ export default class Agents extends View {
     const rankOf = (a) => urgency.get(a.address);
     if (byPriority) list = [...list].sort((x, y) => SECTION_ORDER[sectionOf(rankOf(x) || RANK.idle)] - SECTION_ORDER[sectionOf(rankOf(y) || RANK.idle)] || rankOf(y) - rankOf(x) || this.since(y) - this.since(x) || y.seq - x.seq);
     // Grouped view: worktrees of one repo (same git common dir, resolved for PR chips) share a group,
-    // named after the space on the main worktree (else its folder); other agents group by space.
+    // named after the repo's folder; other agents group by space. Not after a space whose folder is the repo:
+    // a space's folder is only where it started, so it named groups after unrelated spaces (and two groups alike).
     const groupOf = new Map();
     for (const a of list) {
       const c = this.common.get(placeOf.get(a.address)?.cwd);
       if (!c) { groupOf.set(a.address, { id: `sp-${a.space}`, label: a.space_name || "" }); continue; }
-      const root = c.replace(/\/\.git\/?$/, "");
-      groupOf.set(a.address, { id: `rp-${c}`, label: spaceList.find((s) => s.folder === root)?.name ?? root.split("/").pop() });
+      groupOf.set(a.address, { id: `rp-${c}`, label: c.replace(/\/\.git\/?$/, "").split("/").pop() });
     }
     const pinned = list.filter((a) => a.pinned);
     const rest = list.filter((a) => !a.pinned);
