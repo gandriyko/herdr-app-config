@@ -96,6 +96,7 @@ const MAX_COMMON = 200;
 const MAX_REPOS = 30;
 const PR_EVERY = 60000;
 const NO_PR_EVERY = 5 * 60000;
+const RECHECK = 60000; // after an agent stops: past gh's 55 s cache
 const DEFAULT_EVERY = 30 * 60000;
 const GH_DOWN = 10 * 60000;
 const FAIL_RETRY = 5 * 60000;
@@ -412,6 +413,7 @@ export default class Agents extends View {
       const novel = [...cands, ...keys].some((b) => !r.asked.has(b));
       if (!novel && now < r.next) continue;
       const start = Date.now();
+      if (r.recheckAt && start >= r.recheckAt) r.recheckAt = 0; // this ask is the recheck
       const res = await exec("gh", PRS_ARGS, { cwd: r.cwd, timeout: 15000 }).catch(() => null);
       if (!this.live) return;
       const at = Date.now();
@@ -441,6 +443,7 @@ export default class Agents extends View {
         // From when gh started, with slack so the 30 s tick lands on the mark; a PR on a candidate branch is checked every 60 s, none every 5 min.
         const found = cands.some((b) => prs[b]) || keys.some((k) => Object.keys(prs).some((b) => keyIn(b, k)));
         r.next = start + (found ? PR_EVERY : NO_PR_EVERY) - 2000;
+        if (r.recheckAt) r.next = Math.min(r.next, r.recheckAt);
       } catch {
         r.next = at + FAIL_RETRY;
       }
@@ -702,16 +705,18 @@ export default class Agents extends View {
     }
     const mentions = (a, key) => textOf(a).includes(key);
     const mentionsOther = (a, key) => (textOf(a).match(JIRA_KEYS) ?? []).some((k) => k !== key);
-    // An agent with no PR chip that stops working may have just opened a PR: ask its repo now, not in 5 min.
+    // An agent with no PR chip that stops working may have just opened a PR: ask its repo now, not in 5 min, and once
+    // more 60 s later (gh's 55 s cache can hand the first ask an answer from before the PR). One recheck per repo:
+    // agents stopping in the same minute share it.
     const working = new Set(list.filter((a) => a.status === "working").map((a) => a.address));
     let stopped = false;
     for (const ad of this.wasWorking) {
       const p = placeOf.get(ad);
       const r = !working.has(ad) && p && !this.prOf(p) && this.repos.get(this.common.get(p.cwd));
-      if (r) { r.next = 0; stopped = true; }
+      if (r) { r.next = 0; r.recheckAt = Date.now() + RECHECK; stopped = true; }
     }
     this.wasWorking = working;
-    if (stopped && !collapsed) this.kick(cx);
+    if (stopped && !collapsed) { this.kick(cx); cx.timer.after(RECHECK + 1000, (cx) => this.kick(cx)); }
     // The Jira key of the agent's branch, when the rule above gives it to this agent (else null).
     const keyFor = (a) => {
       const p = placeOf.get(a.address);
