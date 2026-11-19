@@ -38,7 +38,7 @@ edits stay). Opening another file in the tab or going back/forward saves first; 
 file open. Closing the tab with unsaved edits opens a "Save changes?" dialog (this mod, kind dialog, the edits
 in its props): Save writes them with the same guard, Don't save or Esc drops them. On app quit there is no
 dialog and unsaved edits are lost. A Markdown file (`.md`, `.markdown`) opens rendered (read-only, text
-selectable, unsaved edits included); the group's View shows its text, Preview goes back. The × at the end of the header closes the tab (unsaved edits ask first). Edit from the rendered view opens the editor.
+selectable, unsaved edits included); the group's View shows its text, Preview goes back. The × at the end of the header closes the tab (unsaved edits ask first). Copy path (after the path) puts the file's full path on the clipboard. Edit from the rendered view opens the editor.
 
 Find in file: a find field (with counter and ↑/↓) sits in the tab header for a searchable file (⌘F focuses it; case-insensitive, Enter next, ⇧Enter
 previous, Esc clears it, counter `3/12`, first 1,000 hits, then `+`). It searches whatever the tab shows:

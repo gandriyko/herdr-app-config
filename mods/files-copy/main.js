@@ -1139,6 +1139,10 @@ export default class Files extends View {
           .child(div().id("files-fwd").w(20).text_color(this.fwd.length ? t.muted : t.border).when(this.fwd.length > 0, e => e.cursor_pointer())
             .tooltip("Forward (⌘] or Ctrl+Shift+-)").on_click((_e, cx) => this.goForward(cx)).child("→")))
         .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.dim).child(path + (this.dirty ? " ●" : "")))
+        .child(button("files-copy-path", this.copied ? "Copied ✓" : "Copy path", "Copy the file's full path", cx => {
+          cx.write_to_clipboard(this.full(path)); this.copied = true; cx.notify();
+          cx.timer.after(1500, acx => { this.copied = false; acx.notify(); });
+        }))
         .when(Boolean(this.findMode()), el => el.child(this.findBar(t)))
         .when(this.dirty, el => el.child(button("files-revert", this.confirmRevert ? "Discard edits?" : "Revert", "Drop the edits and load the file from disk (click twice)", cx => this.revert(cx))))
         .when(Boolean(this.code) && this.editable, el => el.child(button("files-auto", this.autosave ? "Auto-save ✓" : "Auto-save", "Save 1.5 s after the last edit (remembered)",
