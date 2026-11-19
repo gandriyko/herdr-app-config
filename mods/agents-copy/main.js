@@ -78,6 +78,11 @@ const filterOf = () => {
   return { space: typeof f?.space === "string" ? f.space : null, pr: PR_FILTERS.some((x) => x.id === f?.pr) ? f.pr : "any" };
 };
 const JIRA_KEY = /[A-Z][A-Z0-9]+-\d+/; // in an upper-cased branch name: da-20457-fix -> DA-20457
+// Whether a branch names the Jira key as a whole (DA-2049 is not in da-20493-fix).
+const keyIn = (branch, key) => {
+  const up = branch.toUpperCase(), i = up.indexOf(key);
+  return i >= 0 && !/[A-Z0-9]/.test(up[i - 1] ?? "") && !/\d/.test(up[i + key.length] ?? "");
+};
 const CHECKS_WORD = { fail: "failing", pass: "passing", pending: "pending", none: "none" };
 
 // The open PRs of the cwd's repo with the head commit's rollup state. gh caches the answer on disk
@@ -373,13 +378,15 @@ export default class Agents extends View {
         this.common.set(p.cwd, c);
       }
       if (!c) continue;
-      const e = byRepo.get(c) ?? { cwd: p.cwd, branches: new Set() };
+      const e = byRepo.get(c) ?? { cwd: p.cwd, branches: new Set(), keys: new Set() };
       if (p.branch) e.branches.add(p.branch);
+      if (p.key) e.keys.add(p.key);
       byRepo.set(c, e);
     }
     const now = Date.now();
     for (const [key, e] of byRepo) {
       if (!this.live || now < this.ghDownUntil) return;
+      const keys = [...e.keys];
       let r = this.repos.get(key);
       if (!r) {
         if (this.repos.size >= MAX_REPOS) this.repos.delete(this.repos.keys().next().value);
@@ -394,22 +401,22 @@ export default class Agents extends View {
         r.def = d?.code === 0 ? d.stdout.trim().replace(/^origin\//, "") || null : null;
         r.defAt = Date.now();
       }
-      // Only a feature branch can have a PR; no candidates, no gh call.
+      // Only a feature branch, or a Jira key an agent names (its PR may be on another branch), can have a PR; none, no gh call.
       const cands = [...e.branches].filter((b) => b && b !== "HEAD" && b !== "main" && b !== "master" && b !== r.def);
-      if (!cands.length) {
+      if (!cands.length && !keys.length) {
         r.prs = {};
         r.asked = new Set();
         r.next = 0;
         continue;
       }
-      const novel = cands.some((b) => !r.asked.has(b));
+      const novel = [...cands, ...keys].some((b) => !r.asked.has(b));
       if (!novel && now < r.next) continue;
       const start = Date.now();
       const res = await exec("gh", PRS_ARGS, { cwd: r.cwd, timeout: 15000 }).catch(() => null);
       if (!this.live) return;
       const at = Date.now();
       r.at = at;
-      r.asked = new Set(cands);
+      r.asked = new Set([...cands, ...keys]);
       if (!res) {
         // gh isn't installed (or the folder is gone): no chips, ask again in 10 minutes.
         this.ghDownUntil = at + GH_DOWN;
@@ -432,18 +439,27 @@ export default class Agents extends View {
           prs[pr.headRefName] = { n: pr.number, c: CHECKS[pr.commits.nodes[0]?.commit.statusCheckRollup?.state] ?? "none" };
         r.prs = prs;
         // From when gh started, with slack so the 30 s tick lands on the mark; a PR on a candidate branch is checked every 60 s, none every 5 min.
-        r.next = start + (cands.some((b) => prs[b]) ? PR_EVERY : NO_PR_EVERY) - 2000;
+        const found = cands.some((b) => prs[b]) || keys.some((k) => Object.keys(prs).some((b) => keyIn(b, k)));
+        r.next = start + (found ? PR_EVERY : NO_PR_EVERY) - 2000;
       } catch {
         r.next = at + FAIL_RETRY;
       }
     }
   }
 
-  // The PR chip's data for an agent's place, or null.
+  // The PR chip's data for an agent's place, or null. A place with a Jira key (the agent names it) takes the open PR
+  // whose branch has that key; without one, the folder's branch PR, unless that branch names another key.
   prOf(place) {
     if (!place) return null;
     const c = this.common.get(place.cwd);
-    return (c && place.branch && this.repos.get(c)?.prs[place.branch]) || null;
+    const prs = c && this.repos.get(c)?.prs;
+    if (!prs) return null;
+    if (place.key) {
+      const b = Object.keys(prs).find((b) => keyIn(b, place.key));
+      if (b) return prs[b];
+      if (place.branch?.toUpperCase().match(JIRA_KEY)) return null;
+    }
+    return (place.branch && prs[place.branch]) || null;
   }
 
   // Stamps agents whose state changed. Done and idle count as one: looking at a
@@ -651,13 +667,23 @@ export default class Agents extends View {
     // Where each agent is (its pane's folder and branch, else its space's) for PR chips and the filter.
     const paneBy = new Map(allPanes.map((p) => [p.pane, p]));
     const spaceBy = new Map(spaceList.map((s) => [s.id, s]));
+    const textOf = (a) =>
+      [a.title, a.tab_name, a.name, termBy.get(a.address)?.report, termBy.get(a.address)?.title].filter(Boolean).join("\n").toUpperCase();
+    const JIRA_KEYS = new RegExp(JIRA_KEY.source, "g");
+    // contract: jira.settings is written by the jira mod ({ site: "https://x.atlassian.net", project: "DA, OPS", … }); optional.
+    const jiraSet = shared("jira.settings");
+    const jiraSite = jiraSet?.site;
+    // Keys in the agent's texts count only for the saved projects (so UTF-8 or GPT-4 in a report is not a key); any when none is saved.
+    const projects = String(jiraSet?.project ?? "").toUpperCase().split(/[\s,]+/).filter(Boolean);
+    // The Jira key the agent names (its own task, even on a branch another agent made), or null.
+    const textKey = (a) => (textOf(a).match(JIRA_KEYS) ?? []).find((k) => !projects.length || projects.includes(k.split("-")[0])) ?? null;
     const placeOf = new Map();
     for (const a of list) {
       if (a.address.includes("/")) continue; // another machine: no local gh
       const p = paneBy.get(a.pane);
       const sp = spaceBy.get(a.space);
       const cwd = p?.cwd || sp?.folder;
-      if (cwd) placeOf.set(a.address, { cwd, branch: p?.branch ?? sp?.branch ?? null });
+      if (cwd) placeOf.set(a.address, { cwd, branch: p?.branch ?? sp?.branch ?? null, key: textKey(a) });
     }
     this.places = [...placeOf.values()];
     const placesKey = JSON.stringify(this.places);
@@ -674,10 +700,7 @@ export default class Agents extends View {
       const k = placeKey(placeOf.get(a.address));
       if (k) byPlace.set(k, [...(byPlace.get(k) ?? []), a]);
     }
-    const textOf = (a) =>
-      [a.title, a.tab_name, a.name, termBy.get(a.address)?.report, termBy.get(a.address)?.title].filter(Boolean).join("\n").toUpperCase();
     const mentions = (a, key) => textOf(a).includes(key);
-    const JIRA_KEYS = new RegExp(JIRA_KEY.source, "g");
     const mentionsOther = (a, key) => (textOf(a).match(JIRA_KEYS) ?? []).some((k) => k !== key);
     // An agent with no PR chip that stops working may have just opened a PR: ask its repo now, not in 5 min.
     const working = new Set(list.filter((a) => a.status === "working").map((a) => a.address));
@@ -689,15 +712,23 @@ export default class Agents extends View {
     }
     this.wasWorking = working;
     if (stopped && !collapsed) this.kick(cx);
+    // The Jira key of the agent's branch, when the rule above gives it to this agent (else null).
+    const keyFor = (a) => {
+      const p = placeOf.get(a.address);
+      const key = p?.branch?.toUpperCase().match(JIRA_KEY)?.[0];
+      const mates = key ? byPlace.get(placeKey(p)) ?? [] : [];
+      if (!key || mates.length < 2) return key ?? null;
+      if (mates.some((m) => mentions(m, key))) return mentions(a, key) ? key : null;
+      return mentionsOther(a, key) ? null : key;
+    };
+    // An agent that names a Jira key gets the PR of that key's branch (prOf); the others share the branch's PR by the rule above.
     const prFor = (a) => {
       const p = placeOf.get(a.address);
       const pr = this.prOf(p);
-      const key = pr && p.branch.toUpperCase().match(JIRA_KEY)?.[0];
-      const mates = key ? byPlace.get(placeKey(p)) ?? [] : [];
-      if (mates.length < 2) return pr;
-      if (mates.some((m) => mentions(m, key))) return mentions(a, key) ? pr : null;
-      return mentionsOther(a, key) ? null : pr;
+      return pr && (p.key || !p.branch?.toUpperCase().match(JIRA_KEY) || keyFor(a)) ? pr : null;
     };
+    // The Jira chip (only with a site): the key the agent names, else its branch's key.
+    const jiraFor = (a) => textKey(a) ?? keyFor(a);
 
     // The filter, before grouping. A space that's gone counts as none.
     const fl = filterOf();
@@ -802,33 +833,36 @@ export default class Agents extends View {
     }
 
     const PR_COLOR = { fail: t.blocked, pass: t.done, pending: t.working, none: t.muted };
+    // A small pill in line 1 (PR, Jira): tinted by color, a click runs act without reaching the card.
+    const chip = (id, color, tip, act) => h_flex()
+      .id(id)
+      .flex_none()
+      .h(16)
+      .px(5)
+      .gap(3)
+      .rounded(4)
+      .items_center()
+      .bg(color + "26")
+      .text_size(10.5)
+      .font_medium()
+      .text_color(color)
+      .cursor_pointer()
+      .hover((el) => el.bg(color + "40"))
+      .tooltip(tip)
+      .on_click((_e, cx) => { cx.stop_propagation(); act(); });
     const prChip = (a, pr) => {
-      const color = PR_COLOR[pr.c];
       const cwd = placeOf.get(a.address)?.cwd;
-      return h_flex()
-        .id(`pr-${a.address}`)
-        .flex_none()
-        .h(16)
-        .px(5)
-        .gap(3)
-        .rounded(4)
-        .items_center()
-        .bg(color + "26")
-        .text_size(10.5)
-        .font_medium()
-        .text_color(color)
-        .cursor_pointer()
-        .hover((el) => el.bg(color + "40"))
-        .tooltip(`PR #${pr.n} \u00b7 checks ${CHECKS_WORD[pr.c]}`)
-        .on_click((_e, cx) => {
-          cx.stop_propagation();
-          exec("gh", ["pr", "view", String(pr.n), "--web"], { cwd, timeout: 10000 }).catch(() => {});
-        })
+      return chip(`pr-${a.address}`, PR_COLOR[pr.c], `PR #${pr.n} \u00b7 checks ${CHECKS_WORD[pr.c]}`,
+        () => exec("gh", ["pr", "view", String(pr.n), "--web"], { cwd, timeout: 10000 }).catch(() => {}))
         .child(`#${pr.n}`)
         .when(pr.c === "pass", (el) => el.child(svg("mods/agents-copy/check.svg").size(10).flex_none()))
         .when(pr.c === "fail", (el) => el.child(svg("mods/agents-copy/x.svg").size(10).flex_none()))
         .when(pr.c === "pending", (el) => el.child(svg("mods/agents-copy/spinner.svg").size(10).flex_none().spin(900)));
     };
+    // The branch's Jira key; a click opens the issue in the browser.
+    const jiraChip = (a, key) => chip(`jira-${a.address}`, t.accent, `Open ${key} in Jira`,
+      () => exec("open", [`${jiraSite}/browse/${key}`], { timeout: 10000 }).catch(() => {}))
+      .child(key);
 
     const row = (a, i, subs = []) => {
       const pic = icon(a.program, 16, t.foreground);
@@ -906,6 +940,7 @@ export default class Agents extends View {
       let tabTxt = tabName && tabName.toLowerCase() !== report.trim().toLowerCase() && tabName.toLowerCase() !== prog.trim().toLowerCase() ? tabName : null;
       if (!lead) { lead = tabTxt ?? (prog || label(a)); if (tabTxt) tabTxt = null; }
       const pr = prFor(a);
+      const jiraKey = jiraSite ? jiraFor(a) : null;
       const g = glyph(t, a.status, "mods/agents-copy/spinner.svg");
       const open = this.expanded === a.address ? this.lastMsg : null;
       const canPeek = !a.address.includes("/"); // the screen of another machine's agent isn't read
@@ -952,16 +987,19 @@ export default class Agents extends View {
               .gap(7)
               .items_center()
               .child(h_flex().flex_1().min_w(0).gap(5).items_center()
-                .child(div().min_w(0).max_w(tabTxt ? 120 : 200).truncate().text_color(t.foreground).font_semibold().child(lead))
-                .when(Boolean(tabTxt), (el) => el.child(div().min_w(0).truncate().text_color(t.dim).child(`/ ${tabTxt}`)))
-                .when(Boolean(pr), (el) => el.child(prChip(a, pr))))
+                .child(div().min_w(0).when(Boolean(tabTxt), (el) => el.max_w(120)).truncate().text_color(t.foreground).font_semibold().child(lead))
+                .when(Boolean(tabTxt), (el) => el.child(div().min_w(0).truncate().text_color(t.dim).child(`/ ${tabTxt}`))))
               .when(Boolean(machine), (el) => el.child(div().text_size(10).text_color(t.dim).child(machine)))
               .when(subs.length > 0, (el) => el.child(fold(a, subs)))
               .when(Boolean(timeOrPin), (el) => el.child(timeOrPin)))
             .child(h_flex().gap(4).items_start()
               .child(div().flex_1().min_w(0).max_h(34).overflow_hidden().text_size(12).line_height("17px").text_color(report ? (blocked ? t.blocked : t.muted) : t.dim).child(report || prog || label(a)))
               .when(canPeek, (el) => el.child(eye)))
-            .when(Boolean(msgBox), (el) => el.child(msgBox))))
+            .when(Boolean(msgBox), (el) => el.child(msgBox))
+            // PR and Jira chips on their own row at the bottom, so the name and the report keep the width.
+            .when(Boolean(pr || jiraKey), (el) => el.child(h_flex().gap(5).items_center()
+              .when(Boolean(pr), (el) => el.child(prChip(a, pr)))
+              .when(Boolean(jiraKey), (el) => el.child(jiraChip(a, jiraKey)))))))
         .when(subs.length > 0 && !this.folded.has(a.address), (el) => el.children(subs.map((x) => this.subRow(t, x, shown, byPriority))));
     };
 

@@ -605,19 +605,31 @@ export default class Board extends View {
     const fl = filterOf();
     const flSpace = spaceBy.has(fl.space) ? fl.space : null;
 
-    // Where each agent is, for PRs; a remote one has no local gh.
+    // contract: jira.settings is written by the jira mod ({ site: "https://x.atlassian.net", project: "DA, OPS", … }); optional.
+    const jiraSet = shared("jira.settings");
+    const jiraSite = jiraSet?.site;
+    // Keys in the agent's texts count only for the saved projects (so UTF-8 or GPT-4 in a report is not a key); any when none is saved.
+    const projects = String(jiraSet?.project ?? "").toUpperCase().split(/[\s,]+/).filter(Boolean);
+    // The Jira key the agent names (title, tab, report), or null: its own task, even on a branch another agent made.
+    const textKey = (a) => {
+      const term = termBy.get(a.address), tb = tabBy.get(a.tab);
+      const text = [term?.title, a.title, tb?.named ? tb.name : null, a.name, term?.report].filter(Boolean).join("\n").toUpperCase();
+      return (text.match(/[A-Z][A-Z0-9]+-\d+/g) ?? []).find((k) => !projects.length || projects.includes(k.split("-")[0])) ?? null;
+    };
+
+    // Where each agent is, for PRs; a remote one has no local gh. `key`: the Jira key it names, whose PR it gets.
     const placeOf = new Map();
     for (const a of list) {
       if (a.address.includes("/")) continue;
       if (a.paneless) {
         const c = termBy.get(a.address)?.cwd;
-        if (c) placeOf.set(a.address, { cwd: c, branch: null });
+        if (c) placeOf.set(a.address, { cwd: c, branch: null, key: textKey(a) });
         continue;
       }
       const p = paneBy.get(a.pane);
       const sp = spaceBy.get(a.space);
       const cwd = p?.cwd || sp?.folder;
-      if (cwd) placeOf.set(a.address, { cwd, branch: p?.branch ?? sp?.branch ?? null });
+      if (cwd) placeOf.set(a.address, { cwd, branch: p?.branch ?? sp?.branch ?? null, key: textKey(a) });
     }
     const placesKey = JSON.stringify([...placeOf.values()]);
     if (placesKey !== this.placesKey) {
@@ -626,6 +638,9 @@ export default class Board extends View {
       this.kick(cx);
     }
     const prFor = (a) => prOf(this.pr, placeOf.get(a.address));
+    // The Jira pill (only with a site): the key the agent names, else its branch's (da-20457-fix -> DA-20457).
+    const jiraFor = (a) =>
+      jiraSite ? textKey(a) ?? placeOf.get(a.address)?.branch?.toUpperCase().match(/[A-Z][A-Z0-9]+-\d+/)?.[0] ?? null : null;
 
     // One record per agent with everything the card shows.
     const info = (a) => {
@@ -651,6 +666,7 @@ export default class Board extends View {
         program: prog,
         sub: term?.parent ? (parentAgent?.tab_name ?? par?.name ?? "") : null,
         pr: prFor(a),
+        jira: jiraFor(a),
       };
     };
     const all = list.map(info);
@@ -806,29 +822,32 @@ export default class Board extends View {
     const setFilter = (patch) => setShared("agents-board.filter", { space: flSpace, pr: fl.pr, ...patch });
 
     const PR_COLOR = { fail: t.blocked, pass: t.done, pending: t.working, none: t.muted };
+    // A small pill in line 1 (PR, Jira): tinted by color, a click runs act without reaching the card.
+    const pill = (id, color, tip, act) => h_flex()
+      .id(id)
+      .flex_none()
+      .h(16)
+      .px(5)
+      .gap(3)
+      .rounded(4)
+      .items_center()
+      .bg(color + "26")
+      .text_size(10.5)
+      .font_medium()
+      .text_color(color)
+      .cursor_pointer()
+      .hover((el) => el.bg(color + "40"))
+      .tooltip(tip)
+      .on_click((_e, cx) => { cx.stop_propagation(); act(); });
+    // The branch's Jira key; a click opens the issue in the browser.
+    const jiraPill = (r) => pill(`jira-${r.a.address}`, t.accent, `Open ${r.jira} in Jira`,
+      () => exec("open", [`${jiraSite}/browse/${r.jira}`], { timeout: 10000 }).catch(() => {}))
+      .child(r.jira);
     const prPill = (r) => {
       const pr = r.pr;
-      const color = PR_COLOR[pr.c];
       const cwd = placeOf.get(r.a.address)?.cwd;
-      return h_flex()
-        .id(`pr-${r.a.address}`)
-        .flex_none()
-        .h(16)
-        .px(5)
-        .gap(3)
-        .rounded(4)
-        .items_center()
-        .bg(color + "26")
-        .text_size(10.5)
-        .font_medium()
-        .text_color(color)
-        .cursor_pointer()
-        .hover((el) => el.bg(color + "40"))
-        .tooltip(`PR #${pr.n} · checks ${CHECKS_WORD[pr.c]}`)
-        .on_click((_e, cx) => {
-          cx.stop_propagation();
-          exec("gh", ["pr", "view", String(pr.n), "--web"], { cwd, timeout: 10000 }).catch(() => {});
-        })
+      return pill(`pr-${r.a.address}`, PR_COLOR[pr.c], `PR #${pr.n} · checks ${CHECKS_WORD[pr.c]}`,
+        () => exec("gh", ["pr", "view", String(pr.n), "--web"], { cwd, timeout: 10000 }).catch(() => {}))
         .child(`#${pr.n}`)
         .when(pr.c === "pass", (el) => el.child(svg(ICONS + "check.svg").size(10).flex_none()))
         .when(pr.c === "fail", (el) => el.child(svg(ICONS + "x.svg").size(10).flex_none()))
@@ -1034,6 +1053,7 @@ export default class Board extends View {
                     .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(a.paneless ? a.name : a.space_name || r.tabShown || r.program))
                     .when(Boolean(a.space_name && r.tabShown), (el) => el.child(div().min_w(0).truncate().text_size(12).text_color(t.dim).child(`/ ${r.tabShown}`)))
                     .when(Boolean(r.pr), (el) => el.child(prPill(r)))
+                    .when(Boolean(r.jira), (el) => el.child(jiraPill(r)))
                     .child(div().flex_1())
                     .child(div().flex_none().flex().justify_end().whitespace_nowrap().overflow_hidden().text_size(11).text_color(blocked ? t.blocked : t.dim).child(timeText(r))),
                 )

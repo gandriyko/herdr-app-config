@@ -32,13 +32,28 @@ export function prMap(st) {
   return out;
 }
 
+// Whether a branch names the Jira key as a whole (DA-2049 is not in da-20493-fix).
+const keyIn = (branch, key) => {
+  const up = branch.toUpperCase(), i = up.indexOf(key);
+  return i >= 0 && !/[A-Z0-9]/.test(up[i - 1] ?? "") && !/\d/.test(up[i + key.length] ?? "");
+};
+
+// A place with a Jira key (the agent names it) takes the open PR whose branch has that key; without one,
+// the folder's branch PR, unless that branch names another key.
 export function prOf(st, place) {
   if (!place) return null;
   const c = st.common.get(place.cwd);
-  return (c && place.branch && st.repos.get(c)?.prs[place.branch]) || null;
+  const prs = c && st.repos.get(c)?.prs;
+  if (!prs) return null;
+  if (place.key) {
+    const b = Object.keys(prs).find((b) => keyIn(b, place.key));
+    if (b) return prs[b];
+    if (/[A-Z][A-Z0-9]+-\d+/.test(place.branch?.toUpperCase() ?? "")) return null;
+  }
+  return (place.branch && prs[place.branch]) || null;
 }
 
-// places: [{ cwd, branch }]. `exec` is herdr's; `alive()` says whether to go on.
+// places: [{ cwd, branch, key }]. `exec` is herdr's; `alive()` says whether to go on.
 export async function refreshPrs(st, places, exec, alive) {
   const byRepo = new Map();
   for (const p of places) {
@@ -51,13 +66,15 @@ export async function refreshPrs(st, places, exec, alive) {
       st.common.set(p.cwd, c);
     }
     if (!c) continue;
-    const e = byRepo.get(c) ?? { cwd: p.cwd, branches: new Set() };
+    const e = byRepo.get(c) ?? { cwd: p.cwd, branches: new Set(), keys: new Set() };
     if (p.branch) e.branches.add(p.branch);
+    if (p.key) e.keys.add(p.key);
     byRepo.set(c, e);
   }
   const now = Date.now();
   for (const [key, e] of byRepo) {
     if (!alive() || now < st.ghDownUntil) return;
+    const keys = [...e.keys];
     let r = st.repos.get(key);
     if (!r) {
       if (st.repos.size >= MAX_REPOS) st.repos.delete(st.repos.keys().next().value);
@@ -72,21 +89,21 @@ export async function refreshPrs(st, places, exec, alive) {
       r.def = d?.code === 0 ? d.stdout.trim().replace(/^origin\//, "") || null : null;
       r.defAt = Date.now();
     }
-    // Only a feature branch can have a PR; no candidates, no gh call.
+    // Only a feature branch, or a Jira key an agent names (its PR may be on another branch), can have a PR; none, no gh call.
     const cands = [...e.branches].filter((b) => b && b !== "HEAD" && b !== "main" && b !== "master" && b !== r.def);
-    if (!cands.length) {
+    if (!cands.length && !keys.length) {
       r.prs = {};
       r.asked = new Set();
       r.next = 0;
       continue;
     }
-    const novel = cands.some((b) => !r.asked.has(b));
+    const novel = [...cands, ...keys].some((b) => !r.asked.has(b));
     if (!novel && now < r.next) continue;
     const start = Date.now();
     const res = await exec("gh", PRS_ARGS, { cwd: r.cwd, timeout: 15000 }).catch(() => null);
     const at = Date.now();
     r.at = at;
-    r.asked = new Set(cands);
+    r.asked = new Set([...cands, ...keys]);
     if (!res) {
       st.ghDownUntil = at + GH_DOWN;
       for (const x of st.repos.values()) x.prs = {};
@@ -107,7 +124,8 @@ export async function refreshPrs(st, places, exec, alive) {
         prs[pr.headRefName] = { n: pr.number, c: CHECKS[pr.commits.nodes[0]?.commit.statusCheckRollup?.state] ?? "none" };
       r.prs = prs;
       // From when gh started, with slack so the 30 s tick lands on the mark; a PR on a candidate branch is checked every 60 s, none every 5 min.
-      r.next = start + (cands.some((b) => prs[b]) ? PR_EVERY : NO_PR_EVERY) - 2000;
+      const found = cands.some((b) => prs[b]) || keys.some((k) => Object.keys(prs).some((b) => keyIn(b, k)));
+      r.next = start + (found ? PR_EVERY : NO_PR_EVERY) - 2000;
     } catch {
       r.next = at + FAIL_RETRY;
     }
