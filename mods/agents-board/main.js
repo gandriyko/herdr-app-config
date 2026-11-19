@@ -5,7 +5,7 @@ import { v_flex, h_flex, InputState, Input, ScrollHandle, TextView } from "gpui-
 import { agents, terminals, panes, spaces, run, theme, settings, shared, setShared, closeOverlay, props, exec, hc } from "herdr";
 import { AskingTracker } from "./asking.js";
 import { isSelectMenu, parseOptions, parseQuestion, parseSuggestion, sameOptions } from "./reply.js";
-import { CHECKS_WORD, branchKey, jiraProjects, newPrState, prMap, prOf, projectKey, refreshPrs } from "./prs.js";
+import { CHECKS_WORD, RECHECK, askAgain, branchKey, jiraProjects, newPrState, prMap, prOf, projectKey, refreshPrs } from "./prs.js";
 
 const ICONS = "mods/agents-board/";
 const SEND_TIMEOUT = 3000; // ms a reply `hc send` may wait for the agent's input line to clear (a normal send takes < 1 s)
@@ -109,6 +109,7 @@ export default class Board extends View {
     this.prJson = "{}";
     this.placesKey = "";
     this.places = [];
+    this.wasWorking = new Set(); // addresses working at the last render
     this.busy = false;
     this.again = false;
     this.q = "";
@@ -636,6 +637,13 @@ export default class Board extends View {
       this.places = [...placeOf.values()];
       this.kick(cx);
     }
+    // An agent with no PR pill that stops working may have just opened a PR: ask its repo now and once more
+    // RECHECK later (askAgain in ./prs.js).
+    const working = new Set(list.filter((a) => a.status === "working").map((a) => a.address));
+    let stopped = false;
+    for (const ad of this.wasWorking) if (!working.has(ad) && askAgain(this.pr, placeOf.get(ad))) stopped = true;
+    this.wasWorking = working;
+    if (stopped) { this.kick(cx); cx.timer.after(RECHECK + 1000, (cx) => this.kick(cx)); }
     const prFor = (a) => prOf(this.pr, placeOf.get(a.address));
     // The Jira pill (only with a site): the key the agent names, else its branch's (da-20457-fix -> DA-20457).
     const jiraFor = (a) =>
