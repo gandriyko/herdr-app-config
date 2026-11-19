@@ -1,12 +1,28 @@
 // Branch picker behind the status bar's branch (status-copy): all local branches in a tree
-// (groups by their `prefix/`), recently checked-out ones pinned on top, a filter
+// (groups by their `prefix/`), pinned and recently checked-out ones on top, a filter
 // box. A click runs `git checkout` and nothing else — spaces, tabs and terminals
 // never move. Branches that were deleted (after their merge) drop out of the
-// recent list by themselves.
+// pinned and recent lists by themselves.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
-import { props, closeOverlay, theme, spaces, panes, exec, setShared, notify } from "herdr";
+import { props, closeOverlay, theme, spaces, panes, exec, setShared, notify, appHome } from "herdr";
+import * as fs from "fs/promises";
+
+// Pins, recents (per repo) and collapsed groups live in a file of our own: localStorage is per mod copy, and
+// every popup is a new copy, so it forgot them between openings.
+// ponytail: last 50 repos per map; one popup at a time, so read on open and write on change is enough.
+const stateDir = () => `${appHome()}/data/branch-picker`;
+async function readState() {
+  try { return JSON.parse(await fs.readFile(`${stateDir()}/state.json`, "utf8")); } catch { return {}; }
+}
+async function writeState(s) {
+  const trim = (m) => Object.fromEntries(Object.entries(m ?? {}).slice(-50));
+  try {
+    await fs.mkdir(stateDir(), { recursive: true });
+    await fs.writeFile(`${stateDir()}/state.json`, JSON.stringify({ ...s, pins: trim(s.pins), recents: trim(s.recents) }));
+  } catch {}
+}
 
 // Where a space works now: its focused terminal's folder, else the first known one.
 function place(sp, ps) {
@@ -17,6 +33,13 @@ function place(sp, ps) {
 
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
 const FETCH_EVERY = 5 * 60 * 1000;
+const ROWS_MAX = 100; // branches drawn per section (Local, Remote); the rest are reached by the filter
+// The rows up to the n-th branch row, and how many branch rows were left out.
+function capRows(rows, n) {
+  let k = 0;
+  const i = rows.findIndex(r => r.kind === "row" && ++k > n);
+  return i < 0 ? [rows, 0] : [rows.slice(0, i), rows.slice(i).filter(r => r.kind === "row").length];
+}
 const ago = (s) => {
   const d = Date.now() / 1000 - s;
   return d < 3600 ? `${Math.max(1, Math.round(d / 60))}m` : d < 86400 ? `${Math.round(d / 3600)}h` : d < 86400 * 60 ? `${Math.round(d / 86400)}d` : `${Math.round(d / 86400 / 30)}mo`;
@@ -37,7 +60,9 @@ export default class BranchPicker extends View {
     this.dirty = null; // { b, files }: asking what to do with uncommitted changes
     this.text = "";
     this.at = 0;
-    this.collapsed = new Set(JSON.parse((localStorage.getItem("branch-picker.collapsed") ?? localStorage.getItem("collapsed")) ?? "[]"));
+    this.pins = [];
+    this.state = {};
+    this.collapsed = new Set();
     this.input = InputState.new({ placeholder: "filter branches" });
     this.input.on("change", (_e, cx) => { this.text = this.input.value(); this.at = 0; cx.notify(); });
     this.input.on("submit", (_e, cx) => this.pick(this.pickable()[this.at], cx));
@@ -47,20 +72,22 @@ export default class BranchPicker extends View {
     this.handle = cx.focus_handle();
     this.input.focus();
     cx.timer.after(600, () => this.input.focus());
-    cx.spawn(async (cx) => { await this.load(); cx.notify(); await this.fetchIfStale(cx); });
+    cx.spawn(async (cx) => {
+      this.state = await readState();
+      this.collapsed = new Set(this.state.collapsed ?? []);
+      await this.load(); cx.notify(); await this.fetchIfStale(cx);
+    });
   }
 
-  // `git fetch` in the background when this repo's last one (from this picker) is over 5 minutes old; the date is
-  // kept per repo in localStorage. Then the list and ↓N are read again. The date is written before the fetch, so
-  // a picker reopened meanwhile doesn't start a second one; a failed fetch waits the 5 minutes too.
-  // ponytail: last 50 repos kept.
+  // `git fetch` in the background when the repo's last fetch (any: this picker, a terminal, an IDE) is over 5 minutes
+  // old, then the list and ↓N are read again. The time is FETCH_HEAD's mtime, which every fetch rewrites; no file
+  // means never fetched. (localStorage is per mod copy and each popup is a new copy, so it can't keep the date.)
   async fetchIfStale(cx) {
     if (!this.recentKey) return;
-    let stamps = {};
-    try { stamps = JSON.parse(localStorage.getItem("branch-picker.fetched") ?? "{}"); } catch {}
-    if (Date.now() - (stamps[this.recentKey] ?? 0) < FETCH_EVERY) return;
-    delete stamps[this.recentKey]; stamps[this.recentKey] = Date.now();
-    try { localStorage.setItem("branch-picker.fetched", JSON.stringify(Object.fromEntries(Object.entries(stamps).slice(-50)))); } catch {}
+    const st = await exec("sh", ["-c", 'f=$(git rev-parse --git-path FETCH_HEAD) && { stat -f %m "$f" 2>/dev/null || stat -c %Y "$f"; }'],
+      { cwd: this.folder, on: this.on, timeout: 10000 }).catch(() => null);
+    const last = st?.code === 0 ? Number(st.stdout.trim()) * 1000 || 0 : 0;
+    if (Date.now() - last < FETCH_EVERY) return;
     this.fetching = true; cx.notify();
     const r = await exec("git", ["fetch", "--quiet"], { cwd: this.folder, on: this.on, timeout: 60000 }).catch(() => null);
     this.fetching = false;
@@ -95,52 +122,57 @@ export default class BranchPicker extends View {
       const list = local.stdout.split("\n").filter(Boolean)
         .map(l => { const [name, at] = l.split("\t"); return { name, at: Number(at) || 0 }; })
         .sort((a, b) => b.at - a.at);
-      // Remote branches with no local one, newest first: the last 30 (checkout makes a local branch tracking it).
-      // ponytail: asks git for locals + 31 refs so 30 remain after dropping those with a local branch and HEAD.
+      // Remote branches with no local one, newest first (checkout makes a local branch tracking it). All are kept
+      // for the filter; rows() draws the first 100.
       const known = new Set(list.map(b => b.name));
-      const rem = await exec("git", [...READ, "for-each-ref", "--sort=-committerdate", `--count=${list.length + 31}`, fmt, "refs/remotes"], { cwd: this.folder, on: this.on });
+      const rem = await exec("git", [...READ, "for-each-ref", "--sort=-committerdate", fmt, "refs/remotes"], { cwd: this.folder, on: this.on });
       const seen = new Set();
       this.remoteBranches = rem.stdout.split("\n").filter(Boolean).map(l => {
         const [remote, at] = l.split("\t");
         return { name: remote.slice(remote.indexOf("/") + 1), remote, at: Number(at) || 0 };
-      }).filter(b => b.remote.includes("/") && b.name !== "HEAD" && !known.has(b.name) && !seen.has(b.name) && seen.add(b.name)).slice(0, 30);
+      }).filter(b => b.remote.includes("/") && b.name !== "HEAD" && !known.has(b.name) && !seen.has(b.name) && seen.add(b.name)).slice(0, 2000); // ponytail: the newest 2000 are searchable
       this.branches = list;
-      // Recents live per repo; a branch deleted after its merge leaves the list with it.
+      // Pins and recents live per repo; a branch deleted after its merge leaves both lists with it.
       const key = JSON.stringify([this.on, rootRaw]);
-      const stored = JSON.parse((localStorage.getItem("branch-picker.recents") ?? localStorage.getItem("recents")) ?? "{}");
       this.recentKey = key;
-      this.recents = (stored[key] ?? []).filter(n => known.has(n));
-      if ((stored[key] ?? []).join("\n") !== this.recents.join("\n")) {
-        stored[key] = this.recents;
-        localStorage.setItem("branch-picker.recents", JSON.stringify(stored));
-      }
+      const s = this.state;
+      this.pins = (s.pins?.[key] ?? []).filter(n => known.has(n));
+      this.recents = (s.recents?.[key] ?? []).filter(n => known.has(n));
+      if ((s.pins?.[key]?.length ?? 0) !== this.pins.length || (s.recents?.[key]?.length ?? 0) !== this.recents.length) this.save();
     } catch (e) {
       this.branches = [];
       this.error = String(e?.message ?? e);
     }
   }
 
-  // Rows to draw: the current branch first, the recent section (unfiltered), then a tree of the rest.
+  // Rows to draw: the current branch first, the pinned section (filtered), the recent section (unfiltered),
+  // then a tree of the rest.
   rows() {
     const f = this.text.trim().toLowerCase();
     const cur = this.current;
     const all = (this.branches ?? []).filter(b => b.name !== cur);
     const match = (b) => !f || b.name.toLowerCase().includes(f);
+    const pinned = new Set(this.pins);
     const inRecents = new Set(this.recents);
     const out = [];
     const curB = (this.branches ?? []).find(b => b.name === cur);
     if (curB && match(curB)) {
-      out.push({ kind: "head", label: "Current" });
+      out.push({ kind: "head", label: "Local" });
       out.push({ kind: "row", b: curB, depth: 0 });
     }
+    const pin = this.pins.map(n => all.find(b => b.name === n)).filter(b => b && match(b));
+    if (pin.length) {
+      out.push({ kind: "head", label: "Pinned" });
+      for (const b of pin) out.push({ kind: "row", b, depth: 0 });
+    }
     if (!f && this.recents.length) {
-      const rec = this.recents.map(n => all.find(b => b.name === n)).filter(Boolean);
+      const rec = this.recents.filter(n => !pinned.has(n)).map(n => all.find(b => b.name === n)).filter(Boolean);
       if (rec.length) {
         out.push({ kind: "head", label: "Recent" });
         for (const b of rec) out.push({ kind: "row", b, depth: 0 });
       }
     }
-    const rest = all.filter(b => (f || !inRecents.has(b.name)) && match(b));
+    const rest = all.filter(b => !pinned.has(b.name) && (f || !inRecents.has(b.name)) && match(b));
     const tops = rest.filter(b => !b.name.includes("/"));
     for (const b of tops) out.push({ kind: "row", b, depth: 0 });
     const groups = {};
@@ -153,15 +185,16 @@ export default class BranchPicker extends View {
       out.push({ kind: "group", g, count: groups[g].length, open });
       if (open) for (const b of groups[g]) out.push({ kind: "row", b, depth: 1, rest: b.name.slice(g.length + 1) });
     }
-    const remote = (this.remoteBranches ?? []).filter(match);
-    if (remote.length) {
-      out.push({ kind: "head", label: "Remote" });
-      for (const b of remote) out.push({ kind: "row", b, depth: 0 });
-    }
     // ponytail: every row is a full element tree, and thousands of them overran the host's render
     // deadline ("interrupted"). Cap and ask to filter; uniform_list + on_item_click if scrolling them all matters.
-    const shown = out.slice(0, 200);
-    shown.hidden = out.slice(200).filter(r => r.kind === "row").length;
+    // Local and Remote are capped apart (100 branches each), so the Remote group always shows below the local ones.
+    const [shown, hidden] = capRows(out, ROWS_MAX);
+    if (hidden) shown.push({ kind: "more", n: hidden });
+    const remote = (this.remoteBranches ?? []).filter(match);
+    const [rem, remHidden] = capRows(remote.map(b => ({ kind: "row", b, depth: 0 })), ROWS_MAX);
+    if (rem.length) shown.push({ kind: "head", label: "Remote" }, ...rem);
+    if (remHidden) shown.push({ kind: "more", n: remHidden });
+    shown.hidden = hidden + remHidden;
     return shown;
   }
 
@@ -172,8 +205,27 @@ export default class BranchPicker extends View {
 
   toggle(g, cx) {
     if (this.collapsed.has(g)) this.collapsed.delete(g); else this.collapsed.add(g);
-    localStorage.setItem("branch-picker.collapsed", JSON.stringify([...this.collapsed]));
+    this.save();
     cx.notify();
+  }
+
+  // Pin or unpin a local branch; pinned ones stay on top until unpinned or deleted.
+  togglePin(name, cx) {
+    cx.stop_propagation();
+    this.pins = this.pins.includes(name) ? this.pins.filter(n => n !== name) : [...this.pins, name];
+    this.save();
+    cx.notify();
+  }
+
+  // This repo's pins and recents and the collapsed groups into state.json (moved to the end: newest repo kept).
+  save() {
+    const s = this.state, k = this.recentKey;
+    if (k) for (const [m, v] of [["pins", this.pins], ["recents", this.recents]]) {
+      s[m] ??= {}; delete s[m][k];
+      if (v.length) s[m][k] = v;
+    }
+    s.collapsed = [...this.collapsed];
+    return writeState(s);
   }
 
   git(args) {
@@ -272,9 +324,7 @@ export default class BranchPicker extends View {
     }
     if (stash) notify({ title: `Switched to ${b.name}`, body: "Your changes are stashed. Restore them with: git stash pop", level: "info" });
     this.recents = [b.name, ...this.recents.filter(n => n !== b.name)].slice(0, 10);
-    const stored = JSON.parse((localStorage.getItem("branch-picker.recents") ?? localStorage.getItem("recents")) ?? "{}");
-    stored[this.recentKey] = this.recents;
-    localStorage.setItem("branch-picker.recents", JSON.stringify(stored));
+    await this.save(); // before close(): closing cancels the copy's unfinished work
     setShared("branch.switched", Date.now()); // the header chip re-asks on this. contract: read by status-copy
     this.close();
   }
@@ -290,11 +340,12 @@ export default class BranchPicker extends View {
   render(cx) {
     const t = theme();
     const rows = this.rows();
-    const total = (this.branches ?? []).length;
+    const total = (this.branches ?? []).length + (this.remoteBranches ?? []).length;
     let rowNo = -1;
     const row = (r) => {
+      if (r.kind === "more") return div().flex_none().p(10).text_size(11.5).text_color(t.dim).child(`… ${r.n} more, type to filter`);
       if (r.kind === "head") {
-        return h_flex().flex_none().h(24).px(10).items_center().child(div().text_size(11).text_color(t.dim).child(r.label.toUpperCase()));
+        return h_flex().flex_none().h(24).px(10).items_center().justify_center().child(div().text_size(11).text_color(t.dim).child(r.label.toUpperCase()));
       }
       if (r.kind === "group") {
         return h_flex().id(`bg-${r.g}`).flex_none().h(28).px(10).gap(7).items_center().rounded(6).cursor_pointer()
@@ -325,7 +376,17 @@ export default class BranchPicker extends View {
         .on_hover((h, cx) => { if (h) this.hovered = r.b.name; else if (this.hovered === r.b.name) this.hovered = null; cx.notify(); })
         .on_click((_e, cx) => this.pick(r.b, cx))
         .child(svg(`mods/branch-picker/${r.depth ? "branch" : "git-branch"}.svg`).size(13).text_color(cur ? t.accent : t.dim))
-        .child(div().flex_1().min_w(0).truncate().text_color(cur ? t.foreground : t.muted).child(r.rest ?? r.b.name))
+        .child(div().flex_1().min_w(0).truncate().text_color(cur ? t.foreground : t.muted).child(r.rest ?? r.b.remote ?? r.b.name))
+        // Pin / unpin (local branches): shown on hover, always on a pinned one; the click doesn't check out.
+        .when(!r.b.remote && (on || this.hovered === r.b.name || this.pins.includes(r.b.name)), el => {
+          const p = this.pins.includes(r.b.name);
+          return el.child(div().id(`br-pin-${i}`).flex_none().size(20).flex().items_center().justify_center().rounded(4)
+            .text_color(p ? t.accent : t.dim).hover(s => s.bg(t.hover).text_color(p ? t.accent : t.foreground))
+            .tooltip(p ? "Unpin" : "Pin to the top")
+            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+            .on_click((_e, cx) => this.togglePin(r.b.name, cx))
+            .child(svg("mods/branch-picker/pin.svg").size(12)));
+        })
         // Copy the full name (tree rows show only the part after the folder); the click doesn't check out.
         .when(on || this.hovered === r.b.name || this.copied === r.b.name, el => el.child(div().id(`br-copy-${i}`).flex_none().size(20).flex().items_center().justify_center().rounded(4)
           .text_color(this.copied === r.b.name ? t.accent : t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
@@ -382,7 +443,6 @@ export default class BranchPicker extends View {
         .child(div().relative().h(400).min_h(0)
           .child(v_flex().id("br-list").absolute().inset_0().overflow_y_scroll().gap(1)
             .children(rows.map(row))
-            .when(rows.hidden > 0, el => el.child(div().p(10).text_size(11.5).text_color(t.dim).child(`… ${rows.hidden} more, type to filter`)))
             .when(!rows.some(r => r.kind === "row"), el => el.child(div().p(10).text_color(t.dim).child("No matching branch."))))
           .child(Scrollbar.vertical("br-list").absolute().inset_0())))
       .child(h_flex().justify_end().text_size(11).text_color(t.dim).child("↑↓ choose · ↵ checkout · esc close"));
