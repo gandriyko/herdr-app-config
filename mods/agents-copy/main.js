@@ -1003,8 +1003,8 @@ export default class Agents extends View {
             .when(Boolean(msgBox), (el) => el.child(msgBox))
             // PR and Jira chips on their own row at the bottom, so the name and the report keep the width.
             .when(Boolean(pr || jiraKey), (el) => el.child(h_flex().gap(5).items_center()
-              .when(Boolean(pr), (el) => el.child(prChip(a, pr)))
-              .when(Boolean(jiraKey), (el) => el.child(jiraChip(a, jiraKey)))))))
+              .when(Boolean(jiraKey), (el) => el.child(jiraChip(a, jiraKey)))
+              .when(Boolean(pr), (el) => el.child(prChip(a, pr)))))))
         .when(subs.length > 0 && !this.folded.has(a.address), (el) => el.children(subs.map((x) => this.subRow(t, x, shown, byPriority))));
     };
 

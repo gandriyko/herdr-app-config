@@ -1052,8 +1052,8 @@ export default class Board extends View {
                     .items_center()
                     .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(a.paneless ? a.name : a.space_name || r.tabShown || r.program))
                     .when(Boolean(a.space_name && r.tabShown), (el) => el.child(div().min_w(0).truncate().text_size(12).text_color(t.dim).child(`/ ${r.tabShown}`)))
-                    .when(Boolean(r.pr), (el) => el.child(prPill(r)))
                     .when(Boolean(r.jira), (el) => el.child(jiraPill(r)))
+                    .when(Boolean(r.pr), (el) => el.child(prPill(r)))
                     .child(div().flex_1())
                     .child(div().flex_none().flex().justify_end().whitespace_nowrap().overflow_hidden().text_size(11).text_color(blocked ? t.blocked : t.dim).child(timeText(r))),
                 )
