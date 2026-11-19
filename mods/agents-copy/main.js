@@ -1131,7 +1131,9 @@ export default class Agents extends View {
       .when(list.length === 0 && unfiltered > 0 && !collapsed, (el) =>
         el.child(h_flex().px(12).py(6).gap(6).text_size(12).text_color(t.dim)
           .child(q ? "No agents match the search" : "No agents match the filter")
-          .child(div().id("ag-filter-none").cursor_pointer().text_color(t.accent).hover((s) => s.text_color(t.foreground)).on_click(clearFilter).child("Clear"))),
+          .child(div().id("ag-filter-none").cursor_pointer().text_color(t.accent).hover((s) => s.text_color(t.foreground)).on_click(q
+            ? (_e, cx) => { this.search.set_value(""); this.q = ""; this.search.focus(); cx.notify(); }
+            : clearFilter).child("Clear"))),
       )
       .when(unfiltered === 0 && !collapsed, (el) =>
         el.child(div().px(12).text_size(12).text_color(t.dim).child("No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not.")),
