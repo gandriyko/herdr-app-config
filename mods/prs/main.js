@@ -1,6 +1,6 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, TextView, InputState, Input, TextareaState, Textarea } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, theme, notify, playSound, props, openOverlay, closeOverlay, shared, setShared, run, knownAgents } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, theme, notify, props, openOverlay, closeOverlay, shared, setShared, run, knownAgents, layout } from "herdr";
 import { migrate, modelFor, settingsFor, projectKey, projectName, languageLine, runModel, describe } from "./ai.js";
 
 // My open pull requests in the repo of the focused folder, via the `gh` CLI. Click opens the PR in a popup
@@ -24,6 +24,19 @@ function location(places) {
     return { cwd, on, branch };
   }
   return places.get(space?.id) ?? { cwd: space?.folder, on, branch: space?.branch ?? null };
+}
+
+// Is the "prs" block shown in the layout tree: not hidden itself, no hidden ancestor, and the active child of
+// every stack above it. null when no block shows prs (a pane mod, a dialog): the caller treats that as shown.
+// ponytail: the first prs block found; a prs pane in another tab can't be told apart and counts as shown.
+function shownIn(node) {
+  if (!node) return null;
+  if (node.content?.mod === "prs") return !node.hidden;
+  for (const c of node.children ?? []) {
+    const r = shownIn(c);
+    if (r !== null) return r && !node.hidden && (node.type !== "stack" || !node.active || node.active === c.id);
+  }
+  return null;
 }
 
 // CI of the PR: "fail" if any check failed, "wait" if any is still running, else "ok" (or "" without checks).
@@ -62,7 +75,7 @@ async function copilotGql(repo, numbers, cwd, on) {
   try {
     const data = JSON.parse(r.stdout).data;
     out.ok = Boolean(data.repository);
-    out.viewer = data.viewer?.login; // my login: whose PRs get the Copilot sound in the "All" list
+    out.viewer = data.viewer?.login; // my login: whose PRs get the Copilot toast in the "All" list
     for (const [k, pr] of Object.entries(data.repository ?? {}))
       if (pr) out.set(Number(k.slice(1)), {
         asked: pr.reviewRequests.nodes.some((n) => isCopilot(n.requestedReviewer)),
@@ -95,7 +108,7 @@ function approval(pr) {
     : pr.reviewDecision === "APPROVED" || states.includes("APPROVED") ? "approved" : "";
 }
 
-const FIELDS ="number,title,headRefName,isDraft,reviewDecision,url,statusCheckRollup,reviewRequests,reviews,body,author,isCrossRepository";
+const FIELDS ="number,title,headRefName,baseRefName,labels,isDraft,reviewDecision,url,statusCheckRollup,reviewRequests,reviews,body,author,isCrossRepository";
 // `all`: every open PR of the repo; else mine, then those waiting for my review (a second gh call), by number.
 async function list(cwd, on, all) {
   if (all) return listBy(cwd, on, []);
@@ -138,6 +151,11 @@ function copilotOverview(body) {
   const what = /<summary><strong>What changed in this PR<\/strong><\/summary>([\s\S]*?)<\/details>/.exec(body)?.[1]?.trim() ?? "";
   const effort = /<sub>([^<]+)<\/sub>/.exec(body)?.[1]?.trim() ?? "";
   return { verdict, summary, issues, what, effort };
+}
+// a toward b by w (0..1), both "#rrggbb"; a when either isn't. (Same as files-copy's mixHex.)
+function mixHex(a, b, w) {
+  const p = (c) => /^#[0-9a-f]{6}/i.test(c) ? [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16)) : null, x = p(a), y = p(b);
+  return x && y ? "#" + x.map((v, i) => Math.round(v * w + y[i] * (1 - w)).toString(16).padStart(2, "0")).join("") : a;
 }
 const when = (iso) => iso ? new Date(iso).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "";
 
@@ -275,22 +293,30 @@ export default class Prs extends View {
     this.byRepo = new Map(); // repo key -> { name, prs, error }: one gh call per repo, whatever folders point at it
     this.remotes = new Map(); // folder -> its repo, from the local git remote (no API call)
     this.focusRepo = null;
-    this.seen = null; // PR url -> copilot state at the last poll; null until the first one (no sound for what already was)
-    // Auto-sync (the minute poll and its sound) can be switched off; remembered. Refresh still works by hand.
+    this.seen = null; // PR url -> copilot state at the last poll; null until the first one (no toast for what already was)
+    // Auto-sync (the 2-minute poll while the panel is shown) can be switched off; remembered. Refresh still works by hand.
     this.auto = (() => { try { return (localStorage.getItem("prs.auto") ?? localStorage.getItem("auto")) === "1"; } catch { return false; } })();
     this.all = (() => { try { return localStorage.getItem("prs.all") === "1"; } catch { return false; } })();
     this.poll(cx);
     // One 2 s tick for two checks. The folder follows focus: a repo already polled is shown from memory.
     // A PR approved or created elsewhere: poll now. From a timer, not render(): a task spawned with
     // render's cx never runs. poll() has its own loading/again guard.
+    // Also: the panel just came into view with auto on and the list stale (older than a poll) or missing: poll now.
+    this.wasShown = this.shown();
     cx.timer.every(2000, (cx) => {
       const k = this.locKey(); if (k !== this.key) { this.key = k; this.focus(cx); }
       const changed = shared("prs.changed");
       if (changed && changed.ts !== this.changedTs) { this.changedTs = changed.ts; if (changed.ts > (this.started ?? 0)) this.poll(cx); }
+      const shown = this.shown();
+      if (shown && !this.wasShown && this.auto && (Date.now() - (this.polledAt ?? 0) >= POLL_EVERY || !this.byRepo.has(this.focusRepo))) this.poll(cx);
+      this.wasShown = shown;
     });
-    // ponytail: 2 min, since it costs 3 gh calls per repo of every space and runs while hidden; 1 min if Copilot news feels late.
-    cx.timer.every(POLL_EVERY, (cx) => { if (this.auto) this.poll(cx); });
+    // ponytail: 2 min, since it costs 3 gh calls per repo of every space; 1 min if Copilot news feels late.
+    cx.timer.every(POLL_EVERY, (cx) => { if (this.auto && this.shown()) this.poll(cx); });
   }
+
+  // The panel is on screen (see shownIn); auto-sync runs only then.
+  shown() { return shownIn(layout()) !== false; }
 
   toggleAuto(cx) {
     this.auto = !this.auto;
@@ -332,17 +358,17 @@ export default class Prs extends View {
   focus(cx) {
     cx.spawn(async (cx) => {
       const r = await this.repoOf(this.loc());
-      if (this.byRepo.has(r.key) || !this.auto) { this.focusRepo = r.key; this.show(); cx.notify(); } else this.poll(cx);
+      if (this.byRepo.has(r.key) || !this.auto || !this.shown()) { this.focusRepo = r.key; this.show(); cx.notify(); } else this.poll(cx);
     });
   }
 
   // Every 2 minutes (and on demand): the open PRs of every repo among all spaces' folders and the focused one,
-  // one gh call per repo. A sound and a toast when Copilot's review shows up on a PR that was already there.
-  // Runs even while the panel is hidden.
+  // one gh call per repo. A toast when Copilot's review shows up on a PR that was already there.
+  // The timers call it only while the panel is shown; refresh, prs.changed and the Mine/All switch call it any time.
   // ponytail: in memory only (a reload re-baselines).
   poll(cx) {
     if (this.loading) { this.again = true; return; }
-    this.loading = true; cx.notify();
+    this.loading = true; this.polledAt = Date.now(); cx.notify();
     const focus = this.loc(), places = new Map();
     for (const p of [focus, ...spaces().map((s) => ({ cwd: s.folder, on: s.machine ?? null }))]) if (p.cwd) places.set(`${p.on}|${p.cwd}`, p);
     cx.spawn(async (cx) => {
@@ -365,11 +391,12 @@ export default class Prs extends View {
               mine: gql.viewer ? pr.author?.login === gql.viewer : was.get(pr.number)?.mine ?? null }));
             // Kept in memory: only what a row, the search and the popup use. Reviews, checks and full bodies
             // (Copilot's reviews are long) are reduced to their badges here, once per poll.
-            this.byRepo.set(k, { name: r.name, prs: prs.map(({ statusCheckRollup, reviews, reviewRequests, body, ...pr }) => ({ ...pr,
+            this.byRepo.set(k, { name: r.name, prs: prs.map(({ statusCheckRollup, reviews, reviewRequests, body, labels, ...pr }) => ({ ...pr,
+              hotfix: (labels ?? []).some((l) => /hotfix/i.test(l.name ?? "")),
               ciState: ci(statusCheckRollup), approvalState: approval({ reviews, reviewDecision: pr.reviewDecision }), body: (body ?? "").slice(0, 500),
               cpBadge: gql.ok || !was.has(pr.number) ? copilotBadge({ ...pr, reviews, reviewRequests }, gql.get(pr.number)?.urls) : was.get(pr.number).cpBadge,
               repo: { cwd: r.cwd, on: r.on } })), error: null });
-            // Copilot sound only for PRs I opened (when my login is unknown: everything in Mine, nothing in All).
+            // Copilot toast only for PRs I opened (when my login is unknown: everything in Mine, nothing in All).
             for (const pr of prs) if (gql.viewer ? pr.author?.login === gql.viewer : !all) next.set(pr.url, { state: copilot(pr), pr });
           } catch (e) {
             // A failed refresh keeps the last good list as it was; the error shows only when there is none.
@@ -385,7 +412,6 @@ export default class Prs extends View {
         this.seen = new Map([...(this.seen ?? []), ...[...next].map(([url, { state }]) => [url, state])]);
         this.focusRepo = (await this.repoOf(focus)).key; this.show();
         for (const pr of done) notify({ title: copilot(pr) === "clean" ? "Copilot reviewed: no comments" : "Copilot reviewed", body: `#${pr.number} ${pr.title}`, level: "info" });
-        if (done.length) playSound("done");
       } catch (e) { this.error = String(e.message ?? e); }
       finally {
         this.loading = false; cx.notify();
@@ -716,7 +742,7 @@ export default class Prs extends View {
     const current = Boolean(b) && (b === pr.headRefName || b === `pr-${pr.number}-${worktreeSlug(pr.headRefName ?? "")}`);
     return v_flex().id(`pr-${pr.number}`).flex_none().px(8).py(4).gap(2).rounded(5).cursor_pointer()
       .when(current, (e) => e.bg(t.selected).border_l_2().border_color(t.accent))
-      .hover((s) => s.bg(t.hover)).tooltip(`#${pr.number} ${pr.title}\n${pr.headRefName}${current ? "\nCurrent branch" : ""}`)
+      .hover((s) => s.bg(t.hover)).tooltip(`#${pr.number} ${pr.title}\n${pr.headRefName} → ${pr.baseRefName}${pr.hotfix ? "\nLabel: hotfix" : ""}${current ? "\nCurrent branch" : ""}`)
       .on_click(() => openOverlay({ mod: "prs", kind: "dialog", width: 780, height: 0.85, props: { pr } }))
       .child(h_flex().gap(6).items_center()
         .child(div().id(`ci-${pr.number}`).flex_none().size(9).flex().items_center().justify_center().tooltip(dotTip)
@@ -732,7 +758,8 @@ export default class Prs extends View {
         // My review is requested: an eye in the theme's "working" colour, so the PR stands out as one to look at.
         .when(Boolean(pr.needMe), (e) => e.child(div().id(`me-${pr.number}`).flex_none().size(15).flex().items_center().justify_center()
           .tooltip("Your review is requested").child(svg("mods/prs/review.svg").size(14).text_color(t.working))))
-        .child(div().flex_1().min_w(0).truncate().child(pr.title))
+        // A "hotfix" label: the title in the theme's red, softened toward the text colour (ansi1 alone glares).
+        .child(div().flex_1().min_w(0).truncate().when(pr.hotfix, (e) => e.text_color(mixHex(t.ansi1, t.foreground, 0.6))).child(pr.title))
         // Copy the task key that starts the title (DA-20323: …); the row's own click doesn't fire.
         .when(Boolean(taskKey), (e) => e.child(div().id(`key-${pr.number}`).flex_none().size(18).flex().items_center().justify_center().rounded(4)
           .text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(`Copy ${taskKey}`)
@@ -748,6 +775,9 @@ export default class Prs extends View {
           .child(svg("mods/prs/draft.svg").size(14).text_color(t.ansi5)))))
       .child(h_flex().pl(13).gap(6).text_size(10).text_color(t.dim)
         .child(div().min_w(0).truncate().child(pr.headRefName))
+        // Target branch: "→ base", kept short; the head branch truncates first.
+        .when(Boolean(pr.baseRefName), (e) => e.child(div().id(`base-${pr.number}`).flex_none().max_w(110).truncate().text_color(t.muted)
+          .tooltip(`Merges into ${pr.baseRefName}`).child(`→ ${pr.baseRefName}`)))
         .child(div().flex_none().child(`#${pr.number}`))
         .child(div().flex_1())
         .when(Boolean(pr.author?.login), (e) => e.child(div().flex_none().max_w(120).truncate().text_color(t.muted).child(pr.author.login))));
@@ -786,7 +816,7 @@ export default class Prs extends View {
               .bg(this.all === all ? t.hover : t.background).text_color(this.all === all ? t.foreground : t.muted)
               .on_click((_e, cx) => this.setAll(all, cx)).child(label))))
         .child(h_flex().id("auto").h(24).px(5).gap(4).items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
-          .tooltip(this.auto ? "Auto-sync every 2 minutes (with Copilot sound): on" : "Auto-sync: off (default) · refresh by hand").on_click((_e, cx) => this.toggleAuto(cx))
+          .tooltip(this.auto ? "Auto-sync every 2 minutes while the panel is shown: on" : "Auto-sync: off (default) · refresh by hand").on_click((_e, cx) => this.toggleAuto(cx))
           .child(div().size(13).flex().items_center().justify_center().rounded(3).border_1().text_size(10).font_semibold()
             .border_color(this.auto ? t.accent : t.border).bg(this.auto ? t.accent : t.background).text_color(t.accent_foreground).child(this.auto ? "✓" : ""))
           .child(div().text_size(10).text_color(t.muted).child("Auto")))
