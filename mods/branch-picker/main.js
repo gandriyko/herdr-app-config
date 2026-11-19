@@ -275,6 +275,8 @@ export default class BranchPicker extends View {
 
   // Pull the current branch: fast-forward when it can; when it diverged, rebase the local commits on top (autostash);
   // a rebase that stops on a conflict is aborted, so nothing is left half done. The picker stays open.
+  // fetch + merge/rebase @{u} instead of `git pull`: pull merges what FETCH_HEAD lists, and a fetch running at the
+  // same time (fetchIfStale, an IDE's autofetch) appends to that file too → "Cannot fast-forward to multiple branches".
   pull(cx) {
     if (this.busy || !this.upstream) return;
     const msg = (r) => (r.stderr || r.stdout || "").trim().split("\n").slice(-3).join(" ");
@@ -282,9 +284,11 @@ export default class BranchPicker extends View {
     this.busy = this.current; this.error = ""; cx.notify();
     cx.spawn(async (cx) => {
       try {
-        let r = await git(["pull", "--ff-only"]);
+        let r = await git(["fetch", "--quiet"]);
+        if (r.code !== 0) throw new Error(msg(r));
+        r = await git(["merge", "--ff-only", "@{u}"]);
         if (r.code !== 0 && /not possible to fast-forward|diverg/i.test(msg(r))) {
-          r = await git(["pull", "--rebase", "--autostash"]);
+          r = await git(["rebase", "--autostash", "@{u}"]);
           if (r.code !== 0) { const m = msg(r); await git(["rebase", "--abort"]).catch(() => null); throw new Error(`rebase stopped: ${m} · rebase aborted, nothing changed`); }
         } else if (r.code !== 0) throw new Error(msg(r));
         setShared("branch.switched", Date.now()); // the header chip and the other panels ask again. contract: read by status-copy
