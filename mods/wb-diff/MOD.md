@@ -15,7 +15,7 @@ PhpStorm/Zed-style diff in a main-area tab. It loads `git diff` for every file i
 
 ## Files
 - main.js: view, git reading (one `git --no-optional-locks ... diff --no-ext-diff -- <paths>` for all tracked files, `readTextFile` for untracked ones), per-file hunk parsing, row layout (split/unified), context reveal, scrollbars.
-- highlight.js: per-line syntax highlighter (code, markup and css modes), no multi-line state.
+- highlight.js: per-line syntax highlighter (code, markup and css modes), no multi-line state. Copy of `lib/highlight.js`; edit it there and run `scripts/sync-lib`.
 - icons/: chevron-left, chevron-right, close, diff, file, wrap, split, unified, chevron-down, expand-up, expand-down, expand-all, collapse-all, expand-files, refresh, open-file (svg).
 - mod.json: place none.
 - gpui-kit.d.ts, jsconfig.json: editor typings.

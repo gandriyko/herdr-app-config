@@ -27,7 +27,7 @@ Lists agents like the shipped `agents` panel, in Priority or Grouped by space, w
 
 ## Files
 - main.js: the view, popups, gh lookups, reminders.
-- asking.js: the asking detector and its read queue.
+- asking.js: the asking detector and its read queue. Copy of `lib/asking.js`; edit it there and run `scripts/sync-lib`.
 - last.js: pure parser of the last message on a screen, for the eye button.
 - check.svg, eye.svg, search.svg, columns.svg, chevron-down.svg, chevron-right.svg, clock.svg, filter.svg, layers.svg, pin.svg, pin-off.svg, spinner.svg, x.svg: icons.
 - gpui-kit.d.ts, jsconfig.json: editor typings only.

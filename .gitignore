@@ -13,6 +13,10 @@
 !layouts/my-layout.*
 !skills/
 !skills/**
+!lib/
+!lib/**
+!scripts/
+!scripts/**
 !mods/
 !mods/AGENTS.md
 !mods/branch-picker/

@@ -32,6 +32,18 @@ My [Herdr](https://herdr.dev/app) layout (`my-layout`), the `changes-copy` mod a
 
 Nothing is needed in `settings.json`: mods are connected by the layout, not by settings.
 
+## Shared helpers
+
+Herdr loads a mod's modules only from its own folder, so a helper used by several mods is kept once
+in `lib/` and copied into each mod that has a file of the same name. Edit `lib/<file>`, then run
+`scripts/sync-lib`, and commit `lib/` with the synced copies.
+
+| Helper | Copied into |
+| --- | --- |
+| `ai.js` | `wb-ai`, `changes-copy`, `prs` |
+| `highlight.js` | `wb-diff`, `files-copy` |
+| `asking.js` | `agents-copy`, `agents-board` |
+
 ## Skills
 
 `skills/` holds agent skills for agents running in Herdr. Each one is a folder with a `SKILL.md`

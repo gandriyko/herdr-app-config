@@ -1,4 +1,5 @@
 // Simple per-line syntax highlighter for diff and file rows (no multi-line state).
+// Copy of lib/highlight.js (wb-diff, files-copy): edit lib/highlight.js, then run scripts/sync-lib.
 // Three modes: "code" (C-like, PHP, Python, shell, HCL, SQL...), "markup" (HTML,
 // XML, Twig, Vue/PHP templates) and "css" (CSS, SCSS, Less, Stylus).
 // Mixed files (vue, php, html) pick per line: a line starting with a tag is markup.

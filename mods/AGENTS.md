@@ -58,10 +58,15 @@ another mod is removed, cloned or updated.
   Reference assets by its own path (`mods/<name>/icon.svg`); copy an icon it needs (a spinner, a
   branch icon) into its folder instead of pointing at another mod's (`mods/workspace-chrome/…`,
   `mods/pane/…`): shipped mods are replaced on every start and may drop the file.
-- **Copied helpers stay identical.** Helper modules copied between our mods (`highlight.js`, `ai.js`)
-  are the same file in every copy. When you change one, find the others
-  (`git ls-files mods | rg '/highlight\.js$'`) and copy the change into all of them in the same
-  commit; check each mod that uses it with `herdr-app check`. Icons may differ per mod.
+- **Shared helpers live in `lib/`, copied into each mod.** Herdr refuses any module outside a mod's
+  folder (`../lib/x.js` and symlinks alike), so a helper used by several mods (`ai.js`,
+  `highlight.js`, `asking.js`) has its source in `lib/<file>` and a real copy in each mod. Edit only
+  `lib/<file>`, run `scripts/sync-lib` (it copies over every mod's file of that name), and commit
+  `lib/` with the copies; check each mod that uses it with `herdr-app check`. A mod starts using a
+  helper by having a file of that name (copy it once, then `sync-lib` keeps it); see Sync below.
+  Extract code into `lib/`
+  only when two or more mods would otherwise keep the same logic in step; small one-liners stay
+  inline. Icons may differ per mod.
 - **Namespaced shared state.** Every `setShared` key starts with the mod's name
   (`jira.settings`, `prs.changed`). Reading another mod's key is a documented contract: name it
   in a comment at the read, and the mod must still work when the key is missing.
@@ -87,3 +92,14 @@ its code. Every mod folder has `mods/<name>/MOD.md`, and `mods/README.md` indexe
   `MOD.md` in the same commit. A new mod is not done without one.
 - **Update the index.** Add or change the mod's row in `mods/README.md` (name, one-line summary, link).
 - Write in English, short and factual: no marketing, no changelog.
+
+## Sync: after changing a `lib/` file
+
+- **Edit the original.** A change to a shared helper (any file in `lib/`) goes
+  into `lib/<file>`, never into a mod's copy.
+- **Then sync.** Right after editing `lib/<file>`, run `scripts/sync-lib`. It copies the file over
+  every mod's file of that name and prints each copy it changed.
+- **Check and commit together.** Run `herdr-app check mods/<name>` for each synced mod. Commit
+  `lib/<file>` and its copies in one commit.
+- **A copy was edited by mistake:** move the change into `lib/<file>` first, then sync. Running
+  `scripts/sync-lib` before that overwrites the copy and loses the change.

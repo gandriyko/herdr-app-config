@@ -1,3 +1,4 @@
+// Copy of lib/asking.js (agents-copy, agents-board): edit lib/asking.js, then run scripts/sync-lib.
 // "Asking" detection: an agent that finished its turn on a choice menu needs the person, though
 // herdr-core reports it as done/idle. One screen read per (address, turn, status, title), never on a timer:
 // done -> idle (the person looked) or a new terminal title means the screen may have changed.

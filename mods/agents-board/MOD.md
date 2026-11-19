@@ -27,7 +27,7 @@ A frameless full-window overlay: a dim backdrop (a click on it closes the board)
 ## Files
 - main.js: the view.
 - prs.js: PR lookup helpers (state is kept by the view instance).
-- asking.js: the asking detector and its read queue.
+- asking.js: the asking detector and its read queue. Copy of `lib/asking.js`; edit it there and run `scripts/sync-lib`.
 - reply.js: pure parsers for the reply area (menu options, input-line suggestion, the agent's question or last reply).
 - reply.svg: reply icon.
 - grip.svg: resize grip.

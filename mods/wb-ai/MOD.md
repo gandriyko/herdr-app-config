@@ -15,7 +15,7 @@ A window to add, edit and delete AI models (provider claude, codex or local URL)
 
 ## Files
 - main.js: the models window and the project settings dialog.
-- ai.js: shared logic (storage in shared keys, migrations, projectKey from `git remote get-url origin`, generate/list local models). Header says it is the same file copied into changes-copy and prs; the canonical copy is here.
+- ai.js: shared logic (storage in shared keys, migrations, projectKey from `git remote get-url origin`, generate/list local models). Copy of `lib/ai.js` (also in changes-copy and prs); edit it there and run `scripts/sync-lib`.
 - icons/: chevron-down.svg, settings.svg, x.svg.
 - mod.json: title "Commit generation".
 - gpui-kit.d.ts, jsconfig.json: editor typings.
@@ -24,4 +24,4 @@ A window to add, edit and delete AI models (provider claude, codex or local URL)
 All in shared state (`wb.ai.*`, see shared_keys); no keychain, no localStorage. Project key is `<host>|<path>` of the origin remote.
 
 ## Notes
-No timers. Other mods (changes-copy, prs) read the `wb.ai.*` keys through their own copy of ai.js. their ai.js is an intentional per-mod copy (isolation rule) of this canonical file; the `wb.ai.*` settings are shared on purpose with wb-ai, prs and changes-copy (documented contract, optional where read, defaults are created). A missing model list is recreated with defaults.
+No timers. Other mods (changes-copy, prs) read the `wb.ai.*` keys through their own copy of ai.js. Each ai.js is a per-mod copy (isolation rule) of `lib/ai.js`; the `wb.ai.*` settings are shared on purpose with wb-ai, prs and changes-copy (documented contract, optional where read, defaults are created). A missing model list is recreated with defaults.

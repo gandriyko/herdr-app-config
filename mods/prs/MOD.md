@@ -17,7 +17,7 @@ A create-PR dialog (the header's + button) pushes the branch and runs gh pr crea
 
 ## Files
 - main.js: panel view, gh calls, PR detail and create dialogs.
-- ai.js: AI model settings and runner shared across mods (copy of mods/wb-ai/ai.js): claude/codex CLIs or a local server.
+- ai.js: AI model settings and runner shared across mods (copy of `lib/ai.js`; edit it there and run `scripts/sync-lib`): claude/codex CLIs or a local server.
 - approved.svg, changes.svg, conflict.svg, copy.svg, draft.svg, plus.svg, pr.svg, refresh.svg, review.svg, session.svg, spinner.svg: status and button icons.
 - gpui-kit.d.ts, jsconfig.json: editor typings only.
 
@@ -26,4 +26,4 @@ localStorage `prs.auto` (old unprefixed `auto` is read as fallback): auto-refres
 
 ## Notes
 Polls gh every 2 min only when auto is switched on (off by default) and the panel is shown: the prs block in `layout()` is not hidden and is the active child of its stack (a prs block not found in the layout counts as shown). When the panel comes into view with auto on and the list is older than 2 min (or the focused repo was never loaded), it refreshes at once in the background (within the 2 s tick). Refresh, `prs.changed` and the Mine/All switch poll at any time (my login for the popup comes from gh's disk cache, `gh api user --cache 24h`); while a refresh runs only the refresh icon spins, the list is replaced when new data arrives (a failed gh or GraphQL call keeps the last good list and Copilot badges). It checks the focused folder and prs.changed every 2 s (cheap compare). In memory each PR keeps only its row fields (CI, approval and Copilot badges worked out per poll, body cut to 500 chars for search); repos no space points at are dropped on the next poll. Diff sent to AI is capped at 60000 chars. For the PR title and description the AI also gets the repo's own rules: the GitHub PR template, then the tracked agent docs that mention pull requests most (`CLAUDE.md`, `AGENTS.md`, `.claude/**/*.md`, `.github/**/*.md`, `.cursor/**`), then `CLAUDE.md`; at most 6 files, 8000 chars each. gh and AI calls have timeouts (120-600 s). Works without the `wb.ai.*` keys but AI features need a model configured in wb-ai.
-- ai.js is an intentional per-mod copy (isolation rule) with the same origin as wb-ai/ai.js; the `wb.ai.*` settings are shared on purpose with wb-ai, prs and changes-copy (documented contract, optional where read, defaults are created).
+- ai.js is a per-mod copy (isolation rule) of `lib/ai.js`, like wb-ai's; the `wb.ai.*` settings are shared on purpose with wb-ai, prs and changes-copy (documented contract, optional where read, defaults are created).

@@ -1,0 +1,12 @@
+#!/bin/sh
+# Copy each lib/<file> over every mod's <file> of the same name (Herdr loads nothing outside a mod's
+# own folder, symlinks included, so each mod keeps a real copy). Shipped mods (ignored by git) are skipped.
+cd "$(dirname "$0")/.." || exit 1
+for src in lib/*; do
+  f=$(basename "$src")
+  for dst in mods/*/"$f"; do
+    [ -e "$dst" ] || continue
+    git check-ignore -q "$dst" && continue
+    cmp -s "$src" "$dst" || { cp "$src" "$dst" && echo "synced $dst"; }
+  done
+done

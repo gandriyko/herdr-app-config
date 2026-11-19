@@ -1,6 +1,6 @@
 // AI models shared by the whole app: one list of models, and each use (commit messages, PR review,
-// MR descriptions) picks its own, per project (repo) when set there. SAME FILE in every mod that uses it
-// (wb-ai, changes-copy, prs). The canonical copy is mods/wb-ai/ai.js: edit it there, then copy it over the others.
+// MR descriptions) picks its own, per project (repo) when set there.
+// Copy of lib/ai.js (wb-ai, changes-copy, prs): edit lib/ai.js, then run scripts/sync-lib.
 //
 // shared "wb.ai.models" = [{ id, name, provider: "claude" | "codex" | "local", command?, args?, model, url? }]
 // shared "wb.ai.use"    = { commit: <model id>, review: <model id>, mr: <model id> }  (global default model per use)
