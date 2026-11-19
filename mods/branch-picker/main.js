@@ -16,6 +16,7 @@ function place(sp, ps) {
 }
 
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false"];
+const FETCH_EVERY = 5 * 60 * 1000;
 const ago = (s) => {
   const d = Date.now() / 1000 - s;
   return d < 3600 ? `${Math.max(1, Math.round(d / 60))}m` : d < 86400 ? `${Math.round(d / 3600)}h` : d < 86400 * 60 ? `${Math.round(d / 86400)}d` : `${Math.round(d / 86400 / 30)}mo`;
@@ -46,7 +47,25 @@ export default class BranchPicker extends View {
     this.handle = cx.focus_handle();
     this.input.focus();
     cx.timer.after(600, () => this.input.focus());
-    cx.spawn(async (cx) => { await this.load(); cx.notify(); });
+    cx.spawn(async (cx) => { await this.load(); cx.notify(); await this.fetchIfStale(cx); });
+  }
+
+  // `git fetch` in the background when this repo's last one (from this picker) is over 5 minutes old; the date is
+  // kept per repo in localStorage. Then the list and ↓N are read again. The date is written before the fetch, so
+  // a picker reopened meanwhile doesn't start a second one; a failed fetch waits the 5 minutes too.
+  // ponytail: last 50 repos kept.
+  async fetchIfStale(cx) {
+    if (!this.recentKey) return;
+    let stamps = {};
+    try { stamps = JSON.parse(localStorage.getItem("branch-picker.fetched") ?? "{}"); } catch {}
+    if (Date.now() - (stamps[this.recentKey] ?? 0) < FETCH_EVERY) return;
+    delete stamps[this.recentKey]; stamps[this.recentKey] = Date.now();
+    try { localStorage.setItem("branch-picker.fetched", JSON.stringify(Object.fromEntries(Object.entries(stamps).slice(-50)))); } catch {}
+    this.fetching = true; cx.notify();
+    const r = await exec("git", ["fetch", "--quiet"], { cwd: this.folder, on: this.on, timeout: 60000 }).catch(() => null);
+    this.fetching = false;
+    if (r?.code === 0 && !this.busy) await this.load();
+    cx.notify();
   }
 
   close() {
@@ -76,10 +95,18 @@ export default class BranchPicker extends View {
       const list = local.stdout.split("\n").filter(Boolean)
         .map(l => { const [name, at] = l.split("\t"); return { name, at: Number(at) || 0 }; })
         .sort((a, b) => b.at - a.at);
+      // Remote branches with no local one, newest first: the last 30 (checkout makes a local branch tracking it).
+      // ponytail: asks git for locals + 31 refs so 30 remain after dropping those with a local branch and HEAD.
+      const known = new Set(list.map(b => b.name));
+      const rem = await exec("git", [...READ, "for-each-ref", "--sort=-committerdate", `--count=${list.length + 31}`, fmt, "refs/remotes"], { cwd: this.folder, on: this.on });
+      const seen = new Set();
+      this.remoteBranches = rem.stdout.split("\n").filter(Boolean).map(l => {
+        const [remote, at] = l.split("\t");
+        return { name: remote.slice(remote.indexOf("/") + 1), remote, at: Number(at) || 0 };
+      }).filter(b => b.remote.includes("/") && b.name !== "HEAD" && !known.has(b.name) && !seen.has(b.name) && seen.add(b.name)).slice(0, 30);
       this.branches = list;
       // Recents live per repo; a branch deleted after its merge leaves the list with it.
       const key = JSON.stringify([this.on, rootRaw]);
-      const known = new Set(list.map(b => b.name));
       const stored = JSON.parse((localStorage.getItem("branch-picker.recents") ?? localStorage.getItem("recents")) ?? "{}");
       this.recentKey = key;
       this.recents = (stored[key] ?? []).filter(n => known.has(n));
@@ -125,6 +152,11 @@ export default class BranchPicker extends View {
       const open = Boolean(f) || !this.collapsed.has(g);
       out.push({ kind: "group", g, count: groups[g].length, open });
       if (open) for (const b of groups[g]) out.push({ kind: "row", b, depth: 1, rest: b.name.slice(g.length + 1) });
+    }
+    const remote = (this.remoteBranches ?? []).filter(match);
+    if (remote.length) {
+      out.push({ kind: "head", label: "Remote" });
+      for (const b of remote) out.push({ kind: "row", b, depth: 0 });
     }
     // ponytail: every row is a full element tree, and thousands of them overran the host's render
     // deadline ("interrupted"). Cap and ask to filter; uniform_list + on_item_click if scrolling them all matters.
@@ -289,7 +321,7 @@ export default class BranchPicker extends View {
         .cursor_pointer()
         .when(on, el => el.bg(t.selected))
         .when(!on, el => el.hover(s => s.bg(t.hover)))
-        .tooltip(r.b.name)
+        .tooltip(r.b.remote ? `${r.b.remote} · checkout makes a local branch that tracks it` : r.b.name)
         .on_hover((h, cx) => { if (h) this.hovered = r.b.name; else if (this.hovered === r.b.name) this.hovered = null; cx.notify(); })
         .on_click((_e, cx) => this.pick(r.b, cx))
         .child(svg(`mods/branch-picker/${r.depth ? "branch" : "git-branch"}.svg`).size(13).text_color(cur ? t.accent : t.dim))
@@ -304,9 +336,10 @@ export default class BranchPicker extends View {
         .when(cur && !busy, el => el.child(div().id("br-pull").flex_none().h(22).px(8).flex().items_center().gap(4).rounded(5).border(1).text_size(11.5)
           .border_color(this.upstream ? (this.behind ? t.accent : t.input) : t.border).text_color(this.upstream ? (this.behind ? t.accent : t.foreground) : t.dim)
           .when(Boolean(this.upstream), s => s.cursor_pointer().hover(h => h.bg(t.hover)))
-          .tooltip(!this.upstream ? "No upstream to pull from" : this.behind ? `git pull: ${this.behind} commit${this.behind === 1 ? "" : "s"} from ${this.upstream} (as of the last fetch)` : `git pull from ${this.upstream}`)
+          .tooltip(this.fetching ? "git fetch is running…" : !this.upstream ? "No upstream to pull from" : this.behind ? `git pull: ${this.behind} commit${this.behind === 1 ? "" : "s"} from ${this.upstream} (as of the last fetch)` : `git pull from ${this.upstream}`)
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
           .on_click((_e, cx) => { cx.stop_propagation(); this.pull(cx); })
+          .when(Boolean(this.fetching), s => s.child(svg("mods/branch-picker/spinner.svg").size(10).text_color(t.dim).spin(900)))
           .child(`Pull${this.behind ? ` ↓${this.behind}` : ""}`)))
         .when(cur, el => el.child(div().flex_none().text_size(11).text_color(t.accent).child("current")))
         .when(busy, el => el.child(svg("mods/branch-picker/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))

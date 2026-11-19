@@ -11,7 +11,7 @@ commands: []
 ---
 
 ## What it does
-Opened as an overlay behind the status bar branch. Shows local branches grouped by `prefix/`: the current branch first (with a Pull button: `git pull --ff-only`, or `--rebase --autostash` when diverged, aborted on conflict; ↓N from the last fetch), then recently used ones, with a filter box and copy-name button. The current branch is skipped by ↑↓/↵. Clicking runs `git checkout` only; spaces, tabs and terminals stay put. After a switch it sets `branch.switched` so the header chip refreshes.
+Opened as an overlay behind the status bar branch. Shows local branches grouped by `prefix/`: the current branch first (with a Pull button: `git pull --ff-only`, or `--rebase --autostash` when diverged, aborted on conflict; ↓N from the last fetch), then recently used ones, the local tree, and at the bottom a "Remote" group: the 30 newest remote branches that have no local one (a click runs `git checkout <name>`, which makes a local branch tracking it), with a filter box and copy-name button. On open it runs `git fetch` in the background when this repo's last one from the picker is over 5 minutes old (a small spinner on Pull meanwhile), then reads the list and ↓N again. The current branch is skipped by ↑↓/↵. Clicking runs `git checkout` only; spaces, tabs and terminals stay put. After a switch it sets `branch.switched` so the header chip refreshes.
 
 ## Files
 - main.js: the picker (git calls, tree, recents, checkout, error display).
@@ -20,7 +20,7 @@ Opened as an overlay behind the status bar branch. Shows local branches grouped 
 - gpui-kit.d.ts, jsconfig.json: editor typings only.
 
 ## Settings and data
-- localStorage: `branch-picker.collapsed` (collapsed groups), `branch-picker.recents` (recent branches per repo, max 10). Old unprefixed `collapsed`/`recents` are read as a fallback.
+- localStorage: `branch-picker.collapsed` (collapsed groups), `branch-picker.recents` (recent branches per repo, max 10), `branch-picker.fetched` (time of the last background fetch per repo, last 50 repos). Old unprefixed `collapsed`/`recents` are read as a fallback.
 - No keychain or data files.
 
 ## Notes
