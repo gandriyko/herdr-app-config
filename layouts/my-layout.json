@@ -132,7 +132,7 @@
                       "type": "block",
                       "content": {
                         "mod": "files-copy",
-                        "props": { "exclude": ["__pycache__", "*.pyc"] }
+                        "props": { "exclude": ["__pycache__", "*.pyc", "*.pyo", "*.egg-info", "node_modules", ".venv", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".DS_Store"] }
                       }
                     },
                     {
