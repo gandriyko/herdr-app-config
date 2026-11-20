@@ -198,8 +198,9 @@ export default class History extends View {
   find(cx) {
     // AI mode searches only on Enter (ask); keep the folder current for the project line and the next question.
     if (this.scope === "ai") {
+      // reindex() set loading for the search it hands over to; none follows here, so the header spinner stops.
       const where = place();
-      if (where !== this.where) { this.where = where; cx.notify(); }
+      if (where !== this.where || this.loading) { this.where = where; this.loading = false; cx.notify(); }
       return;
     }
     const seq = ++this.seq, query = this.search.value().trim();
