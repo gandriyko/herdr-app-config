@@ -71,7 +71,38 @@ async function resume(s) {
   return true;
 }
 
-const ok = async (cmd, args) => (await exec(cmd, args, { timeout: 5000 }).catch(() => ({ code: 1 }))).code === 0;
+// ---- AI mode: Claude Code answers a question about past sessions through `human-history mcp` ----
+// No built-in tools (--tools ""), only these MCP tools (query: read-only SQL over the index, enforced by human-history),
+// and no user settings (--setting-sources ""): no hooks or CLAUDE.md, so a question costs cents, not dimes.
+const AI_TOOLS = ["mcp__human-history__search_sessions", "mcp__human-history__read_session", "mcp__human-history__query"];
+const AI_SESSIONS = 8; // sessions listed under an answer
+const AI_TIMEOUT = 600000;
+const aiPrompt = (q, where) => [
+  "Answer the user's question about their past conversations with coding agents, using the human-history tools.",
+  where ? `The user is working in ${where}. Search this project first (search_sessions with project_dir="${where}", ` +
+    "or sessions.repo / sessions.cwd in query); other projects only when the question asks for them." : null,
+  `Today is ${new Date().toISOString().slice(0, 10)}.`,
+  "Use query for what plain search can't do: FTS5 OR, NEAR, word-form prefixes (word*), counts, dates. " +
+    "Read a session with read_session before you quote it.",
+  "Answer briefly, in Markdown, in the language of the question. Name the sessions you rely on.",
+  `End with one line exactly: SESSIONS: <session_id> <session_id> ... (full ids, at most ${AI_SESSIONS}, most relevant first; ` +
+    "only \"SESSIONS:\" when none).",
+  "",
+  `Question: ${q}`,
+].filter((l) => l !== null).join("\n");
+// claude with stdin closed (else -p waits 3 s for piped input). Herdr started from the Dock has a short PATH, so
+// a claude that isn't on it is run through the interactive shell, as lib/ai.js does (fish keeps its own syntax).
+const NO_STDIN = 'exec "$0" "$@" </dev/null';
+const VIA_SHELL = `case "\${SHELL##*/}" in fish) exec "$SHELL" -ic '$argv </dev/null' "$0" "$@" ;; *) exec "\${SHELL:-/bin/sh}" -ic '"$0" "$@" </dev/null' "$0" "$@" ;; esac`;
+async function runClaude(args, cwd) {
+  const r = await exec("/bin/sh", ["-c", NO_STDIN, "claude", ...args], { cwd, timeout: AI_TIMEOUT });
+  if (r.code !== 127) return r;
+  const s = await exec("/bin/sh", ["-c", VIA_SHELL, "claude", ...args], { cwd, timeout: AI_TIMEOUT });
+  if (s.code === 127) throw new Error("`claude` isn't installed (not even in your interactive shell): AI mode runs Claude Code");
+  return s;
+}
+
+const ok = async (cmd, args) =>(await exec(cmd, args, { timeout: 5000 }).catch(() => ({ code: 1 }))).code === 0;
 
 // The active space's repo, its main worktree (the parent of the shared .git dir); else the active folder.
 async function mainCheckout() {
@@ -112,7 +143,12 @@ export default class History extends View {
     this.bin = BIN; this.found = false;
     this.results = []; this.error = null; this.loading = false; this.seq = 0;
     this.open = null; // { session, messages, shown, error }
-    this.scope = localStorage.getItem("scope") === "title" ? "title" : "both"; // human-history -s: titles only, or prompts + answers
+    // human-history -s: titles only, or prompts + answers; "ai": a question for Claude instead of a search.
+    const scope = localStorage.getItem("scope");
+    this.scope = scope === "title" || scope === "ai" ? scope : "both";
+    this.ai = null; this.aiSeq = 0; // { q, loading, answer, sessions, error, cost, turns } of the last question
+    this.question = InputState.new({ placeholder: "Ask about past sessions, press Enter" });
+    this.question.on("submit", (_e, cx) => this.ask(cx));
     this.where = undefined; // the folder the results were asked for; render re-asks when the space moves
     // Opened as a dialog with props().query (the jira mod passes a task key): start with that search.
     this.search = InputState.new({ value: String(props()?.query ?? ""), placeholder: "Search sessions" });
@@ -134,10 +170,12 @@ export default class History extends View {
   async locate() {
     const test = async (sh) => (await exec("/bin/sh", ["-c", sh]).catch(() => ({ code: 1 }))).code === 0;
     this.found = true;
-    if (await test(`command -v ${BIN}`)) { this.bin = BIN; return; }
+    // this.binPath: the full path, for the MCP server claude starts (its PATH may differ from ours).
+    const r = await exec("/bin/sh", ["-c", `command -v ${BIN}`]).catch(() => null);
+    if (r?.code === 0) { this.bin = BIN; this.binPath = r.stdout.trim(); return; }
     const path = home() + CARGO_BIN;
-    if (await test(`test -x '${path}'`)) { this.bin = path; return; }
-    this.bin = BIN; this.found = false;
+    if (await test(`test -x '${path}'`)) { this.bin = this.binPath = path; return; }
+    this.bin = this.binPath = BIN; this.found = false;
   }
 
   reindex(cx) {
@@ -158,6 +196,12 @@ export default class History extends View {
   }
 
   find(cx) {
+    // AI mode searches only on Enter (ask); keep the folder current for the project line and the next question.
+    if (this.scope === "ai") {
+      const where = place();
+      if (where !== this.where) { this.where = where; cx.notify(); }
+      return;
+    }
     const seq = ++this.seq, query = this.search.value().trim();
     // Never global: human-history -f repository takes the project (git repo, all its worktrees; else that folder)
     // from its working directory, the active space's folder. No folder: nothing to search.
@@ -183,6 +227,59 @@ export default class History extends View {
         if (seq === this.seq) { this.loading = false; cx.notify(); }
       }
     });
+  }
+
+  // AI mode: Claude answers the question with the human-history MCP tools; the sessions it names (last line
+  // "SESSIONS: <id> ...") are listed under the answer, opened like search results. A newer question wins.
+  // ponytail: an older claude still runs to its end (exec can't be cancelled); only its answer is dropped.
+  ask(cx) {
+    const q = this.question.value().trim(), where = place();
+    if (!q || this.missing) return;
+    const seq = ++this.aiSeq;
+    const ai = this.ai = { q, loading: true, answer: "", sessions: [], error: null };
+    this.open = null; cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const mcp = JSON.stringify({ mcpServers: { "human-history": { command: this.binPath || this.bin, args: ["mcp"] } } });
+        const r = await runClaude(["-p", aiPrompt(q, where), "--mcp-config", mcp, "--strict-mcp-config", "--tools", "",
+          "--setting-sources", "", "--output-format", "json", "--allowedTools", ...AI_TOOLS], where || home());
+        if (seq !== this.aiSeq) return;
+        let out;
+        try { out = JSON.parse(r.stdout); } catch { throw new Error((r.stderr || r.stdout || "claude gave no answer").trim().slice(-300)); }
+        if (out.is_error || r.code !== 0) throw new Error(String(out.result || r.stderr || "claude failed").trim().slice(0, 300));
+        const text = String(out.result ?? "").trim();
+        const m = text.match(/^\s*SESSIONS:(.*)$/m);
+        ai.answer = (m ? text.slice(0, m.index) : text).trim() || "(no answer)";
+        ai.cost = out.total_cost_usd; ai.turns = out.num_turns;
+        cx.notify();
+        const ids = [...new Set((m?.[1] ?? "").split(/[\s,]+/).filter((id) => SAFE_ID.test(id)))].slice(0, AI_SESSIONS);
+        for (const id of ids) {
+          // Only the session row is kept; the messages `show` returns are dropped here.
+          const s = await exec(this.bin, ["show", id, "--json"], { timeout: 30000 }).catch(() => null);
+          if (seq !== this.aiSeq) return;
+          try { if (s?.code === 0) ai.sessions.push(JSON.parse(s.stdout).session); } catch { /* a bad id: skip it */ }
+        }
+      } catch (e) {
+        if (seq === this.aiSeq) ai.error = String(e.message ?? e);
+      }
+      if (seq === this.aiSeq) { ai.loading = false; cx.notify(); }
+    });
+  }
+
+  aiView(t) {
+    const ai = this.ai;
+    if (!ai) return div().p(8).text_color(t.dim).child("Ask about past sessions in your own words and press Enter. "
+      + "Claude searches the history (full text and SQL over the index) and answers with the sessions it used.");
+    return v_flex().gap(6)
+      .child(div().px(4).pt(2).text_size(11).text_color(t.muted).child(ai.q))
+      .when(ai.loading && !ai.answer, (e) => e.child(h_flex().p(8).gap(6).items_center().text_color(t.dim)
+        .child(svg("mods/history/icons/refresh.svg").size(12).spin(900)).child("Claude is searching the history…")))
+      .when(Boolean(ai.error), (e) => e.child(div().p(8).text_color(t.ansi1).child(ai.error)))
+      .when(Boolean(ai.answer), (e) => e.child(div().p(8).rounded(8).bg(t.raised).border_1().border_color(t.border)
+        .child(TextView.markdown(`ai-answer-${this.aiSeq}`, ai.answer).selectable(true))))
+      .when(ai.cost != null, (e) => e.child(div().px(4).text_size(10).text_color(t.dim)
+        .child([`${ai.turns} turns`, `$${Number(ai.cost).toFixed(2)}`, ai.loading ? "loading sessions…" : null].filter(Boolean).join(" · "))))
+      .children(ai.sessions.map((s) => this.row(s, t)));
   }
 
   show(session, cx) {
@@ -218,7 +315,7 @@ export default class History extends View {
   // a failure flips it back. Then the list is asked again: favorites move to the top.
   toggleFavorite(s, cx) {
     const want = !s.favorite;
-    const set = (v) => { for (const x of [s, ...this.results, this.open?.session]) if (x?.key === s.key) x.favorite = v; };
+    const set = (v) => { for (const x of [s, ...this.results, ...(this.ai?.sessions ?? []), this.open?.session]) if (x?.key === s.key) x.favorite = v; };
     set(want); cx.notify();
     cx.spawn(async (cx) => {
       const r = await exec(this.bin, [want ? "favorite" : "unfavorite", s.session_id]).catch((e) => ({ code: -1, stderr: String(e.message ?? e) }));
@@ -304,9 +401,10 @@ export default class History extends View {
       .children(options.map(([value, icon, tip]) => div().id(`${key}-${value}`).w(26).h(20).flex().items_center().justify_center().cursor_pointer().tooltip(tip)
         .text_color(this[key] === value ? t.foreground : t.muted)
         .when(this[key] === value, (e) => e.bg(t.selected)).when(this[key] !== value, (e) => e.hover((s) => s.bg(t.hover)))
-        .on_click((_e, cx) => { if (this[key] === value) return; this[key] = value; localStorage.setItem(key, value); this.find(cx); })
+        .on_click((_e, cx) => { if (this[key] === value) return; this[key] = value; localStorage.setItem(key, value); this.find(cx); cx.notify(); })
         .child(svg(`mods/history/icons/${icon}.svg`).size(13))));
-    const empty = this.error ?? (!this.where ? "No project folder in this space"
+    const aiMode = this.scope === "ai";
+    const empty = aiMode ? null : this.error ?? (!this.where ? "No project folder in this space"
       : !this.results.length ? (this.loading ? "Loading…" : "No sessions found") : null);
     // props().embedded: a block inside another mod's dialog (jira's Start session), so no frame of its own, only a top rule.
     const embedded = Boolean(props()?.embedded);
@@ -315,7 +413,7 @@ export default class History extends View {
       .child(h_flex().h(42).flex_none().px(14).gap(6).items_center().border_b(1).border_color(t.border)
         .when(Boolean(open), (e) => e.child(iconButton("back", "back", "Back to results", (_e, cx) => { this.open = null; cx.notify(); })))
         .child(div().font_semibold().text_size(13).child("History"))
-        .when(!open, (e) => e.child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(String(this.results.length))))
+        .when(!open, (e) => e.child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(String(aiMode ? this.ai?.sessions.length ?? 0 : this.results.length))))
         .child(div().flex_1())
         .when(Boolean(open), (e) => e
           .child(iconButton("copy-id", "copy", "Copy the session id", (_e, cx) => cx.write_to_clipboard(open.session.session_id)))
@@ -330,10 +428,12 @@ export default class History extends View {
         .when(!open, (e) => e.child(iconButton("refresh", "refresh", "Re-index and search again", (_e, cx) => this.reindex(cx), this.loading))))
       .when(!open, (e) => e.child(h_flex().flex_none().px(8).pt(8).gap(6).items_center()
         .child(div().id("search").flex_1().min_w(0).h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
-          .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().text_size(12).text_color(t.foreground)))
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .child(Input.new(aiMode ? this.question : this.search).h_full().text_size(12).text_color(t.foreground)))
         .child(iconSegment("scope", [
           ["both", "messages", "Search prompts and answers"],
-          ["title", "title", "Search session titles only"]]))))
+          ["title", "title", "Search session titles only"],
+          ["ai", "sparkles", "Ask Claude about past sessions (Enter sends the question)"]]))))
       .when(!open && Boolean(this.where), (e) => e.child(div().flex_none().px(10).pt(6).truncate().text_size(11).text_color(t.dim)
         .child(this.where.replace(/^\/Users\/[^/]+/, "~"))))
       .child(div().flex_1().min_h(0).relative()
@@ -341,7 +441,8 @@ export default class History extends View {
           .when(Boolean(open), (e) => e.child(this.detail(t)))
           .when(!open && this.missing, (e) => e.child(this.installHint(t)))
           .when(!open && !this.missing && Boolean(empty), (e) => e.child(div().p(8).text_color(this.error ? t.ansi1 : t.dim).child(empty)))
-          .when(!open, (e) => e.children(this.results.map((s) => this.row(s, t)))))
+          .when(!open && !this.missing && aiMode, (e) => e.child(this.aiView(t)))
+          .when(!open && !aiMode, (e) => e.children(this.results.map((s) => this.row(s, t)))))
         .child(Scrollbar.vertical(open ? `session-${open.session.key}` : "results").absolute().inset_0()));
   }
 }

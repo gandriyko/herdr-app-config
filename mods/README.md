@@ -23,7 +23,7 @@ when one of them is absent.
 | [branch-picker](branch-picker/MOD.md) | Overlay that lists local git branches in a tree and checks one out |
 | [changes-copy](changes-copy/MOD.md) | Changes panel (clone of changes) with list/tree views, side-by-side diff tab and AI commit messages |
 | [files-copy](files-copy/MOD.md) | File tree (clone of files, dot files and Exclude masks behind a filter options button, git-ignored entries dimmed, a filter input that keeps the tree) that opens a file in its own tab or a pane beside the terminal (the last choice is remembered) to view or edit (⌘S saves), shows pictures (image files, SVG, images in rendered Markdown, which appears only once complete), ⌘F finds in the file (also in rendered Markdown); in Python files ⌘-hover underlines a name, ⌘-click jumps to its definition (centred) via jedi, ⌘[ / ⌘] go back and forward. |
-| [history](history/MOD.md) | Search and read past agent sessions (Claude, Codex, ...) via the human-history tool, with resume |
+| [history](history/MOD.md) | Search and read past agent sessions (Claude, Codex, ...) via the human-history tool, with resume and an AI mode that asks Claude about them |
 | [jira](jira/MOD.md) | Panel with my open Jira issues (grouped by sprint or status, sorted by date) and optional project backlogs |
 | [prs](prs/MOD.md) | Panel listing my (or all) open GitHub PRs for the focused repo, with detail, approve, create-PR and AI review/description. |
 | [status-copy](status-copy/MOD.md) | Status bar piece showing the active space's git branch, a keep-awake button and a command-palette hint. |
