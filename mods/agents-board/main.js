@@ -6,7 +6,7 @@ import { agents, terminals, panes, spaces, run, theme, settings, shared, setShar
 import { AskingTracker } from "./asking.js";
 import { isSelectMenu, parseOptions, parseQuestion, parseSuggestion, sameOptions } from "./reply.js";
 import { PR_FILTERS, duration, glyph, icon, prColor } from "./card.js";
-import { CHECKS_WORD, RECHECK, askAgain, branchKey, jiraProjects, newPrState, prMap, prOf, projectKey, refreshPrs } from "./prs.js";
+import { CHECKS_WORD, RECHECK, askAgain, branchKey, jiraProjects, namedKey, newPrState, prMap, prOf, refreshPrs } from "./prs.js";
 
 const ICONS = "mods/agents-board/";
 const SEND_TIMEOUT = 3000; // ms a reply `hc send` may wait for the agent's input line to clear (a normal send takes < 1 s)
@@ -584,9 +584,10 @@ export default class Board extends View {
     // Keys in the agent's texts count only for the saved projects; any when none is saved.
     const projects = jiraProjects(jiraSet);
     // The Jira key the agent names (title, tab, report), or null: its own task, even on a branch another agent made.
-    const textKey = (a) => {
+    // The branch's key when the agent mentions it anywhere (namedKey).
+    const textKey = (a, branch) => {
       const term = termBy.get(a.address), tb = tabBy.get(a.tab);
-      return projectKey([term?.title, a.title, tb?.named ? tb.name : null, a.name, term?.report].filter(Boolean).join("\n").toUpperCase(), projects);
+      return namedKey([term?.title, a.title, tb?.named ? tb.name : null, a.name, term?.report].filter(Boolean).join("\n").toUpperCase(), projects, branch);
     };
 
     // Where each agent is, for PRs; a remote one has no local gh. `key`: the Jira key it names, whose PR it gets.
@@ -601,7 +602,8 @@ export default class Board extends View {
       const p = paneBy.get(a.pane);
       const sp = spaceBy.get(a.space);
       const cwd = p?.cwd || sp?.folder;
-      if (cwd) placeOf.set(a.address, { cwd, branch: p?.branch ?? sp?.branch ?? null, key: textKey(a) });
+      const branch = p?.branch ?? sp?.branch ?? null;
+      if (cwd) placeOf.set(a.address, { cwd, branch, key: textKey(a, branch) });
     }
     const placesKey = JSON.stringify([...placeOf.values()]);
     if (placesKey !== this.placesKey) {
@@ -619,7 +621,7 @@ export default class Board extends View {
     const prFor = (a) => prOf(this.pr, placeOf.get(a.address));
     // The Jira pill (only with a site): the key the agent names, else its branch's (da-20457-fix -> DA-20457).
     const jiraFor = (a) =>
-      jiraSite ? textKey(a) ?? branchKey(placeOf.get(a.address)?.branch) : null;
+      jiraSite ? (placeOf.get(a.address)?.key ?? textKey(a)) ?? branchKey(placeOf.get(a.address)?.branch) : null;
 
     // One record per agent with everything the card shows.
     const info = (a) => {

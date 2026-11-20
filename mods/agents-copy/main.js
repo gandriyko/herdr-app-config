@@ -5,7 +5,7 @@ import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { AskingTracker } from "./asking.js";
 import { lastMessage } from "./last.js";
 import { PR_FILTERS, duration, glyph, icon, prColor } from "./card.js";
-import { CHECKS_WORD, RECHECK, askAgain, branchKey, jiraProjects, keysIn, newPrState, prMap, prOf, projectKey, refreshPrs } from "./prs.js";
+import { CHECKS_WORD, RECHECK, askAgain, branchKey, jiraProjects, keysIn, namedKey, newPrState, prMap, prOf, refreshPrs } from "./prs.js";
 import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, hc, openOverlay, closeOverlay, props, window, layout, exec, notify, playSound, settings } from "herdr";
 
 function find(node, id) {
@@ -519,15 +519,17 @@ export default class Agents extends View {
     const jiraSite = jiraSet?.site;
     // Keys in the agent's texts count only for the saved projects; any when none is saved.
     const projects = jiraProjects(jiraSet);
-    // The Jira key the agent names (its own task, even on a branch another agent made), or null.
-    const textKey = (a) => projectKey(textOf(a), projects);
+    // The Jira key the agent names (its own task, even on a branch another agent made), or null;
+    // the branch's key when the agent mentions it anywhere (namedKey).
+    const textKey = (a, branch) => namedKey(textOf(a), projects, branch);
     const placeOf = new Map();
     for (const a of list) {
       if (a.address.includes("/")) continue; // another machine: no local gh
       const p = paneBy.get(a.pane);
       const sp = spaceBy.get(a.space);
       const cwd = p?.cwd || sp?.folder;
-      if (cwd) placeOf.set(a.address, { cwd, branch: p?.branch ?? sp?.branch ?? null, key: textKey(a) });
+      const branch = p?.branch ?? sp?.branch ?? null;
+      if (cwd) placeOf.set(a.address, { cwd, branch, key: textKey(a, branch) });
     }
     this.places = [...placeOf.values()];
     const placesKey = JSON.stringify(this.places);
@@ -569,7 +571,7 @@ export default class Agents extends View {
       return pr && (p.key || !branchKey(p.branch) || keyFor(a)) ? pr : null;
     };
     // The Jira chip (only with a site): the key the agent names, else its branch's key.
-    const jiraFor = (a) => textKey(a) ?? keyFor(a);
+    const jiraFor = (a) => (placeOf.get(a.address)?.key ?? textKey(a)) ?? keyFor(a);
 
     // The filter, before grouping. A space that's gone counts as none.
     const fl = filterOf();
