@@ -11,7 +11,7 @@ commands: [overlay mod wb-ai (window and dialog, itself)]
 ---
 
 ## What it does
-A window to add, edit and delete AI models (provider claude, codex or local URL) and a per-use dialog (commit, review, mr) to choose model, language and prompt template for one project or for all projects (`*`). `ai.js` also runs the generation: spawns `claude -p`, `codex`, or POSTs to a local server, with a 10 minute exec timeout.
+A window to add, edit and delete AI models (provider claude, codex or local URL) and a per-use dialog (commit, review, mr) to choose model, language and prompt template for one project or for all projects (`*`). The `history` use (History AI, the history mod's AI mode) has only a model, for all projects. `ai.js` also runs the generation: spawns `claude -p`, `codex`, or POSTs to a local server, with a 10 minute exec timeout.
 
 ## Files
 - main.js: the models window and the project settings dialog.

@@ -1,6 +1,7 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, TextView, InputState, Input } from "gpui-base";
-import { exec, home, theme, spaces, panes, run, notify, props, closeOverlay } from "herdr";
+import { exec, home, theme, spaces, panes, run, notify, props, closeOverlay, openOverlay, shared } from "herdr";
+import { modelFor, runModel, describe, USE, PROJECT } from "./ai.js";
 
 // Past agent sessions (Claude, Codex, OpenCode, ...) from human-history (`human-history`, github.com/gandriyko/human-history).
 // Typing searches prompts and answers; an empty query lists the latest sessions. Results are limited to the
@@ -96,12 +97,39 @@ const aiPrompt = (q, where, repo) => [
 // a claude that isn't on it is run through the interactive shell, as lib/ai.js does (fish keeps its own syntax).
 const NO_STDIN = 'exec "$0" "$@" </dev/null';
 const VIA_SHELL = `case "\${SHELL##*/}" in fish) exec "$SHELL" -ic '$argv </dev/null' "$0" "$@" ;; *) exec "\${SHELL:-/bin/sh}" -ic '"$0" "$@" </dev/null' "$0" "$@" ;; esac`;
-async function runClaude(args, cwd) {
-  const r = await exec("/bin/sh", ["-c", NO_STDIN, "claude", ...args], { cwd, timeout: AI_TIMEOUT });
+async function runClaude(cmd, args, cwd) {
+  const r = await exec("/bin/sh", ["-c", NO_STDIN, cmd, ...args], { cwd, timeout: AI_TIMEOUT });
   if (r.code !== 127) return r;
-  const s = await exec("/bin/sh", ["-c", VIA_SHELL, "claude", ...args], { cwd, timeout: AI_TIMEOUT });
-  if (s.code === 127) throw new Error("`claude` isn't installed (not even in your interactive shell): AI mode runs Claude Code");
+  const s = await exec("/bin/sh", ["-c", VIA_SHELL, cmd, ...args], { cwd, timeout: AI_TIMEOUT });
+  if (s.code === 127) throw new Error(`\`${cmd}\` isn't installed (not even in your interactive shell): AI mode runs Claude Code`);
   return s;
+}
+
+// The model for AI mode: "History AI" in the AI models window (wb-ai), shared through ai.js.
+// contract: wb.ai.use / wb.ai.project / wb.ai.models are written by wb-ai; all optional. Nothing picked for
+// history (or the keys missing): Claude haiku, not modelFor's first-model fallback (often Opus, ~30x the cost).
+const BUILTIN = { id: "builtin", name: "Claude haiku", provider: "claude", command: "claude", model: "haiku" };
+const aiModel = () => ((shared(USE) ?? {}).history || shared(PROJECT)?.["*"]?.history?.model ? modelFor("history", "*") : null) ?? BUILTIN;
+const openAiSettings = () => openOverlay({ mod: "wb-ai", kind: "dialog", width: 560, props: { use: "history", project: "*", projectName: "All projects" } });
+// A TOML basic string for codex -c (JSON escapes are valid TOML ones for paths).
+const toml = (s) => JSON.stringify(String(s));
+
+// One question to the model, with only the human-history MCP server. → { text, cost?, turns? }
+async function askModel(m, prompt, bin, cwd) {
+  if (m.provider === "codex") {
+    // codex: -c replaces the mcp_servers table, so the person's own servers stay out; read-only sandbox (ai.js).
+    // ponytail: no cost or turn count from codex (-o keeps only the final message).
+    const text = await runModel(m, prompt, { cwd, extra: ["-c", `mcp_servers={${toml("human-history")}={command=${toml(bin)},args=["mcp"]}}`] });
+    return { text };
+  }
+  if (m.provider !== "claude") throw new Error(`${m.name}: History AI needs a CLI that calls MCP tools (Claude or Codex), not a ${m.provider} model`);
+  const mcp = JSON.stringify({ mcpServers: { "human-history": { command: bin, args: ["mcp"] } } });
+  const r = await runClaude(m.command || "claude", ["-p", prompt, ...(m.model ? ["--model", m.model] : []), "--mcp-config", mcp, "--strict-mcp-config", "--tools", "",
+    "--setting-sources", "", "--output-format", "json", "--allowedTools", ...AI_TOOLS], cwd);
+  let out;
+  try { out = JSON.parse(r.stdout); } catch { throw new Error((r.stderr || r.stdout || "claude gave no answer").trim().slice(-300)); }
+  if (out.is_error || r.code !== 0) throw new Error(String(out.result || r.stderr || "claude failed").trim().slice(0, 300));
+  return { text: String(out.result ?? ""), cost: out.total_cost_usd, turns: out.num_turns };
 }
 
 const ok = async (cmd, args) =>(await exec(cmd, args, { timeout: 5000 }).catch(() => ({ code: 1 }))).code === 0;
@@ -260,7 +288,7 @@ export default class History extends View {
     const q = this.question.value().trim(), where = place();
     if (!q || this.missing) return;
     const seq = ++this.aiSeq;
-    const ai = this.ai = { q, loading: true, answer: "", sessions: [], error: null };
+    const ai = this.ai = { q, model: aiModel(), loading: true, answer: "", sessions: [], error: null };
     this.open = null; cx.notify();
     cx.spawn(async (cx) => {
       try {
@@ -268,17 +296,12 @@ export default class History extends View {
         // below even if Claude names them, so the answer's rows (and Resume) stay in this project.
         const repo = where ? await repoOf(where) : "";
         const mine = (s) => !where || (repo ? s.repo === repo : s.cwd === where || s.cwd?.startsWith(where + "/"));
-        const mcp = JSON.stringify({ mcpServers: { "human-history": { command: this.binPath || this.bin, args: ["mcp"] } } });
-        const r = await runClaude(["-p", aiPrompt(q, where, repo), "--model", "haiku", "--mcp-config", mcp, "--strict-mcp-config", "--tools", "",
-          "--setting-sources", "", "--output-format", "json", "--allowedTools", ...AI_TOOLS], where || home());
+        const out = await askModel(ai.model, aiPrompt(q, where, repo), this.binPath || this.bin, where || home());
         if (seq !== this.aiSeq) return;
-        let out;
-        try { out = JSON.parse(r.stdout); } catch { throw new Error((r.stderr || r.stdout || "claude gave no answer").trim().slice(-300)); }
-        if (out.is_error || r.code !== 0) throw new Error(String(out.result || r.stderr || "claude failed").trim().slice(0, 300));
-        const text = String(out.result ?? "").trim();
+        const text = out.text.trim();
         const m = text.match(/^\s*SESSIONS:(.*)$/m);
         ai.answer = (m ? text.slice(0, m.index) : text).trim() || "(no answer)";
-        ai.cost = out.total_cost_usd; ai.turns = out.num_turns;
+        ai.cost = out.cost; ai.turns = out.turns;
         cx.notify();
         const ids = [...new Set((m?.[1] ?? "").split(/[\s,]+/).map((id) => id.replace(/^[a-z]+:/, "")) // haiku sometimes writes "claude:<id>"
           .filter((id) => SAFE_ID.test(id)))].slice(0, AI_SESSIONS);
@@ -296,13 +319,18 @@ export default class History extends View {
   }
 
   aiView(t) {
-    const ai = this.ai;
-    if (!ai) return div().p(8).text_color(t.dim).child("Ask about past sessions in your own words and press Enter. "
-      + "Claude searches the history (full text and SQL over the index) and answers with the sessions it used.");
+    const ai = this.ai, m = ai?.model ?? aiModel();
+    // The model in use; a click opens its pick ("History AI" in the AI models window of the wb-ai mod).
+    const modelLine = div().id("ai-model").px(4).text_size(10).text_color(t.dim).cursor_pointer().hover((s) => s.text_color(t.foreground))
+      .tooltip("Pick the model for History AI (wb-ai mod)").on_click(() => openAiSettings())
+      .child(`${m.name} · ${describe(m)} ⚙`);
+    if (!ai) return v_flex().gap(4).child(modelLine).child(div().p(8).text_color(t.dim).child("Ask about past sessions in your own words and press Enter. "
+      + "The model searches the history (full text and SQL over the index) and answers with the sessions it used."));
     return v_flex().gap(6)
       .child(div().px(4).pt(2).text_size(11).text_color(t.muted).child(ai.q))
+      .child(modelLine)
       .when(ai.loading && !ai.answer, (e) => e.child(h_flex().p(8).gap(6).items_center().text_color(t.dim)
-        .child(svg("mods/history/icons/refresh.svg").size(12).spin(900)).child("Claude is searching the history…")))
+        .child(svg("mods/history/icons/refresh.svg").size(12).spin(900)).child(`${m.name} is searching the history…`)))
       .when(Boolean(ai.error), (e) => e.child(div().p(8).text_color(t.ansi1).child(ai.error)))
       .when(Boolean(ai.answer), (e) => e.child(div().p(8).rounded(8).bg(t.raised).border_1().border_color(t.border)
         .child(TextView.markdown(`ai-answer-${this.aiSeq}`, ai.answer).selectable(true))))

@@ -7,7 +7,9 @@ import { v_flex, h_flex, InputState, Input, TextareaState, Textarea } from "gpui
 import { props, closeOverlay, openOverlay, theme } from "herdr";
 import { migrate, models, settingsFor, setSetting, setUse, saveModel, deleteModel, describe, localModels, DEFAULTS, LANGUAGES, PROVIDERS, SUGGEST, DEFAULT_URL } from "./ai.js";
 
-const USE_TITLE = { commit: "Commit message", review: "AI review", mr: "MR description" };
+// history: the history mod's AI mode; only a model (it answers in the question's language, no template).
+const USE_TITLE = { commit: "Commit message", review: "AI review", mr: "MR description", history: "History AI" };
+const MODEL_ONLY = new Set(["history"]);
 const openModels = () => openOverlay({ mod: "wb-ai", kind: "window", key: "wb-ai", width: 580 });
 // The "*" settings: what every project uses where it has none of its own.
 const openDefaults = (use) => openOverlay({ mod: "wb-ai", kind: "dialog", width: 560, props: { use, project: "*", projectName: "All projects" } });
@@ -111,12 +113,13 @@ export default class AiModels extends View {
               div().flex_1().truncate().text_size(12).child(m.name), div().text_size(11).text_color(t.dim).child(describe(m)))))
             .child(div().h(1).my(2).bg(t.border))
             .child(row("pick-models", false, () => { this.drop = false; openModels(); }, div().text_size(12).child("AI models…")))))))
-      .child(h_flex().gap(10).items_start().child(label("Language").mt(3))
+      .when(MODEL_ONLY.has(use), (e) => e.child(div().text_size(11).text_color(t.dim).child("Claude or Codex: it calls the human-history MCP tools, which a local model can't.")))
+      .when(!MODEL_ONLY.has(use), (e) => e.child(h_flex().gap(10).items_start().child(label("Language").mt(3))
         .child(v_flex().flex_1().min_w(0).gap(6)
           .child(h_flex().flex_wrap().gap(4).children(LANGUAGES.map((l) => chip(`lang-${l}`, l, s.language === l, (_e, cx) => { this.langI.set_value(""); setSetting(use, project, { language: l }); cx.notify(); }))))
           .child(div().id("lang-input").on_mouse_down("left", stop)
-            .child(Input.new(this.langI).w_full().h(28).px(10).rounded(7).border_1().border_color(custom ? t.accent : t.border).bg(t.background).text_size(12).text_color(t.foreground)))))
-      .child(h_flex().gap(10).items_start().child(label("Template").mt(6))
+            .child(Input.new(this.langI).w_full().h(28).px(10).rounded(7).border_1().border_color(custom ? t.accent : t.border).bg(t.background).text_size(12).text_color(t.foreground))))))
+      .when(!MODEL_ONLY.has(use), (e) => e.child(h_flex().gap(10).items_start().child(label("Template").mt(6))
         .child(v_flex().flex_1().min_w(0).gap(4)
           .child(div().id("cg-template").h(130).px(10).py(6).rounded(7).border_1().border_color(t.border).bg(t.background).cursor_text()
             .on_mouse_down("left", stop).child(Textarea.new(this.template).w_full().h(116).text_size(12).text_color(t.foreground)))
@@ -129,7 +132,7 @@ export default class AiModels extends View {
               .child(div().text_color(t.muted).child("No blank lines"))))
             .child(div().flex_1())
             .child(div().id("cg-tpl-reset").text_color(t.dim).cursor_pointer().hover((x) => x.text_color(t.foreground)).on_mouse_down("left", stop)
-              .on_click((_e, cx) => { setSetting(use, project, { template: "" }); this.template.set_value(inherited(use, project)); cx.notify(); }).child("Reset")))));
+              .on_click((_e, cx) => { setSetting(use, project, { template: "" }); this.template.set_value(inherited(use, project)); cx.notify(); }).child("Reset"))))));
   }
 
   render(cx) {

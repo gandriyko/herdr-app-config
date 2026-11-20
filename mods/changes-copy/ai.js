@@ -15,7 +15,8 @@
 import { exec, readTextFile, shared, setShared } from "herdr";
 
 export const MODELS = "wb.ai.models", USE = "wb.ai.use";
-export const USES = [["commit", "Commit messages"], ["review", "PR review"], ["mr", "MR description"]];
+// history: the history mod's AI mode (claude or codex only: it needs MCP tools; no template or language).
+export const USES = [["commit", "Commit messages"], ["review", "PR review"], ["mr", "MR description"], ["history", "History AI"]];
 export const PROJECT = "wb.ai.project";
 export const DEFAULTS = {
   commit: "A first line of up to 72 characters in imperative mood. Then, only when they add something, one blank line and short bullet details (\"- ...\"), one per line. No other blank lines.",
@@ -171,7 +172,8 @@ async function run(cmd, args, { cwd, on }) {
 }
 
 // Runs a model on a prompt and returns its answer. `cwd` / `on`: where a CLI runs (the repo).
-export async function runModel(m, prompt, { cwd, on } = {}) {
+// `extra`: more CLI args before the prompt (e.g. codex `-c mcp_servers=...`); ignored for local.
+export async function runModel(m, prompt, { cwd, on, extra = [] } = {}) {
   if (!m) throw new Error("No AI model: add one in AI models settings");
   if (m.provider === "local") {
     const base = String(m.url || "").replace(/\/+$/, "");
@@ -185,14 +187,14 @@ export async function runModel(m, prompt, { cwd, on } = {}) {
   if (m.provider === "codex") {
     // The final answer goes to a file (-o): codex's stdout also carries its progress.
     const out = `/tmp/herdr-codex-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.md`;
-    const args = [...split(m.args || "exec"), ...(m.model ? ["-m", m.model] : []), "--skip-git-repo-check", "-s", "read-only", "-o", out, prompt];
+    const args = [...split(m.args || "exec"), ...(m.model ? ["-m", m.model] : []), "--skip-git-repo-check", "-s", "read-only", "-o", out, ...extra, prompt];
     const r = await run(m.command || "codex", args, { cwd, on });
     const text = await readTextFile(out, { on }).catch(() => null);
     exec("rm", ["-f", out], { on }).catch(() => {});
     if (r.code !== 0 && !text) throw new Error((r.stderr || r.stdout || "codex failed").trim().slice(-300));
     return clean(text ?? r.stdout);
   }
-  const r = await run(m.command || "claude", [...split(m.args ?? "-p"), ...(m.model ? ["--model", m.model] : []), prompt], { cwd, on });
+  const r = await run(m.command || "claude", [...split(m.args ?? "-p"), ...(m.model ? ["--model", m.model] : []), ...extra, prompt], { cwd, on });
   if (r.code !== 0) throw new Error((r.stderr || r.stdout || "no output").trim().slice(0, 300));
   return clean(r.stdout);
 }

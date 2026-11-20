@@ -4,19 +4,20 @@ summary: Search and read past agent sessions (Claude, Codex, ...) via the human-
 source: https://github.com/gandriyko/herdr-app-config/tree/main/mods/history
 install: copy the folder mods/history into ~/.config/herdr-app/mods/history
 place: none
-needs: [human-history (with `mcp` and its `query` tool for AI mode), claude (AI mode only), sh, env, open, git, test]
+needs: [human-history (with `mcp` and its `query` tool for AI mode), claude or codex (AI mode only), sh, env, open, git, test, wb-ai mod (optional, to pick the AI mode model)]
 shared_keys: []
-reads_keys: []
+reads_keys: [wb.ai.models, wb.ai.use, wb.ai.project (via ai.js, written by wb-ai; optional)]
 commands: [tab.new (resume a session in a new tab)]
 ---
 
 ## What it does
 Lists the latest agent sessions of the active space's project, or searches prompts and answers while typing. A click opens the conversation as Markdown (paged), with favorite, copy session id and Resume (new tab named after the session title, running the agent's resume command). Props for opening it as an overlay or a block inside another mod's dialog (the jira mod's Start session): `query` (starts with that search), `folder` (searches that folder's project instead of the active space's), `embedded` (no frame of its own, only a top rule). In an overlay, Resume closes it. If `human-history` is missing it shows an install hint with a link to the repository.
 
-AI mode (the sparkles button next to the search scope): a separate box takes a question in plain words; Enter runs `claude -p --model haiku` with only the `human-history mcp` server (`--strict-mcp-config`), no built-in tools (`--tools ""`), no user settings (`--setting-sources ""`) and the tools `search_sessions`, `read_session` and `query` (read-only SQL over the index, enforced by human-history). The prompt names the active project folder and its shared git dir and tells Claude to search only that project; sessions of other projects that Claude still names are dropped from the rows (matched by `sessions.repo`, else the folder). The prompt also gives today's date, asks for a short Markdown answer in the question's language and a last line `SESSIONS: <id> ...`. The panel shows the question, the answer, turns and cost, and up to 8 sessions it named (rows like search results: open, favorite, resume).
+AI mode (the sparkles button next to the search scope): a separate box takes a question in plain words; Enter runs the "History AI" model from the AI models window (wb-ai; the model line above the answer opens it). Nothing picked or wb-ai missing: Claude haiku. Claude or Codex only (local models can't call MCP tools). Codex runs `codex exec` read-only with `-c mcp_servers={human-history=...}` (only that server) and shows no cost. Claude runs `claude -p --model <model>` with only the `human-history mcp` server (`--strict-mcp-config`), no built-in tools (`--tools ""`), no user settings (`--setting-sources ""`) and the tools `search_sessions`, `read_session` and `query` (read-only SQL over the index, enforced by human-history). The prompt names the active project folder and its shared git dir and tells Claude to search only that project; sessions of other projects that Claude still names are dropped from the rows (matched by `sessions.repo`, else the folder). The prompt also gives today's date, asks for a short Markdown answer in the question's language and a last line `SESSIONS: <id> ...`. The panel shows the question, the answer, turns and cost, and up to 8 sessions it named (rows like search results: open, favorite, resume).
 
 ## Files
 - main.js: the whole mod (human-history calls, search, viewer, resume table).
+- ai.js: copy of lib/ai.js (model registry, codex runner); edit lib/ai.js, then scripts/sync-lib.
 - icons/*.svg: back, copy, messages, refresh, sparkles (AI mode), star, star-outline, title icons.
 - icons/agents/*.svg: agent logos shown in each list row (claude, codex, opencode, copilot, pi, hermes; agent for any other), copied from Herdr's shipped `icons/`.
 
