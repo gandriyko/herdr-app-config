@@ -1,9 +1,10 @@
 // Agents in grouped or priority views; parents take their most urgent sub-agent's place.
 
-import { View, div, image, svg } from "gpui-kit";
+import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { AskingTracker } from "./asking.js";
 import { lastMessage } from "./last.js";
+import { PR_FILTERS, duration, glyph, icon, prColor } from "./card.js";
 import { CHECKS_WORD, RECHECK, askAgain, branchKey, jiraProjects, keysIn, newPrState, prMap, prOf, projectKey, refreshPrs } from "./prs.js";
 import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, hc, openOverlay, closeOverlay, props, window, layout, exec, notify, playSound, settings } from "herdr";
 
@@ -68,12 +69,6 @@ const remindMinutes = () => {
   const m = shared("agents-copy.remind");
   return REMINDS.includes(m) ? m : 5;
 };
-const PR_FILTERS = [
-  { id: "any", label: "Any" },
-  { id: "with", label: "Has PR" },
-  { id: "failing", label: "Checks failing" },
-  { id: "none", label: "No PR" },
-];
 const filterOf = () => {
   const f = shared("agents-copy.filter");
   return { space: typeof f?.space === "string" ? f.space : null, pr: PR_FILTERS.some((x) => x.id === f?.pr) ? f.pr : "any" };
@@ -86,29 +81,6 @@ const SECTION_STATUS = { 4: "blocked", 3: "done", 2: "working" };
 const sectionOf = (r) => (r >= 4 ? 4 : r === 2 ? 2 : 3);
 // The report is text, or (from some programs) an object with the text in it.
 const reportText = (s) => (typeof s === "string" ? s : "").replace(/^[^\p{L}\p{N}~/]+/u, "").trim();
-
-function duration(ms) {
-  const m = Math.floor(ms / 60000);
-  if (m < 1) return "<1m";
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  return h < 24 ? `${h}h` : `${Math.floor(h / 24)}d`;
-}
-
-// The agent's icon from the app's program table: a one-color glyph or a picture.
-function icon(p, size, color) {
-  if (!p?.icon) return null;
-  return p.tint ? svg(p.icon).size(size).flex_none().text_color(color) : image(p.icon).w(size).h(size).flex_none();
-}
-
-// The card's status glyph: spinner (working), pulsing "?" (blocked), dot (unseen done), nothing (idle).
-function glyph(t, status, spinner) {
-  if (status === "working") return svg(spinner).size(13).flex_none().text_color(t.working).spin(900);
-  if (status === "blocked") return div().flex_none().size(16).rounded(8).bg(t.blocked).text_color(t.background).text_size(11).font_bold().flex().items_center().justify_center().loop("opacity", { from: 1, to: 0.55, period: 1400 }).child("?");
-  // Unread: a check in an accent circle (same size as the "?"), the only mark that sets it apart from a seen card.
-  if (status === "done") return div().flex_none().size(16).rounded(8).bg(t.accent).text_color(t.background).flex().items_center().justify_center().tooltip("Finished, not seen yet").child(svg("mods/agents-copy/check.svg").size(11));
-  return null;
-}
 
 // The board is a separate mod that may be absent: say so instead of failing silently.
 function openBoard() {
@@ -701,7 +673,7 @@ export default class Agents extends View {
       if (detail.get(a.address) == null && seen[`${a.space_name}\u0000`] > 1) detail.set(a.address, label(a));
     }
 
-    const PR_COLOR = { fail: t.blocked, pass: t.done, pending: t.working, none: t.muted };
+    const PR_COLOR = prColor(t);
     // A small pill in line 1 (PR, Jira): tinted by color, a click runs act without reaching the card.
     const chip = (id, color, tip, act) => h_flex()
       .id(id)
@@ -810,7 +782,7 @@ export default class Agents extends View {
       if (!lead) { lead = tabTxt ?? (prog || label(a)); if (tabTxt) tabTxt = null; }
       const pr = prFor(a);
       const jiraKey = jiraSite ? jiraFor(a) : null;
-      const g = glyph(t, a.status, "mods/agents-copy/spinner.svg");
+      const g = glyph(t, a.status, "mods/agents-copy/");
       const open = this.expanded === a.address ? this.lastMsg : null;
       const canPeek = !a.address.includes("/"); // the screen of another machine's agent isn't read
       const eye = div()

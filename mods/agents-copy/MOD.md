@@ -28,6 +28,7 @@ Lists agents like the shipped `agents` panel, in Priority or Grouped by space, w
 ## Files
 - main.js: the view, popups, reminders.
 - prs.js: gh PR lookups and Jira key helpers (state is kept by the view instance). Copy of `lib/prs.js`; edit it there and run `scripts/sync-lib`.
+- card.js: card pieces shared with agents-board (time in state, program icon, status glyph, PR colours, PR filter choices). Copy of `lib/card.js`; edit it there and run `scripts/sync-lib`.
 - asking.js: the asking detector and its read queue. Copy of `lib/asking.js`; edit it there and run `scripts/sync-lib`.
 - last.js: pure parser of the last message on a screen, for the eye button.
 - check.svg, eye.svg, search.svg, columns.svg, chevron-down.svg, chevron-right.svg, clock.svg, filter.svg, layers.svg, pin.svg, pin-off.svg, spinner.svg, x.svg: icons.

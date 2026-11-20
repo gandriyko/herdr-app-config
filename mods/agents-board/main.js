@@ -1,20 +1,15 @@
 // Agents as a kanban: Needs you, Working, Done (unseen).
 
-import { View, div, svg, image } from "gpui-kit";
+import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle, TextView } from "gpui-base";
 import { agents, terminals, panes, spaces, run, theme, settings, shared, setShared, closeOverlay, props, exec, hc } from "herdr";
 import { AskingTracker } from "./asking.js";
 import { isSelectMenu, parseOptions, parseQuestion, parseSuggestion, sameOptions } from "./reply.js";
+import { PR_FILTERS, duration, glyph, icon, prColor } from "./card.js";
 import { CHECKS_WORD, RECHECK, askAgain, branchKey, jiraProjects, newPrState, prMap, prOf, projectKey, refreshPrs } from "./prs.js";
 
 const ICONS = "mods/agents-board/";
 const SEND_TIMEOUT = 3000; // ms a reply `hc send` may wait for the agent's input line to clear (a normal send takes < 1 s)
-const PR_FILTERS = [
-  { id: "any", label: "Any" },
-  { id: "with", label: "Has PR" },
-  { id: "failing", label: "Failing" },
-  { id: "none", label: "No PR" },
-];
 const COLS = [
   { key: "blocked", title: "Needs you", color: "blocked" },
   { key: "working", title: "Working", color: "working" },
@@ -38,29 +33,6 @@ const filterOf = () => {
 // The report is text, or (from some programs) an object with the text in it.
 const textOf = (s) => (typeof s === "string" ? s : (s && (s.text ?? s.summary ?? s.message ?? s.title ?? s.status)) || "");
 const clean = (s) => String(textOf(s)).replace(/^[^\p{L}\p{N}~/]+/u, "").trim();
-
-function duration(ms) {
-  const m = Math.floor(ms / 60000);
-  if (m < 1) return "<1m";
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  return h < 24 ? `${h}h` : `${Math.floor(h / 24)}d`;
-}
-
-// The agent's icon from the app's program table: a one-color glyph or a picture.
-function icon(p, size, color) {
-  if (!p?.icon) return null;
-  return p.tint ? svg(p.icon).size(size).flex_none().text_color(color) : image(p.icon).w(size).h(size).flex_none();
-}
-
-// The card's status glyph: spinner (working), pulsing "?" (blocked), dot (unseen done), nothing (idle).
-function glyph(t, status) {
-  if (status === "working") return svg(ICONS + "spinner.svg").size(13).flex_none().text_color(t.working).spin(900);
-  if (status === "blocked") return div().flex_none().size(16).rounded(8).bg(t.blocked).text_color(t.background).text_size(11).font_bold().flex().items_center().justify_center().loop("opacity", { from: 1, to: 0.55, period: 1400 }).child("?");
-  // Unread: a check in an accent circle (same size as the "?"), the only mark that sets it apart from a seen card.
-  if (status === "done") return div().flex_none().size(16).rounded(8).bg(t.accent).text_color(t.background).flex().items_center().justify_center().tooltip("Finished, not seen yet").child(svg(ICONS + "check.svg").size(11));
-  return null;
-}
 
 // The screen tail for programs without a reply marker: blank runs collapsed, last 30 lines.
 function tailLines(text) {
@@ -828,7 +800,7 @@ export default class Board extends View {
     }
     const setFilter = (patch) => setShared("agents-board.filter", { space: flSpace, pr: fl.pr, ...patch });
 
-    const PR_COLOR = { fail: t.blocked, pass: t.done, pending: t.working, none: t.muted };
+    const PR_COLOR = prColor(t);
     // A small pill in line 1 (PR, Jira): tinted by color, a click runs act without reaching the card.
     const pill = (id, color, tip, act) => h_flex()
       .id(id)
@@ -1028,7 +1000,7 @@ export default class Board extends View {
       const blocked = a.status === "blocked";
       const on = this.sel === a.address;
       const pic = icon(a.program, 16, t.foreground);
-      const g = glyph(t, a.status);
+      const g = glyph(t, a.status, ICONS);
       return v_flex()
         .id(`card-${a.address}`)
         .flex_none()
@@ -1295,7 +1267,9 @@ export default class Board extends View {
                       h_flex()
                         .id(`pf-${f.id}`)
                         .h_full()
-                        .flex_1()
+                        .flex_auto() // sized by its label, so "Checks failing" fits the 260 px control
+                        .px(6)
+                        .whitespace_nowrap()
                         .items_center()
                         .justify_center()
                         .rounded(6)

@@ -45,6 +45,7 @@ in `lib/` and copied into each mod that has a file of the same name. Edit `lib/<
 | `asking.js` | `agents-copy`, `agents-board` |
 | `prs.js` | `agents-copy`, `agents-board` |
 | `find.js` | `files-copy`, `wb-diff` |
+| `card.js` | `agents-copy`, `agents-board` |
 
 ## Skills
 
