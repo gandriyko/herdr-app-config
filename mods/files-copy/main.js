@@ -39,6 +39,8 @@ const wordAt = (text, offset) => {
 const REQUEST = "files-copy.open"; // { space, root, on, path, ts }: written by the panel, read by the tab
 const PLACE = "files-copy.place"; // "tab" | "pane": the viewer's last tab ⇄ pane move, used for the next new viewer
 const EXCLUDE = "files-copy.exclude"; // [glob]: names hidden in the tree and the filter
+// Dot names hidden unless "Show hidden files" is on; .gitignore is always shown.
+const dotHidden = name => name.startsWith(".") && name !== ".gitignore";
 
 // Images. The app draws pictures only from its own folder, so each one is copied (a local file, named by
 // path and mtime) or downloaded (a web URL, kept by URL) into IMG_DIR and drawn from there; the newest 300 stay.
@@ -384,7 +386,7 @@ export default class Files extends View {
       if (!words.every(w => low.includes(w))) continue;
       const parts = path.split("/");
       // Hidden files off: a dot part still shows when the query names it (".env" or "env" finds .env.local; "build" doesn't open .github/).
-      if (!this.hidden && parts.some(p => p.startsWith(".") && !words.some(w => p.toLowerCase().includes(w)))) continue;
+      if (!this.hidden && parts.some(p => dotHidden(p) && !words.some(w => p.toLowerCase().includes(w)))) continue;
       if (parts.some(p => this.excluded(p))) continue;
       if (++count > MATCHES) { limited = true; break; }
       let node = root;
@@ -467,7 +469,7 @@ export default class Files extends View {
     if (out.length >= TOTAL || depth > 40) return out;
     for (const entry of this.entries.get(prefix) ?? []) {
       if (out.length >= TOTAL) break;
-      if (!this.hidden && entry.name.startsWith(".")) continue;
+      if (!this.hidden && dotHidden(entry.name)) continue;
       if (this.excluded(entry.name)) continue;
       const path = prefix ? `${prefix}/${entry.name}` : entry.name, open = this.folders.has(path);
       out.push(this.row(path, entry.name, entry.dir, open, depth, t));

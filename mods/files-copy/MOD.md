@@ -12,7 +12,7 @@ commands: [tab.new (files-copy with props), tab.select, tab.rename, tab.close, p
 
 ## What it does
 In a side panel: a lazy file tree for the focused pane's folder (500 entries per folder, 5,000 total) with
-git marks. Files and folders whose names start with a dot are hidden; the options (sliders) button right of the filter
+git marks. Files and folders whose names start with a dot are hidden (except `.gitignore`); the options (sliders) button right of the filter
 field opens a section under the field with the Exclude masks (below) and "Show hidden files". Git-ignored files and folders
 (and everything inside an ignored folder) are drawn dimmed, from `git ls-files -oi --exclude-standard --directory`
 asked with each refresh. Cloned from the shipped `files` mod.
