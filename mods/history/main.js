@@ -65,7 +65,8 @@ async function resume(s) {
   // Named after the session: an unnamed tab shows its number until the agent sets a terminal title, if ever.
   const t = (s.title ?? "").trim().replace(/\s+/g, " ");
   const name = t.length > 40 ? t.slice(0, 40).replace(/\s+\S*$/, "") + "…" : t;
-  run("tab.new", { argv, ...(name ? { name } : {}), ...(folder ? { folder } : {}) });
+  const space = await spaceFor(s);
+  run("tab.new", { argv, ...(name ? { name } : {}), ...(folder ? { folder } : {}), ...(space ? { space } : {}) });
   // Opened as a dialog (e.g. the jira mod's "Find in history"): the new tab is what the user wanted, so get out of its way.
   if (props()?.overlay) closeOverlay(props().overlay);
   return true;
@@ -77,10 +78,11 @@ async function resume(s) {
 const AI_TOOLS = ["mcp__human-history__search_sessions", "mcp__human-history__read_session", "mcp__human-history__query"];
 const AI_SESSIONS = 8; // sessions listed under an answer
 const AI_TIMEOUT = 600000;
-const aiPrompt = (q, where) => [
+const aiPrompt = (q, where, repo) => [
   "Answer the user's question about their past conversations with coding agents, using the human-history tools.",
-  where ? `The user is working in ${where}. Search this project first (search_sessions with project_dir="${where}", ` +
-    "or sessions.repo / sessions.cwd in query); other projects only when the question asks for them." : null,
+  where ? `The user is working in ${where}. Search ONLY this project: search_sessions with project_dir="${where}"` +
+    (repo ? `, and in query always filter sessions.repo = '${repo.replace(/'/g, "''")}'` : `, and in query always filter sessions.cwd under it`) +
+    ". Never use or name sessions of other projects." : null,
   `Today is ${new Date().toISOString().slice(0, 10)}.`,
   "Use query for what plain search can't do: FTS5 OR, NEAR, word-form prefixes (word*), counts, dates. " +
     "Read a session with read_session before you quote it.",
@@ -104,13 +106,34 @@ async function runClaude(args, cwd) {
 
 const ok = async (cmd, args) =>(await exec(cmd, args, { timeout: 5000 }).catch(() => ({ code: 1 }))).code === 0;
 
+// A folder's shared git dir (all worktrees have the same one), as human-history stores it in sessions.repo; else "".
+async function repoOf(folder) {
+  const r = await exec("git", ["-C", folder, "rev-parse", "--path-format=absolute", "--git-common-dir"], { timeout: 5000 }).catch(() => null);
+  return r?.code === 0 ? r.stdout.trim() : "";
+}
+
 // The active space's repo, its main worktree (the parent of the shared .git dir); else the active folder.
 async function mainCheckout() {
   const at = place();
   if (!at) return null;
-  const r = await exec("git", ["-C", at, "rev-parse", "--path-format=absolute", "--git-common-dir"], { timeout: 5000 }).catch(() => null);
-  const git = r?.code === 0 ? r.stdout.trim() : "";
+  const git = await repoOf(at);
   return git.endsWith("/.git") ? git.slice(0, -5) : at;
+}
+
+// The space a session belongs to: the active one when it works in the session's repo (or folder), else the first
+// local space that does; null (tab.new's default, the active space) when none. Runs only on Resume.
+// ponytail: one git call per local space folder; fine for tens of spaces.
+async function spaceFor(s) {
+  const all = spaces().filter((p) => !p.machine), ps = panes();
+  const folders = (sp) => {
+    const tabs = new Set((sp.tabs ?? []).map((c) => c.id));
+    return [...new Set([...ps.filter((p) => tabs.has(p.tab) && p.cwd).map((p) => p.cwd), sp.folder].filter(Boolean))];
+  };
+  const inFolder = (f) => s.cwd && (s.cwd === f || s.cwd.startsWith(f + "/"));
+  for (const sp of [...all.filter((p) => p.active), ...all.filter((p) => !p.active)]) {
+    for (const f of folders(sp)) if (s.repo ? (await repoOf(f)) === s.repo : inFolder(f)) return sp.id;
+  }
+  return null;
 }
 
 // Where the active space works now: its focused terminal's folder, else the first known one (as tabs-copy).
@@ -241,8 +264,12 @@ export default class History extends View {
     this.open = null; cx.notify();
     cx.spawn(async (cx) => {
       try {
+        // The project: its shared git dir (all worktrees), else the folder itself. Sessions outside it are dropped
+        // below even if Claude names them, so the answer's rows (and Resume) stay in this project.
+        const repo = where ? await repoOf(where) : "";
+        const mine = (s) => !where || (repo ? s.repo === repo : s.cwd === where || s.cwd?.startsWith(where + "/"));
         const mcp = JSON.stringify({ mcpServers: { "human-history": { command: this.binPath || this.bin, args: ["mcp"] } } });
-        const r = await runClaude(["-p", aiPrompt(q, where), "--mcp-config", mcp, "--strict-mcp-config", "--tools", "",
+        const r = await runClaude(["-p", aiPrompt(q, where, repo), "--model", "haiku", "--mcp-config", mcp, "--strict-mcp-config", "--tools", "",
           "--setting-sources", "", "--output-format", "json", "--allowedTools", ...AI_TOOLS], where || home());
         if (seq !== this.aiSeq) return;
         let out;
@@ -253,12 +280,13 @@ export default class History extends View {
         ai.answer = (m ? text.slice(0, m.index) : text).trim() || "(no answer)";
         ai.cost = out.total_cost_usd; ai.turns = out.num_turns;
         cx.notify();
-        const ids = [...new Set((m?.[1] ?? "").split(/[\s,]+/).filter((id) => SAFE_ID.test(id)))].slice(0, AI_SESSIONS);
+        const ids = [...new Set((m?.[1] ?? "").split(/[\s,]+/).map((id) => id.replace(/^[a-z]+:/, "")) // haiku sometimes writes "claude:<id>"
+          .filter((id) => SAFE_ID.test(id)))].slice(0, AI_SESSIONS);
         for (const id of ids) {
           // Only the session row is kept; the messages `show` returns are dropped here.
           const s = await exec(this.bin, ["show", id, "--json"], { timeout: 30000 }).catch(() => null);
           if (seq !== this.aiSeq) return;
-          try { if (s?.code === 0) ai.sessions.push(JSON.parse(s.stdout).session); } catch { /* a bad id: skip it */ }
+          try { const row = s?.code === 0 && JSON.parse(s.stdout).session; if (row && mine(row)) ai.sessions.push(row); } catch { /* a bad id: skip it */ }
         }
       } catch (e) {
         if (seq === this.aiSeq) ai.error = String(e.message ?? e);
