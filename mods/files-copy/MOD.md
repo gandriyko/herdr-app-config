@@ -95,6 +95,7 @@ double-click selects a word, triple-click a line; arrows (Shift extends), Home/E
 - main.js: the panel (tree), the file tab (same class, opened with props) and go-to-definition (the jedi
   script is the `GOTO` string, so it also runs on remote machines).
 - highlight.js: per-line syntax highlighter for the Python view (copy of `lib/highlight.js`; edit it there and run `scripts/sync-lib`).
+- find.js: the find box's query as a RegExp and its hits (case, word, regex; capped at 1000). Copy of `lib/find.js`; edit it there and run `scripts/sync-lib`.
 - chevron-down.svg, chevron-right.svg, file.svg, folder.svg: tree icons; spinner.svg: while finding; close.svg: clears the filter.
 - gpui-kit.d.ts, jsconfig.json: editor typings only.
 

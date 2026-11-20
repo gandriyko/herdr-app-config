@@ -7,6 +7,7 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Input, InputState } from "gpui-base";
 import { highlight, languageFor } from "./highlight.js";
+import { FIND_CAP, findAll, findRegex } from "./find.js";
 import { props, shared, setShared, spaces, panes, theme, settings, exec, readTextFile, run, notify, appHome } from "herdr";
 
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false", "-c", "core.quotepath=false"];
@@ -15,24 +16,6 @@ const FONT = 13, ROW = 22, HEAD = 32, CHAR_W = FONT * 0.6;
 // Caps: lines per file, lines in all, files per view; STEP context lines per reveal click.
 const MAX_LINES = 20000, MAX_TOTAL = 100000, MAX_FILES = 300, STEP = 20;
 
-// Find: the search as a global RegExp (null when q is empty or an invalid regular expression). o: { case, word, regex }.
-const FIND_CAP = 1000;
-function findRegex(q, o) {
-  if (!q) return null;
-  try {
-    let src = o.regex ? q : q.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    if (o.word) src = `\\b(?:${src})\\b`;
-    return new RegExp(src, "gm" + (o.case ? "" : "i"));
-  } catch { return null; }
-}
-// Every hit of re in text as [start, end) pairs (at most FIND_CAP + 1: the extra one says "capped"); empty matches are skipped.
-function findAll(text, re) {
-  const out = []; re.lastIndex = 0;
-  for (let m = re.exec(text); m && out.length <= FIND_CAP; m = re.exec(text)) {
-    if (m[0] === "") re.lastIndex++; else out.push([m.index, m.index + m[0].length]);
-  }
-  return out;
-}
 // The hunks of one file's unified diff (lines from its first @@ on). os/ns: first line of each side
 // (a side with no lines sits after line o/n), oe/ne: one past its last.
 function parseHunks(lines) {

@@ -44,6 +44,7 @@ in `lib/` and copied into each mod that has a file of the same name. Edit `lib/<
 | `highlight.js` | `wb-diff`, `files-copy` |
 | `asking.js` | `agents-copy`, `agents-board` |
 | `prs.js` | `agents-copy`, `agents-board` |
+| `find.js` | `files-copy`, `wb-diff` |
 
 ## Skills
 
