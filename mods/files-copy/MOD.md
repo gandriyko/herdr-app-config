@@ -5,15 +5,17 @@ source: https://github.com/gandriyko/herdr-app-config/tree/main/mods/files-copy
 install: copy the folder mods/files-copy into ~/.config/herdr-app/mods/files-copy
 place: none
 needs: [sh, git, find (filter outside git), uv (uvx fetches jedi on first use; Python go-to-definition only), curl (web images in Markdown)]
-shared_keys: [files-copy.open]
+shared_keys: [files-copy.open, files-copy.exclude, files-copy.place]
 reads_keys: [wb.diff.request (root of the focused diff tab; optional)]
-commands: [tab.new (files-copy with props), tab.select, tab.rename]
+commands: [tab.new (files-copy with props), tab.select, tab.rename, tab.close, pane.split, pane.close]
 ---
 
 ## What it does
 In a side panel: a lazy file tree for the focused pane's folder (500 entries per folder, 5,000 total) with
-git marks. Files and folders whose names start with a dot are hidden; the `.*` button in the header shows
-them. Cloned from the shipped `files` mod.
+git marks. Files and folders whose names start with a dot are hidden; the options (sliders) button right of the filter
+field opens a section under the field with the Exclude masks (below) and "Show hidden files". Git-ignored files and folders
+(and everything inside an ignored folder) are drawn dimmed, from `git ls-files -oi --exclude-standard --directory`
+asked with each refresh. Cloned from the shipped `files` mod.
 
 The input above the tree filters it: every word typed must be in a file's path (case-insensitive), and the
 tree then shows only the matching files with their folders, all open (first 500 matches). With dot files
@@ -38,10 +40,17 @@ edits stay). Opening another file in the tab or going back/forward saves first; 
 file open. Closing the tab with unsaved edits opens a "Save changes?" dialog (this mod, kind dialog, the edits
 in its props): Save writes them with the same guard, Don't save or Esc drops them. On app quit there is no
 dialog and unsaved edits are lost. A Markdown file (`.md`, `.markdown`) opens rendered (read-only, text
-selectable, unsaved edits included); the group's View shows its text, Preview goes back. The × at the end of the header closes the tab (unsaved edits ask first). Copy path (after the path) puts the file's full path on the clipboard. Edit from the rendered view opens the editor.
+selectable, unsaved edits included); the group's View shows its text, Preview goes back. The × at the end of the header closes the tab or pane (unsaved edits ask first). "As pane" (before it) saves, then moves the viewer
+beside a terminal (`pane.split` right of the tab it was opened from, the request's `from`, else the space's first terminal tab) and
+closes its tab; in a pane the button reads "As tab" and does the reverse. The last move is remembered (shared
+`files-copy.place`): after "As pane", a file opened from the panel when the space has no viewer opens as a pane right of
+the shown tab's focused terminal (a tab when that tab has no terminal). Either way it stays the space's one viewer: the panel's
+clicks select its tab, and a tab with terminals keeps its name. A click on the path in the header puts the file's full path on the clipboard ("Copied" shows for 1.5 s). Edit from the rendered view opens the editor.
 
-Find in file: a find field (with counter and ↑/↓) sits in the tab header for a searchable file (⌘F focuses it; case-insensitive, Enter next, ⇧Enter
-previous, Esc clears it, counter `3/12`, first 1,000 hits, then `+`). It searches whatever the tab shows:
+Header buttons are icons with tooltips: search, revert, auto-save, Markdown split, save, the mode group
+(eye = Preview, page = View, pen = Edit), pane/tab move, close. Find in file: the search icon (or ⌘F) shows a find row
+under the header (field, options, counter and ↑/↓) for a searchable file (case-insensitive, Enter next, ⇧Enter
+previous, Esc or its × hides the row and its hits, keeping the query; counter `3/12`, first 1,000 hits, then `+`). It searches whatever the tab shows:
 the line view (Python, `.env`, Markdown source) tints every hit and centres the current one; the editor
 selects the current hit; rendered Markdown matches the visible words only (link targets, image sources and
 markup excluded) and marks the block that holds the hit with an accent edge and scrolls to it, because the text
@@ -96,13 +105,19 @@ double-click selects a word, triple-click a line; arrows (Shift extends), Home/E
   script is the `GOTO` string, so it also runs on remote machines).
 - highlight.js: per-line syntax highlighter for the Python view (copy of `lib/highlight.js`; edit it there and run `scripts/sync-lib`).
 - find.js: the find box's query as a RegExp and its hits (case, word, regex; capped at 1000). Copy of `lib/find.js`; edit it there and run `scripts/sync-lib`.
-- chevron-down.svg, chevron-right.svg, file.svg, folder.svg: tree icons; spinner.svg: while finding; close.svg: clears the filter.
+- chevron-down.svg, chevron-right.svg, file.svg, folder.svg: tree icons; spinner.svg: while finding; close.svg: clears the filter; options.svg: the filter options button.
+- Header icons: search.svg, undo.svg (revert), clock.svg (auto-save), columns.svg (split), save.svg, eye.svg / file-text.svg /
+  square-pen.svg (Preview / View / Edit), panel-right.svg / expand.svg (to pane / to tab).
 - gpui-kit.d.ts, jsconfig.json: editor typings only.
 
 ## Settings and data
 - Shared state `files-copy.open` ({ space, root, on, path, ts }): written by the panel on a click (and by
   wb-diff's Open in Files button: a documented contract, keep the shape), read by that space's file tab.
 - `localStorage` `files-copy.hidden`: "1" when dot files are shown.
+- Exclude masks: globs on a file or folder name (`*`, `?`), e.g. `__pycache__, *.pyc`; matching files and folders
+  (with everything inside) are hidden in the tree and the filter. Typed in the filter options' Exclude field:
+  comma- or space-separated masks, applied as typed; Esc closes the section. Kept in shared state
+  `files-copy.exclude` ([glob]); until that is set, the layout block's `props.exclude` is used.
 - `data/files-copy/images/`: copies of the pictures shown (newest 300 kept); safe to delete.
 - The jedi run uses the project's `.venv` or `venv` (in the pane's folder) when present, otherwise the
   Python uvx picks. Imports resolve from the folder above the file's top package (the first parent

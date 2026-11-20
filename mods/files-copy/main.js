@@ -37,6 +37,8 @@ const wordAt = (text, offset) => {
   return { start, end };
 };
 const REQUEST = "files-copy.open"; // { space, root, on, path, ts }: written by the panel, read by the tab
+const PLACE = "files-copy.place"; // "tab" | "pane": the viewer's last tab ⇄ pane move, used for the next new viewer
+const EXCLUDE = "files-copy.exclude"; // [glob]: names hidden in the tree and the filter
 
 // Images. The app draws pictures only from its own folder, so each one is copied (a local file, named by
 // path and mtime) or downloaded (a web URL, kept by URL) into IMG_DIR and drawn from there; the newest 300 stay.
@@ -159,6 +161,8 @@ function location() {
 const key = () => { const l = location(); return l ? JSON.stringify(l) : null; }; // null: keep the current folder
 const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", toml: "yaml", jsonc: "json", svelte: "html", vue: "html" };
 const PER_FOLDER = 500, TOTAL = 5000, ALL = 20000, MATCHES = 500;
+// The panel's props.exclude: globs on a file or folder name ("__pycache__", "*.pyc"); matches are hidden in the tree and the filter.
+const globs = list => (Array.isArray(list) ? list : []).map(g => new RegExp("^" + String(g).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$"));
 
 async function directory(path, on) {
   const windowsDirectory = async () => {
@@ -193,8 +197,8 @@ export default class Files extends View {
       this.tab = true; this.back = []; this.fwd = []; this.space = p.space ?? null;
       this.handle = cx.focus_handle(); this.viewH = 400; this.viewW = 800;
       this.imgs = new Map(); this.imgQueue = []; this.imgBusy = false; // source → cached file (false: failed, null: loading)
-      // Find bar (always shown; ⌘F focuses it, Esc clears it): list = hits in the shown view (lines, editor offsets, or Markdown blocks), cur = the current one.
-      this.find = { open: true, q: "", list: [], cur: 0, mode: null, capped: false, case: false, word: false, regex: false, bad: false };
+      // Find row under the header (shown by the search button or ⌘F, hidden by Esc or ×; the query is kept): list = hits in the shown view (lines, editor offsets, or Markdown blocks), cur = the current one.
+      this.find = { open: false, q: "", list: [], cur: 0, mode: null, capped: false, case: false, word: false, regex: false, bad: false };
       try { Object.assign(this.find, JSON.parse(localStorage.getItem("files-copy.find") ?? "{}")); } catch {}
       this.fmap = null; this.mdHits = new Set(); this.mdScroll = ScrollHandle.new();
       this.hold = false; this.holdCap = false; this.holdTimer = false; this.pending = false;
@@ -220,6 +224,10 @@ export default class Files extends View {
     this.saved = new Map();
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
     this.hidden = false; try { this.hidden = localStorage.getItem("files-copy.hidden") === "1"; } catch {}
+    // Masks: shared(EXCLUDE) once edited with the header's Hide button, else the layout's props.exclude.
+    this.masksOpen = false; this.globs = { key: null, list: [] };
+    this.masksInput = InputState.new({ placeholder: "__pycache__, *.pyc" });
+    this.masksInput.on("change", () => setShared(EXCLUDE, this.masksInput.value().split(/[,\s]+/).filter(Boolean)));
     // Filter: every word must be in the file's path; the tree then shows only matches and their folders.
     this.query = ""; this.all = null; this.filtered = null;
     this.search = InputState.new({ placeholder: "Filter files" });
@@ -274,7 +282,7 @@ export default class Files extends View {
       if (this.context) this.saved.set(this.context.key, { folders: this.folders, file: this.file, query: this.search.value() });
       const saved = this.saved.get(next);
       this.context = { key: next, cwd, on }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
-      this.pending = new Set(); this.marks = {}; this.file = saved?.file ?? null; this.watched = null; this.error = null; this.limited = false;
+      this.pending = new Set(); this.marks = {}; this.ignored = null; this.file = saved?.file ?? null; this.watched = null; this.error = null; this.limited = false;
       this.loading = false; this.all = null; this.filtered = null;
       const query = saved?.query ?? "";
       this.query = query.trim().toLowerCase();
@@ -294,17 +302,22 @@ export default class Files extends View {
           await this.loadFolder(path, context);
         }
         const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on }).catch(() => null);
-        const marks = {};
+        const marks = {}, ignored = new Set();
         if (top?.code === 0) {
           // Writes nothing under .git (index lock, fsmonitor cookie): the folder watch would refresh again.
-          const status = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"], { cwd, on }).catch(() => null);
+          // Ignored paths, relative to cwd: an ignored folder comes as one "dir/" entry, its insides not listed.
+          const [status, ig] = await Promise.all([
+            exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"], { cwd, on }).catch(() => null),
+            exec("git", ["ls-files", "-z", "-o", "-i", "--exclude-standard", "--directory"], { cwd, on }).catch(() => null),
+          ]);
+          if (ig?.code === 0) for (const p of ig.stdout.split("\0")) if (p) ignored.add(p);
           if (status?.code === 0) for (const entry of status.stdout.split("\0").filter(Boolean).slice(0, TOTAL)) {
             const xy = entry.slice(0, 2);
             marks[`${top.stdout.trim()}/${entry.slice(3)}`] = xy === "??" || xy.includes("A") ? "A" : xy.includes("U") ? "U" : xy.includes("D") ? "D" : "M";
           }
         }
         if (!this.current(context)) return;
-        this.marks = marks; this.error = null; this.watch(cwd, cx);
+        this.marks = marks; this.ignored = ignored; this.error = null; this.watch(cwd, cx);
       } catch (e) { if (this.current(context)) this.error = String(e); }
       finally { if (this.context === context) this.loading = false; cx.notify(); }
     });
@@ -362,7 +375,8 @@ export default class Files extends View {
   // The filtered tree: { dirs: Map(name → node), files: [name] } of the matching paths. Cached by its inputs.
   filterTree() {
     const f = this.filtered;
-    if (f && f.query === this.query && f.hidden === this.hidden && f.all === this.all) return f;
+    const masks = this.masks().join("\n");
+    if (f && f.query === this.query && f.hidden === this.hidden && f.all === this.all && f.masks === masks) return f;
     const words = this.query.split(/\s+/), root = { dirs: new Map(), files: [] };
     let count = 0, limited = false;
     for (const path of this.all?.paths ?? []) {
@@ -371,12 +385,13 @@ export default class Files extends View {
       const parts = path.split("/");
       // Hidden files off: a dot part still shows when the query names it (".env" or "env" finds .env.local; "build" doesn't open .github/).
       if (!this.hidden && parts.some(p => p.startsWith(".") && !words.some(w => p.toLowerCase().includes(w)))) continue;
+      if (parts.some(p => this.excluded(p))) continue;
       if (++count > MATCHES) { limited = true; break; }
       let node = root;
       for (const dir of parts.slice(0, -1)) node = node.dirs.get(dir) ?? node.dirs.set(dir, { dirs: new Map(), files: [] }).get(dir);
       node.files.push(parts.at(-1));
     }
-    return this.filtered = { query: this.query, hidden: this.hidden, all: this.all, root, count: Math.min(count, MATCHES), limited };
+    return this.filtered = { query: this.query, hidden: this.hidden, all: this.all, masks, root, count: Math.min(count, MATCHES), limited };
   }
 
   filteredRows(node, prefix, depth, out, t) {
@@ -395,14 +410,23 @@ export default class Files extends View {
 
   // One file or folder row; in the filtered tree folders are always open and a click on one does nothing.
   // `cur`: the filter's keyboard cursor is on it.
+  // Git-ignored: the path itself (folders listed as "dir/") or a folder above it.
+  isIgnored(path, dir) {
+    const s = this.ignored;
+    if (!s?.size) return false;
+    if (s.has(dir ? `${path}/` : path)) return true;
+    for (let i = path.indexOf("/"); i > 0; i = path.indexOf("/", i + 1)) if (s.has(path.slice(0, i + 1))) return true;
+    return false;
+  }
+
   row(path, name, dir, open, depth, t, cur = false) {
-    const mark = this.marks[`${this.root}/${path}`];
-    return h_flex().id(`file-${path}`).h(28).flex_none().pl(8 + depth * 18).pr(8).gap(7).items_center().rounded(7).cursor_pointer().hover(s => s.bg(t.hover))
+    const mark = this.marks[`${this.root}/${path}`], dim = this.isIgnored(path, dir);
+    return h_flex().id(`file-${path}`).when(dim, el => el.text_color(t.dim)).h(28).flex_none().pl(8 + depth * 18).pr(8).gap(7).items_center().rounded(7).cursor_pointer().hover(s => s.bg(t.hover))
       .when(!dir && path === this.file && !cur, el => el.bg(t.hover))
       .when(cur, el => el.bg(t.selected))
       .on_click((_e, cx) => dir ? (!this.query && this.toggle(path, cx)) : this.pick(path, cx))
       .child(dir ? svg(`mods/files-copy/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
-      .child(svg(`mods/files-copy/${dir ? "folder" : "file"}.svg`).size(14).flex_none().text_color(t.muted))
+      .child(svg(`mods/files-copy/${dir ? "folder" : "file"}.svg`).size(14).flex_none().text_color(dim ? t.dim : t.muted))
       .child(div().flex_1().min_w(0).truncate().child(name))
       .when(Boolean(mark), el => el.child(div().text_size(11).text_color(mark === "A" ? t.ansi2 : mark === "D" || mark === "U" ? t.ansi1 : t.blocked).child(mark)));
   }
@@ -411,14 +435,32 @@ export default class Files extends View {
   pick(path, cx) {
     this.file = path;
     const space = spaces().find(s => s.active);
-    const req = { space: space?.id ?? null, root: this.root, on: this.on ?? null, path, ts: Date.now() };
+    // from: the tab shown at the click, where "As pane" puts the viewer beside its terminal.
+    const req = { space: space?.id ?? null, root: this.root, on: this.on ?? null, path, ts: Date.now(), from: space?.tabs.find(t => t.active)?.id ?? null };
     const ids = new Set((space?.tabs ?? []).map(t => t.id));
     const existing = panes().find(p => p.mod === "files-copy" && ids.has(p.tab));
     const name = path.split("/").pop();
     setShared(REQUEST, req);
-    if (existing) { run("tab.select", { id: existing.tab }); run("tab.rename", { id: existing.tab, name }); }
-    else run("tab.new", { name, mod: "files-copy", props: req, space: space?.id ?? undefined });
+    if (existing) {
+      run("tab.select", { id: existing.tab });
+      // A viewer pane beside terminals: their tab keeps its name.
+      if (!panes().some(p => p.tab === existing.tab && p.pane !== existing.pane)) run("tab.rename", { id: existing.tab, name });
+    }
+    else {
+      // The last tab ⇄ pane choice (PLACE): "pane" opens beside the shown tab's terminal, if it has one.
+      const terms = shared(PLACE) === "pane" ? panes().filter(p => p.tab === req.from && p.terminal) : [];
+      const target = terms.find(p => p.focused) ?? terms[0];
+      if (target) run("pane.split", { pane: target.pane, direction: "right", mod: "files-copy", props: req });
+      else run("tab.new", { name, mod: "files-copy", props: req, space: space?.id ?? undefined });
+    }
     cx.notify();
+  }
+
+  masks() { const s = shared(EXCLUDE); return Array.isArray(s) ? s : Array.isArray(props()?.exclude) ? props().exclude : []; }
+  excluded(name) {
+    const list = this.masks(), k = list.join("\n");
+    if (this.globs.key !== k) this.globs = { key: k, list: globs(list) };
+    return this.globs.list.some(r => r.test(name));
   }
 
   rows(prefix, depth, out, t) {
@@ -426,6 +468,7 @@ export default class Files extends View {
     for (const entry of this.entries.get(prefix) ?? []) {
       if (out.length >= TOTAL) break;
       if (!this.hidden && entry.name.startsWith(".")) continue;
+      if (this.excluded(entry.name)) continue;
       const path = prefix ? `${prefix}/${entry.name}` : entry.name, open = this.folders.has(path);
       out.push(this.row(path, entry.name, entry.dir, open, depth, t));
       if (entry.dir && open) this.rows(path, depth + 1, out, t);
@@ -951,9 +994,9 @@ export default class Files extends View {
     if (sel && !sel.includes("\n") && sel.length < 200 && sel !== this.find.q) { this.findInput.set_value(sel); this.find.q = sel; this.find.cur = 0; }
     this.find.open = true; this.findInput.focus(); this.runFind(cx, Boolean(this.find.q));
   }
-  // Esc or ×: the text is cleared (the bar stays) and the keyboard goes back to the view.
+  // Esc or ×: the row hides (its hits go, the query stays for next time) and the keyboard goes back to the view.
   closeFind(cx) {
-    this.findInput.set_value(""); this.find.q = ""; this.find.cur = 0; this.runFind(cx, false);
+    this.find.open = false; this.replaceOpen = false; this.find.cur = 0; this.runFind(cx, false);
     if (this.lines && !this.preview) this.handle.focus(); else if (this.code) this.code.focus();
   }
   // Recomputes the hits for the shown view (not from render); jump moves the view to the current one.
@@ -1052,8 +1095,8 @@ export default class Files extends View {
       .on_click((_e, cx) => { f[flag] = !f[flag]; try { localStorage.setItem("files-copy.find", JSON.stringify({ case: f.case, word: f.word, regex: f.regex })); } catch {} f.cur = 0; this.runFind(cx, true); }).child(label);
     const options = h_flex().flex_none().rounded(6).border_1().border_color(t.border).overflow_hidden()
       .child(opt("files-find-case", "Aa", "Match case", "case", true)).child(opt("files-find-word", "W", "Whole word", "word")).child(opt("files-find-re", ".*", "Regular expression", "regex"));
-    return h_flex().flex_none().gap(6).items_center()
-      .child(div().id("files-find").h(24).w(210).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_text()
+    return h_flex().h(34).flex_none().px(14).gap(6).items_center().border_b(1).border_color(t.border)
+      .child(div().id("files-find").h(24).flex_1().min_w(80).max_w(360).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_text()
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_key_down((e, cx) => { if (e.keystroke === "escape") { this.closeFind(cx); cx.stop_propagation(); } })
         .child(Input.new(this.findInput).flex_1().h_full().text_size(12).text_color(t.foreground)))
@@ -1062,12 +1105,47 @@ export default class Files extends View {
       .child(btn("files-find-prev", "↑", "Previous (⇧Enter)", cx => this.stepFind(-1, cx)))
       .child(btn("files-find-next", "↓", "Next (Enter)", cx => this.stepFind(1, cx)))
       .when(f.mode === "editor" && this.editable, el => el.child(btn("files-replace-toggle", "⇄", "Replace (shows the replace row)", cx => { this.replaceOpen = !this.replaceOpen; cx.notify(); })
-        .when(this.replaceOpen, e => e.bg(t.selected).text_color(t.foreground))));
+        .when(this.replaceOpen, e => e.bg(t.selected).text_color(t.foreground))))
+      .child(div().flex_1())
+      .child(btn("files-find-close", svg("mods/files-copy/close.svg").size(10), "Close (Esc)", cx => this.closeFind(cx)));
   }
   // The tab on screen if it is a file tab of this mod (else null), asked at the moment of use.
   shownTab() {
     const tab = spaces().find(s => s.active)?.tabs.find(t => t.active);
     return tab && panes().some(p => p.mod === "files-copy" && p.tab === tab.id) ? tab.id : null;
+  }
+
+  // This viewer's pane (one per space, reused by the panel): { pane, tab, split } where split = beside other panes.
+  myPane() {
+    const space = spaces().find(s => s.id === this.space) ?? spaces().find(s => s.active);
+    const ids = new Set((space?.tabs ?? []).map(t => t.id));
+    const me = panes().find(p => p.mod === "files-copy" && ids.has(p.tab));
+    return me ? { pane: me.pane, tab: me.tab, split: panes().some(p => p.tab === me.tab && p.pane !== me.pane), space } : null;
+  }
+
+  // Tab ⇄ pane: saves first, opens the same file the other way, closes this one.
+  move(cx) {
+    const me = this.myPane();
+    if (!me) return;
+    this.save(cx, (ok, acx) => {
+      if (!ok) return;
+      const req = { ...this.req, ts: Date.now() };
+      if (me.split) {
+        setShared(PLACE, "tab");
+        run("tab.new", { name: req.path.split("/").pop(), mod: "files-copy", props: req, space: me.space?.id });
+        run("pane.close", { pane: me.pane });
+        return;
+      }
+      // Beside a terminal: of the tab the file was opened from, else of the space's first terminal tab.
+      const others = (me.space?.tabs ?? []).map(t => t.id).filter(id => id !== me.tab);
+      const order = [req.from, ...others].filter(id => id && others.includes(id));
+      const target = order.map(id => panes().find(p => p.tab === id && p.terminal)).find(Boolean);
+      if (!target) { this.status = "No terminal tab in this space to open beside"; acx.notify(); return; }
+      setShared(PLACE, "pane");
+      run("tab.select", { id: target.tab });
+      run("pane.split", { pane: target.pane, direction: "right", mod: "files-copy", props: req });
+      run("tab.close", { id: me.tab, confirmed: true });
+    });
   }
   // The replace row under the header: shown by the ⇄ button, only while editing.
   replaceRow(t) {
@@ -1087,25 +1165,28 @@ export default class Files extends View {
   // The mode group in the header (as the find options): the active mode is tinted, an unavailable one dimmed.
   modeGroup(t, path, isSvg) {
     const hasPreview = /\.(md|markdown|svg)$/i.test(path), editing = Boolean(this.code) && !this.preview;
-    const cell = (id, label, tip, on, enabled, act) => div().id(id).h(20).px(8).flex().items_center().text_size(11).tooltip(tip)
+    const cell = (id, icon, tip, on, enabled, act) => div().id(id).h(22).w(28).flex().items_center().justify_center().tooltip(tip)
       .when(id !== "files-mode-first", e => e.border_l(1).border_color(t.border))
       .text_color(on ? t.foreground : enabled ? t.muted : t.border).when(on, e => e.bg(t.selected))
       .when(!on && enabled, e => e.cursor_pointer().hover(s => s.bg(t.hover)))
-      .on_click((_e, cx) => { if (enabled && !on) act(cx); }).child(label);
+      .on_click((_e, cx) => { if (enabled && !on) act(cx); }).child(svg(`mods/files-copy/${icon}.svg`).size(13));
     const rerun = (cx) => { if (this.find.open) this.runFind(cx, true); else cx.notify(); };
     const cells = [];
-    if (hasPreview) cells.push(["files-mode-first", "Preview", isSvg ? "Show the picture (as saved)" : "Show the rendered Markdown (read-only)", this.preview, true, cx => { this.preview = true; rerun(cx); }]);
-    cells.push([hasPreview ? "files-mode-view" : "files-mode-first", "View", "The read-only text (search hits are tinted here)", !this.preview && !this.code, Boolean(this.lines) || (Boolean(this.code) && !this.dirty),
+    if (hasPreview) cells.push(["files-mode-first", "eye", isSvg ? "Preview: the picture (as saved)" : "Preview: the rendered Markdown (read-only)", this.preview, true, cx => { this.preview = true; rerun(cx); }]);
+    cells.push([hasPreview ? "files-mode-view" : "files-mode-first", "file-text", "View: the read-only text (search hits are tinted here)", !this.preview && !this.code, Boolean(this.lines) || (Boolean(this.code) && !this.dirty),
       cx => { this.preview = false; if (this.code) this.showView(cx); else rerun(cx); }]);
-    cells.push(["files-mode-edit", "Edit", "Edit this file (⌘-click definitions are off while editing)", editing, this.editable,
+    cells.push(["files-mode-edit", "square-pen", "Edit this file (⌘-click definitions are off while editing)", editing, this.editable,
       cx => { if (this.code) { this.preview = false; rerun(cx); } else this.editFile(cx); }]);
     return h_flex().flex_none().rounded(6).border_1().border_color(t.border).overflow_hidden().children(cells.map(c => cell(...c)));
   }
 
   renderTab(t, cx) {
     const path = this.req.path, py = path.endsWith(".py"), isSvg = /\.svg$/i.test(path);
-    const button = (id, label, tip, act) => div().id(id).flex_none().px(8).py(2).rounded(5).border_1().border_color(t.border).text_size(11)
-      .cursor_pointer().hover(s => s.bg(t.hover)).tooltip(tip).on_click((_e, cx) => act(cx)).child(label);
+    // Header buttons are icons (mods/files-copy/<icon>.svg) with a tooltip; on: toggled on (tinted), color: overrides the icon's.
+    const button = (id, icon, tip, act, on = false, color = null) => div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(6)
+      .cursor_pointer().text_color(color ?? (on ? t.foreground : t.muted)).when(on, e => e.bg(t.selected)).hover(s => s.bg(t.hover).text_color(color ?? t.foreground))
+      .tooltip(tip).on_click((_e, cx) => act(cx)).child(svg(`mods/files-copy/${icon}.svg`).size(14));
+    const me = this.myPane();
     return v_flex().id("files-tab").key_context("FilesCopyTab").on_action("files-copy.find", (_e, cx) => this.openFind(cx)).size_full().min_h(0).bg(t.background).text_color(t.foreground).text_size(13)
       .on_key_down((e, cx) => {
         if (e.modifiers.platform && e.key.toLowerCase() === "s" && this.code) { this.save(cx); cx.stop_propagation(); }
@@ -1121,27 +1202,36 @@ export default class Files extends View {
             .tooltip("Back (⌘[ or Ctrl+-)").on_click((_e, cx) => this.goBack(cx)).child("←"))
           .child(div().id("files-fwd").w(20).text_color(this.fwd.length ? t.muted : t.border).when(this.fwd.length > 0, e => e.cursor_pointer())
             .tooltip("Forward (⌘] or Ctrl+Shift+-)").on_click((_e, cx) => this.goForward(cx)).child("→")))
-        .child(div().flex_1().min_w(0).truncate().text_size(12).text_color(t.dim).child(path + (this.dirty ? " ●" : "")))
-        .child(button("files-copy-path", this.copied ? "Copied ✓" : "Copy path", "Copy the file's full path", cx => {
-          cx.write_to_clipboard(this.full(path)); this.copied = true; cx.notify();
-          cx.timer.after(1500, acx => { this.copied = false; acx.notify(); });
-        }))
-        .when(Boolean(this.findMode()), el => el.child(this.findBar(t)))
-        .when(this.dirty, el => el.child(button("files-revert", this.confirmRevert ? "Discard edits?" : "Revert", "Drop the edits and load the file from disk (click twice)", cx => this.revert(cx))))
-        .when(Boolean(this.code) && this.editable, el => el.child(button("files-auto", this.autosave ? "Auto-save ✓" : "Auto-save", "Save 1.5 s after the last edit (remembered)",
-          cx => { this.autosave = !this.autosave; try { localStorage.setItem("files-copy.autosave", this.autosave ? "1" : "0"); } catch {} if (this.autosave && this.dirty) this.save(cx); cx.notify(); })))
-        .when(Boolean(this.code) && !this.preview && /\.(md|markdown)$/i.test(path), el => el.child(button("files-split", this.split ? "Single" : "Split", "Show the rendered Markdown beside the editor", cx => { this.split = !this.split; cx.notify(); })))
-        .when(this.dirty, el => el.child(button("files-save", this.saving ? "Saving…" : "Save", "Save (⌘S)", cx => this.save(cx))))
+        // A click on the path copies the file's full path (green for 1.5 s).
+        .child(h_flex().flex_1().min_w(0).child(div().id("files-copy-path").min_w(0).truncate().text_size(12).cursor_pointer()
+          .text_color(this.copied ? t.ansi2 : t.dim).hover(s => s.text_color(this.copied ? t.ansi2 : t.foreground))
+          .tooltip(this.copied ? "Copied" : "Click to copy the full path")
+          .on_click((_e, cx) => {
+            cx.write_to_clipboard(this.full(path)); this.copied = true; cx.notify();
+            cx.timer.after(1500, acx => { this.copied = false; acx.notify(); });
+          })
+          .child(this.copied ? "Copied" : path + (this.dirty ? " ●" : ""))))
+        .when(Boolean(this.findMode()), el => el.child(button("files-find-toggle", "search", "Find in file (⌘F)", cx => this.find.open ? this.closeFind(cx) : this.openFind(cx), this.find.open)))
+        .when(this.dirty, el => el.child(button("files-revert", "undo", this.confirmRevert ? "Click again to discard the edits" : "Revert: drop the edits and load the file from disk (click twice)",
+          cx => this.revert(cx), this.confirmRevert, this.confirmRevert ? t.ansi1 : null)))
+        .when(Boolean(this.code) && this.editable, el => el.child(button("files-auto", "clock", this.autosave ? "Auto-save on: saves 1.5 s after the last edit" : "Auto-save off (click to save 1.5 s after the last edit)",
+          cx => { this.autosave = !this.autosave; try { localStorage.setItem("files-copy.autosave", this.autosave ? "1" : "0"); } catch {} if (this.autosave && this.dirty) this.save(cx); cx.notify(); }, this.autosave)))
+        .when(Boolean(this.code) && !this.preview && /\.(md|markdown)$/i.test(path), el => el.child(button("files-split", "columns", this.split ? "Hide the rendered Markdown" : "Show the rendered Markdown beside the editor", cx => { this.split = !this.split; cx.notify(); }, this.split)))
+        .when(this.dirty, el => el.child(button("files-save", "save", this.saving ? "Saving…" : "Save (⌘S)", cx => this.save(cx), false, t.accent)))
         // One mode group for every file: View (the read-only text), Edit (the editor), and for Markdown and SVG also Preview
         // (rendered / the picture as saved; with unsaved edits as typed). View is off while edits are unsaved.
         .when(Boolean(this.code || this.lines) && !this.raster, el => el.child(this.modeGroup(t, path, isSvg)))
-        .when(this.finding, el => el.child(h_flex().flex_none().gap(6).items_center().text_size(11).text_color(t.accent)
-          .child(svg("mods/files-copy/spinner.svg").size(12).spin(900)).child("Finding definition…")))
-        .when(!this.finding && py && !this.code, el => el.child(div().flex_none().text_size(11).text_color(this.cmd ? t.accent : t.dim).child("⌘-click: definition")))
-        // Closes this tab (unsaved edits ask first, see close()), always the last thing in the header.
+        .when(this.finding, el => el.child(div().id("files-finding").flex_none().text_color(t.accent).tooltip("Finding definition…")
+          .child(svg("mods/files-copy/spinner.svg").size(12).spin(900))))
+        // The ⌘-click hint shows only while ⌘ is held over a Python view.
+        .when(!this.finding && py && !this.code && Boolean(this.cmd), el => el.child(div().flex_none().text_size(11).text_color(t.accent).child("⌘-click: definition")))
+        .child(button("files-move", me?.split ? "expand" : "panel-right",
+          me?.split ? "Open in its own tab" : "Open beside the terminal", cx => this.move(cx)))
+        // Closes this tab or pane (unsaved edits ask first, see close()), always the last thing in the header.
         .child(div().id("files-close").size(26).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer().text_color(t.dim)
           .hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip("Close")
-          .on_click(() => { const tab = this.shownTab(); if (tab) run("tab.close", { id: tab, confirmed: true }); }).child(svg("mods/files-copy/close.svg").size(12))))
+          .on_click(() => { if (me?.split) run("pane.close", { pane: me.pane }); else { const tab = this.shownTab(); if (tab) run("tab.close", { id: tab, confirmed: true }); } }).child(svg("mods/files-copy/close.svg").size(12))))
+      .when(this.find.open && Boolean(this.findMode()), el => el.child(this.findBar(t)))
       .when(this.gotoOpen && !this.preview && Boolean(this.code || this.lines), el => el.child(this.gotoRow(t)))
       .when(this.replaceOpen && this.find.mode === "editor" && this.editable && !this.preview, el => el.child(this.replaceRow(t)))
       .child(this.raster || (isSvg && this.preview && (this.code || this.lines)) ? this.imageView(t, cx)
@@ -1166,12 +1256,8 @@ export default class Files extends View {
     return v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child("Files"))
-        .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.root?.split(/[\\/]/).pop() ?? ""))
-        .child(div().id("files-hidden").flex_none().px(5).rounded(5).cursor_pointer().text_size(12).hover(s => s.bg(t.hover))
-          .text_color(this.hidden ? t.foreground : t.dim).when(this.hidden, el => el.bg(t.hover))
-          .on_click((_e, cx) => { this.hidden = !this.hidden; try { localStorage.setItem("files-copy.hidden", this.hidden ? "1" : "0"); } catch {} cx.notify(); })
-          .child(".*")))
-      .child(div().px(8).pt(8).flex_none().child(div().id("files-search").h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
+        .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.root?.split(/[\\/]/).pop() ?? "")))
+      .child(h_flex().px(8).pt(8).gap(6).flex_none().items_center().child(div().id("files-search").flex_1().min_w(0).h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_key_down((e, cx) => {
           if (e.keystroke === "escape") return this.clearFilter(cx);
@@ -1184,7 +1270,25 @@ export default class Files extends View {
         .child(Input.new(this.search).flex_1().h_full().text_size(12).text_color(t.foreground))
         .when(Boolean(this.query), el => el.child(div().id("files-search-clear").size(18).flex_none().flex().items_center().justify_center().rounded(4)
           .cursor_pointer().text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip("Clear filter (Esc)")
-          .on_click((_e, cx) => this.clearFilter(cx)).child(svg("mods/files-copy/close.svg").size(10))))))
+          .on_click((_e, cx) => this.clearFilter(cx)).child(svg("mods/files-copy/close.svg").size(10)))))
+        // Filter options: dot files and hide masks, in a section under the field.
+        .child(div().id("files-settings").size(28).flex_none().flex().items_center().justify_center().rounded(7).border_1().cursor_pointer()
+          .border_color(this.masksOpen ? t.input : t.border).hover(s => s.bg(t.hover).text_color(t.foreground))
+          .text_color(this.masksOpen || this.hidden || this.masks().length ? t.foreground : t.dim).when(this.masksOpen, el => el.bg(t.hover))
+          .tooltip("Filter options")
+          .on_click((_e, cx) => { this.masksOpen = !this.masksOpen; if (this.masksOpen) this.masksInput.set_value(this.masks().join(", ")); cx.notify(); })
+          .child(svg("mods/files-copy/options.svg").size(14))))
+      .when(this.masksOpen, el => el.child(v_flex().px(8).pt(6).gap(6).flex_none()
+        .child(div().id("files-masks-field").h(28).px(8).flex().items_center().gap(6).rounded(7).border_1().border_color(t.border).cursor_text()
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_key_down((e, cx) => { if (e.keystroke === "escape") { this.masksOpen = false; cx.notify(); cx.stop_propagation(); } })
+          .child(div().flex_none().text_size(11).text_color(t.dim).child("Exclude"))
+          .child(Input.new(this.masksInput).flex_1().h_full().text_size(12).text_color(t.foreground)))
+        .child(h_flex().id("files-hidden").h(24).px(6).gap(8).items_center().rounded(5).cursor_pointer().text_size(12).hover(s => s.bg(t.hover))
+          .on_click((_e, cx) => { this.hidden = !this.hidden; try { localStorage.setItem("files-copy.hidden", this.hidden ? "1" : "0"); } catch {} cx.notify(); })
+          .child(div().size(14).flex_none().flex().items_center().justify_center().rounded(3).border_1().text_size(10)
+            .border_color(this.hidden ? t.accent : t.input).when(this.hidden, d => d.bg(t.accent).text_color(t.accent_foreground)).child(this.hidden ? "✓" : ""))
+          .child("Show hidden files"))))
       .child(this.query ? this.filterView(t) : v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total"))));
