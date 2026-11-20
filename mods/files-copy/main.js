@@ -1278,8 +1278,9 @@ export default class Files extends View {
           .tooltip("Filter options")
           .on_click((_e, cx) => { this.masksOpen = !this.masksOpen; if (this.masksOpen) this.masksInput.set_value(this.masks().join(", ")); cx.notify(); })
           .child(svg("mods/files-copy/options.svg").size(14))))
-      .when(this.masksOpen, el => el.child(v_flex().px(8).pt(6).gap(6).flex_none()
-        .child(div().id("files-masks-field").h(28).px(8).flex().items_center().gap(6).rounded(7).border_1().border_color(t.border).cursor_text()
+      // A raised card, so the options don't read as tree rows.
+      .when(this.masksOpen, el => el.child(div().px(8).pt(6).flex_none().child(v_flex().p(6).gap(6).rounded(8).border_1().border_color(t.border).bg(t.raised)
+        .child(div().id("files-masks-field").h(28).px(8).flex().items_center().gap(6).rounded(7).border_1().border_color(t.border).bg(t.background).cursor_text()
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
           .on_key_down((e, cx) => { if (e.keystroke === "escape") { this.masksOpen = false; cx.notify(); cx.stop_propagation(); } })
           .child(div().flex_none().text_size(11).text_color(t.dim).child("Exclude"))
@@ -1288,7 +1289,7 @@ export default class Files extends View {
           .on_click((_e, cx) => { this.hidden = !this.hidden; try { localStorage.setItem("files-copy.hidden", this.hidden ? "1" : "0"); } catch {} cx.notify(); })
           .child(div().size(14).flex_none().flex().items_center().justify_center().rounded(3).border_1().text_size(10)
             .border_color(this.hidden ? t.accent : t.input).when(this.hidden, d => d.bg(t.accent).text_color(t.accent_foreground)).child(this.hidden ? "✓" : ""))
-          .child("Show hidden files"))))
+          .child("Show hidden files")))))
       .child(this.query ? this.filterView(t) : v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total"))));
