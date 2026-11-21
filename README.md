@@ -72,4 +72,4 @@ symlink, not a copy, so `git pull` here updates the skill too.
 
 | Skill | What it does |
 | --- | --- |
-| `worktree-split` | Splits a task or PR into git worktrees, runs a child agent in each with `hc run`, waits for them and chains follow-ups (review after implement), with Claude Code, Codex, Copilot CLI, Pi or Hermes as parent or child. The children show nested under their parent in `agents-board`. Needs `hc`, `git`, `gh` (for PRs). |
+| `worktree-split` | Splits a task or PR into git worktrees (next to the repo as `<repo>-<branch>`, branches prefixed with the ticket key), runs a child agent in each with `hc run`, waits for them and chains follow-ups (review after implement), with Claude Code, Codex, Copilot CLI, Pi or Hermes as parent or child. The children show nested under their parent in `agents-board`. Needs `hc`, `git`, `gh` (for PRs). |

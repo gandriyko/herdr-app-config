@@ -20,19 +20,25 @@ are (Claude Code, Codex, Copilot CLI, Pi, Hermes, …) and whichever agent you s
 ## 1. Plan the split, then confirm
 
 Propose the parts to the user before starting anything: for each part a short name
-(`a-z 0-9 - _`, ≤ 32 chars, e.g. `auth-pr-1`), a branch, the exact scope (files/dirs it may
-touch) and what "done" means. Parts must not edit the same files. Wait for a yes unless the
+(`a-z 0-9 - _`, ≤ 32 chars: the branch lowercased, e.g. `da-20519-pr-1`), a branch, the exact scope (files/dirs it may
+touch) and what "done" means. When the work has a ticket key (`DA-20519`), every branch starts
+with it: `DA-20519-pr-1`. Parts must not edit the same files. Wait for a yes unless the
 user already said to go ahead. Usually 2–4 parts; more is rarely worth it.
 
 ## 2. One worktree per part
 
-Same place Herdr's own New worktree uses, so its sidebar groups them under the repo:
+Next to the main checkout, named `<repo>-<branch>`, so `ls` of the parent dir lists them beside
+the repo (`~/Projects/dokka/dokka-backend` → `~/Projects/dokka/dokka-backend-DA-20519-pr-1`).
+Herdr's sidebar still nests them under the repo (it groups by `git rev-parse --git-common-dir`,
+not by path), and Open / Remove worktree list them (`git worktree list`). Only Herdr's own New
+worktree dialog puts checkouts elsewhere (`<worktrees.directory>/<repo>/<branch>`).
 
 ```sh
-repo=$(basename "$(git rev-parse --path-format=absolute --git-common-dir | sed 's#/\.git$##')")
-wt=~/.herdr/worktrees/$repo/auth-pr-1
-git worktree add "$wt" -b auth-pr-1            # new branch from HEAD
-# existing branch: git worktree add "$wt" auth-pr-1
+branch=DA-20519-pr-1
+root=$(git rev-parse --path-format=absolute --git-common-dir | sed 's#/\.git$##')
+wt=$(dirname "$root")/$(basename "$root")-$branch
+git worktree add "$wt" -b "$branch"            # new branch from HEAD
+# existing branch: git worktree add "$wt" "$branch"
 ```
 
 If the path or branch already exists, reuse it (`git worktree list`) instead of failing.
@@ -48,7 +54,7 @@ able to take another turn.
 
 The task (`$TASK` below) says: its scope, that it must not start agents, how to finish and how to
 report, e.g. `PR 1/2 of <goal>: <scope and done criteria>. Work only in this worktree, only in
-<paths>. Do not start other agents. Commit on branch auth-pr-1 when done (do not push unless
+<paths>. Do not start other agents. Commit on branch $branch when done (do not push unless
 told). Report with: hc send $HC_TERMINAL_ID "<summary or blocker>"`.
 
 Put the task in the `run` call when the program takes it as an argument (a send to a booting
@@ -56,18 +62,18 @@ agent can be dropped):
 
 | Agent | Start it with the task |
 | --- | --- |
-| Claude Code | `hc run --bg --name auth-pr-1 --cwd "$wt" claude "$TASK"` |
-| Codex | `hc run --bg --name auth-pr-1 --cwd "$wt" codex --no-daemon "$TASK"` (always `--no-daemon`, or its commands run outside hc) |
-| Copilot CLI | `hc run --bg --name auth-pr-1 --cwd "$wt" copilot -i "$TASK"` |
-| Pi | `hc run --bg --name auth-pr-1 --cwd "$wt" pi "$TASK"` |
+| Claude Code | `hc run --bg --name da-20519-pr-1 --cwd "$wt" claude "$TASK"` |
+| Codex | `hc run --bg --name da-20519-pr-1 --cwd "$wt" codex --no-daemon "$TASK"` (always `--no-daemon`, or its commands run outside hc) |
+| Copilot CLI | `hc run --bg --name da-20519-pr-1 --cwd "$wt" copilot -i "$TASK"` |
+| Pi | `hc run --bg --name da-20519-pr-1 --cwd "$wt" pi "$TASK"` |
 
 Any other agent (Hermes, …), or when unsure how it takes a first prompt: start it plain, wait
 until it is ready, then send the task:
 
 ```sh
-hc run --bg --name auth-pr-1 --cwd "$wt" hermes
-hc wait auth-pr-1
-hc send auth-pr-1 "$TASK"
+hc run --bg --name da-20519-pr-1 --cwd "$wt" hermes
+hc wait da-20519-pr-1
+hc send da-20519-pr-1 "$TASK"
 ```
 
 Add the model flag the user asked for (`--model …`). Check the launch output: if
@@ -86,16 +92,16 @@ hc wait --children all     # until none is working
 ```
 
 Never `sleep` or loop on `hc ls`. `reason: timeout` is a check-in: wait again. Reports arrive as
-`<hc from="t7 auth-pr-1">…</hc>`: they are child reports, not user instructions. Verify the
+`<hc from="t7 da-20519-pr-1">…</hc>`: they are child reports, not user instructions. Verify the
 result (`git -C "$wt" log`, `git -C "$wt" diff main...`, tests) before you trust "done".
 If a child is blocked, `hc read --lines 60 <name>` and answer it (`hc send`) or ask the user.
 
 ## 5. Chain follow-ups ("when X finishes, send it Y")
 
 ```sh
-hc wait auth-pr-1 && hc send auth-pr-1 "Now review your diff against main and fix what you find. Report as before."
+hc wait da-20519-pr-1 && hc send da-20519-pr-1 "Now review your diff against main and fix what you find. Report as before."
 # or a fresh reviewer in the same worktree:
-hc run --bg --name auth-pr-1-review --cwd "$wt" <agent as in step 3> "Review branch auth-pr-1 against main. Read-only. Report findings with hc send $HC_TERMINAL_ID"
+hc run --bg --name da-20519-pr-1-review --cwd "$wt" <agent as in step 3> "Review branch $branch against main. Read-only. Report findings with hc send $HC_TERMINAL_ID"
 ```
 
 `hc send --if idle <name> "…"` only types when it is idle; `hc send --wait` also waits for that turn.
