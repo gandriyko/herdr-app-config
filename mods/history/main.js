@@ -2,6 +2,7 @@ import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, TextView, InputState, Input } from "gpui-base";
 import { exec, home, theme, spaces, panes, run, notify, props, closeOverlay, openOverlay, shared } from "herdr";
 import { modelFor, runModel, describe, USE, PROJECT } from "./ai.js";
+import { Voice, asQuery } from "./voice.js";
 
 // Past agent sessions (Claude, Codex, OpenCode, ...) from human-history (`human-history`, github.com/gandriyko/human-history).
 // Typing searches prompts and answers; an empty query lists the latest sessions. Results are limited to the
@@ -107,8 +108,9 @@ async function runClaude(cmd, args, cwd) {
 
 // The model for AI mode: "History AI" in the AI models window (wb-ai), shared through ai.js.
 // contract: wb.ai.use / wb.ai.project / wb.ai.models are written by wb-ai; all optional. Nothing picked for
-// history (or the keys missing): Claude haiku, not modelFor's first-model fallback (often Opus, ~30x the cost).
-const BUILTIN = { id: "builtin", name: "Claude haiku", provider: "claude", command: "claude", model: "haiku" };
+// history (or the keys missing): Claude sonnet (haiku missed sessions a plain search found), not modelFor's
+// first-model fallback (often Opus, more cost for the same answers).
+const BUILTIN = { id: "builtin", name: "Claude sonnet", provider: "claude", command: "claude", model: "sonnet" };
 const aiModel = () => ((shared(USE) ?? {}).history || shared(PROJECT)?.["*"]?.history?.model ? modelFor("history", "*") : null) ?? BUILTIN;
 const openAiSettings = () => openOverlay({ mod: "wb-ai", kind: "dialog", width: 560, props: { use: "history", project: "*", projectName: "All projects" } });
 // A TOML basic string for codex -c (JSON escapes are valid TOML ones for paths).
@@ -125,7 +127,9 @@ async function askModel(m, prompt, bin, cwd) {
   if (m.provider !== "claude") throw new Error(`${m.name}: History AI needs a CLI that calls MCP tools (Claude or Codex), not a ${m.provider} model`);
   const mcp = JSON.stringify({ mcpServers: { "human-history": { command: bin, args: ["mcp"] } } });
   const r = await runClaude(m.command || "claude", ["-p", prompt, ...(m.model ? ["--model", m.model] : []), "--mcp-config", mcp, "--strict-mcp-config", "--tools", "",
-    "--setting-sources", "", "--output-format", "json", "--allowedTools", ...AI_TOOLS], cwd);
+    // --no-session-persistence: each question was saved as a Claude session, which human-history then indexed and
+    // searches found ("Answer the user's question about their past conversations…" rows).
+    "--setting-sources", "", "--no-session-persistence", "--output-format", "json", "--allowedTools", ...AI_TOOLS], cwd);
   let out;
   try { out = JSON.parse(r.stdout); } catch { throw new Error((r.stderr || r.stdout || "claude gave no answer").trim().slice(-300)); }
   if (out.is_error || r.code !== 0) throw new Error(String(out.result || r.stderr || "claude failed").trim().slice(0, 300));
@@ -197,6 +201,12 @@ export default class History extends View {
     // human-history -s: titles only, or prompts + answers; "ai": a question for Claude instead of a search.
     const scope = localStorage.getItem("scope");
     this.scope = scope === "title" || scope === "ai" ? scope : "both";
+    // Mic button (voice.js): the text goes into the box in use and waits for Enter, nothing runs on its own.
+    // ++seq drops the debounced search the box's "change" would start.
+    this.voice = new Voice({ icons: { mic: "mods/history/icons/mic.svg", spin: "mods/history/icons/refresh.svg" }, onText: (text, cx) => {
+      const box = this.scope === "ai" ? this.question : this.search;
+      box.set_value(this.scope === "ai" ? text : asQuery(text)); this.seq++; box.focus(); cx.notify();
+    } }, cx);
     this.ai = null; this.aiSeq = 0; // { q, loading, answer, sessions, error, cost, turns } of the last question
     this.question = InputState.new({ placeholder: "Ask about past sessions, press Enter" });
     this.question.on("submit", (_e, cx) => this.ask(cx));
@@ -216,6 +226,9 @@ export default class History extends View {
     // Each tick copies spaces/panes from the host, so not every 500 ms.
     cx.timer.every(2000, (cx) => { if (!this.missing && place() !== this.where) this.find(cx); });
   }
+
+  // The panel goes: a running recording stops.
+  async close() { await this.voice.close(); }
 
   // PATH first, then ~/.cargo/bin; this.bin is what every call runs, this.found says one of them exists.
   async locate() {
@@ -432,10 +445,14 @@ export default class History extends View {
         .child(`Show more (${list.length - shown} left)`)));
   }
 
+  button(t, id, label, primary, onClick) {
+    return div().id(id).h(28).px(12).flex().items_center().justify_center().rounded(7).cursor_pointer().text_size(12)
+      .bg(primary ? t.solid : t.raised).text_color(primary ? t.solid_foreground : t.foreground).hover((s) => s.opacity(0.9)).on_click(onClick).child(label);
+  }
+
   // human-history isn't on PATH: where to get it. Refresh checks again after installing.
   installHint(t) {
-    const button = (id, label, primary, onClick) => div().id(id).h(28).px(12).flex().items_center().justify_center().rounded(7).cursor_pointer().text_size(12)
-      .bg(primary ? t.solid : t.raised).text_color(primary ? t.solid_foreground : t.foreground).hover((s) => s.opacity(0.9)).on_click(onClick).child(label);
+    const button = (...a) => this.button(t, ...a);
     return v_flex().p(8).gap(8).text_color(t.muted)
       .child(div().text_color(t.foreground).font_semibold().child("human-history is not installed"))
       .child(div().child("This panel searches past agent sessions with the human-history command. Install it (needs a Rust toolchain from rustup.rs):"))
@@ -467,6 +484,7 @@ export default class History extends View {
     const embedded = Boolean(props()?.embedded);
     return v_flex().id("history").size_full().min_h(0).overflow_hidden().bg(t.background).border_color(t.border).text_color(t.foreground).text_size(12)
       .when(embedded, (e) => e.border_t(1)).when(!embedded, (e) => e.rounded(10).border_1())
+      .on_mouse_up("left", (_e, cx) => this.voice.up(cx)) // hold-to-talk: a release anywhere in the panel ends the recording
       .child(h_flex().h(42).flex_none().px(14).gap(6).items_center().border_b(1).border_color(t.border)
         .when(Boolean(open), (e) => e.child(iconButton("back", "back", "Back to results", (_e, cx) => { this.open = null; cx.notify(); })))
         .child(div().font_semibold().text_size(13).child("History"))
@@ -487,19 +505,23 @@ export default class History extends View {
         .child(div().id("search").flex_1().min_w(0).h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
           .child(Input.new(aiMode ? this.question : this.search).h_full().text_size(12).text_color(t.foreground)))
+        .child(this.voice.button(t))
         .child(iconSegment("scope", [
           ["both", "messages", "Search prompts and answers"],
           ["title", "title", "Search session titles only"],
           ["ai", "sparkles", "Ask Claude about past sessions (Enter sends the question)"]]))))
-      .when(!open && Boolean(this.where), (e) => e.child(div().flex_none().px(10).pt(6).truncate().text_size(11).text_color(t.dim)
+      // While the mic works, its state replaces the project line: how to finish, or that recognition runs.
+      .when(!open && Boolean(this.voice.state), (e) => e.child(this.voice.status(t)))
+      .when(!open && !this.voice.state && Boolean(this.where), (e) => e.child(div().flex_none().px(10).pt(6).truncate().text_size(11).text_color(t.dim)
         .child(this.where.replace(/^\/Users\/[^/]+/, "~"))))
       .child(div().flex_1().min_h(0).relative()
         .child(v_flex().id(open ? `session-${open.session.key}` : "results").absolute().inset_0().overflow_y_scroll().p(6).gap(2)
           .when(Boolean(open), (e) => e.child(this.detail(t)))
           .when(!open && this.missing, (e) => e.child(this.installHint(t)))
-          .when(!open && !this.missing && Boolean(empty), (e) => e.child(div().p(8).text_color(this.error ? t.ansi1 : t.dim).child(empty)))
-          .when(!open && !this.missing && aiMode, (e) => e.child(this.aiView(t)))
-          .when(!open && !aiMode, (e) => e.children(this.results.map((s) => this.row(s, t)))))
+          .when(!open && !this.missing && Boolean(this.voice.setup), (e) => e.child(this.voice.setupCard(t)))
+          .when(!open && !this.missing && !this.voice.setup && Boolean(empty), (e) => e.child(div().p(8).text_color(this.error ? t.ansi1 : t.dim).child(empty)))
+          .when(!open && !this.missing && !this.voice.setup && aiMode, (e) => e.child(this.aiView(t)))
+          .when(!open && !this.voice.setup && !aiMode, (e) => e.children(this.results.map((s) => this.row(s, t)))))
         .child(Scrollbar.vertical(open ? `session-${open.session.key}` : "results").absolute().inset_0()));
   }
 }

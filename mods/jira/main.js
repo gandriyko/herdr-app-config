@@ -3,6 +3,7 @@ import * as fs from "fs/promises";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
 import { exec, theme, shared, setShared, spaces, panes, focused, run, knownAgents, props, openOverlay, closeOverlay } from "herdr";
 import { Buffer } from "buffer";
+import { Voice, asQuery } from "./voice.js";
 
 // My open Jira issues grouped by sprint, status or not at all and sorted by updated/created date, plus the backlog
 // of one or more projects (optional, its own request). Click opens the issue in Jira;
@@ -245,6 +246,10 @@ export default class Jira extends View {
     this.filterOpen = false;
     this.search = InputState.new({ placeholder: "Search by key or title" });
     this.search.on("change", (_e, cx) => { this.query = this.search.value().trim().toLowerCase(); cx.notify(); });
+    // Mic button (voice.js): the spoken text goes into the search box, which filters the list as typing does.
+    this.voice = new Voice({ icons: { mic: "mods/jira/mic.svg", spin: "mods/jira/refresh.svg" }, onText: (text, cx) => {
+      this.search.set_value(asQuery(text)); this.query = this.search.value().trim().toLowerCase(); this.search.focus(); cx.notify();
+    } }, cx);
     // Auto-sync is off until switched on (jira.auto = "1"); the list loads once on open either way.
     this.auto = (() => { try { return localStorage.getItem("jira.auto") === "1"; } catch { return false; } })();
     this.refresh(cx);
@@ -689,6 +694,9 @@ export default class Jira extends View {
             .child(svg("mods/jira/session.svg").size(12)))));
   }
 
+  // The panel goes: a running recording stops.
+  async close() { await this.voice.close(); }
+
   render(cx) {
     if (this.st) return this.startView(theme());
     const t = theme(), q = this.query, form = this.setup || this.editing;
@@ -726,6 +734,7 @@ export default class Jira extends View {
     return v_flex().id("jira").size_full().min_h(0).relative().rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(12)
       // Redraw only when the width really changed: a notify on every report could redraw forever.
       .on_size_change((size, cx) => { if (size.width !== this.width) { this.width = size.width; cx.notify(); } })
+      .on_mouse_up("left", (_e, cx) => this.voice.up(cx)) // hold-to-talk: a release anywhere in the panel ends the recording
       .on_mouse_down("right", (e, cx) => {
         if (!this.menuKey) return;
         this.selected = this.menuKey;
@@ -746,6 +755,7 @@ export default class Jira extends View {
       .when(!form, (e) => e.child(h_flex().flex_none().px(8).pt(8).gap(6).items_center()
         .child(div().id("search").flex_1().min_w(0).h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().text_size(12).text_color(t.foreground)))
+        .child(this.voice.button(t))
         // Opens the filter popover; filled while a filter is on, with the number of filters.
         .child(h_flex().id("filter").flex_none().h(28).min_w(28).px(7).gap(4).items_center().justify_center().rounded(7).border_1().cursor_pointer()
           .border_color(this.filterOpen ? t.accent : t.border).text_color(filtered ? t.foreground : t.muted)
@@ -758,11 +768,13 @@ export default class Jira extends View {
           })
           .child(svg("mods/jira/filter.svg").size(14))
           .when(filtered, (e) => e.child(div().text_size(10).child(String((this.current ? 1 : 0) + picked.size)))))))
+      .when(!form && Boolean(this.voice.state), (e) => e.child(this.voice.status(t)))
       .child(div().flex_1().min_h(0).relative()
         .child(v_flex().id("jira-list").absolute().inset_0().overflow_y_scroll().p(6).gap(1)
           .when(form, (e) => e.child(this.formView(t)))
-          .when(Boolean(empty), (e) => e.child(div().p(8).text_color(this.error ? t.ansi1 : t.dim).child(empty)))
-          .when(!form, (e) => e
+          .when(!form && Boolean(this.voice.setup), (e) => e.child(this.voice.setupCard(t)))
+          .when(Boolean(empty) && !this.voice.setup, (e) => e.child(div().p(8).text_color(this.error ? t.ansi1 : t.dim).child(empty)))
+          .when(!form && !this.voice.setup, (e) => e
             .children(groups.flatMap((g) => [this.groupHeader(g.name, g.issues.length, t), ...g.issues.map((issue) => this.issueRow(issue, t, "mine"))]))
             // The project backlogs, set apart from my issues by a rule.
             .when(backlogGroups.length > 0, (e) => e
