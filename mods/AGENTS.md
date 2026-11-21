@@ -60,7 +60,12 @@ earlier answer exists, and two panels that show the same remote data must not ea
   with `gh api graphql --cache <ttl>` from every mod that needs it (see `openPrs` in `lib/pr-badges.js`).
   gh keeps one disk entry per request, whatever the TTL (measured), so:
   `--cache 24h` = show what is cached (~0.2 s), `--cache 60s` = normal load, `--cache 1s` = Refresh.
-  Ask for the union of the fields the mods need, so the request stays identical. A new panel on data that a
+  Ask for the union of the fields the mods need, so the request stays identical.
+  **Mind the GraphQL cost** (5000 points an hour for the whole account): GitHub charges by the connections a query
+  may fetch (`first:` × parents), not by what comes back. A nested connection under a list (threads × comments,
+  commits × check contexts) multiplies: one such query cost ~106 points and ran the limit out within an hour. Keep
+  list queries one level deep (~2 points; add `rateLimit{cost}` to measure), and fetch nested data in a second query
+  only for the items that need it. `herdr-app check` runs `init()` for real, so every check spends points too. A new panel on data that a
   `lib/` query already fetches reuses that query instead of writing its own.
 - **Other remote data (Jira, ...):** keep the last answer in the mod's own `data/<mod>/` file, only the
   fields the view reads; write only when it changed (see `data/jira/issues.json`).

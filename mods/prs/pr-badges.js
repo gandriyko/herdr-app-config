@@ -4,6 +4,7 @@
 import { exec } from "herdr";
 
 // CI of the PR: "fail" if any check failed, "wait" if any is still running, else "ok" (or "" without checks).
+// `rollup`: check runs / status contexts, or (openPrs) one { state } with the rollup's state.
 export function ci(rollup) {
   if (!rollup?.length) return "";
   const bad = ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"];
@@ -38,34 +39,58 @@ export const reviewed = (state) => state === "done" || state === "clean";
 // then asks again with the default CACHE, which fetches when the entry is older and so refreshes it for every mod.
 // A Refresh asks with FORCE: an entry is never that young, so GitHub is asked, and the new answer replaces the entry
 // for every mod (measured: 2s and 3s rewrite the same cache file, 1h then reads it).
-// ponytail: 100 PRs × 100 threads × 100 checks; a request to a team I'm in doesn't count as mine.
+// GraphQL rate limit (5000 points an hour, shared with every gh user of the account): GitHub charges by the
+// connections a query may fetch, not by what comes back. Measured: 100 PRs with threads × first comment and
+// checks × contexts cost ~106 points a call and ran the limit out within the hour. So the list query asks only
+// one-level connections and the rollup's single state (~2 points), and the threads come in a second query only for
+// the PRs Copilot left comments on (each ~0.5 point), cached the same way.
+// ponytail: 50 PRs, 30 threads each; a request to a team I'm in doesn't count as mine.
 const CACHE = "60s";
 export const STALE = "24h";
 export const FORCE = "1s";
-const PRS_QUERY = `query($owner:String!,$name:String!){viewer{login} repository(owner:$owner,name:$name){pullRequests(states:OPEN,first:100,orderBy:{field:UPDATED_AT,direction:DESC}){nodes{
-number title url body isDraft mergeable headRefName baseRefName isCrossRepository reviewDecision author{login} labels(first:20){nodes{name}}
-latestReviews(first:30){nodes{author{login} state body}}
-reviewRequests(first:20){nodes{requestedReviewer{... on Bot{login} ... on User{login}}}}
-reviewThreads(first:100){nodes{isResolved comments(first:1){nodes{author{login} url}}}}
-commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{... on CheckRun{status conclusion} ... on StatusContext{state}}}}}}}}}}}`;
-export async function openPrs(repo, cwd, on, ttl = CACHE) {
-  const [owner, name] = repo.split("/");
+const PRS_QUERY = `query($owner:String!,$name:String!){viewer{login} repository(owner:$owner,name:$name){pullRequests(states:OPEN,first:50,orderBy:{field:UPDATED_AT,direction:DESC}){nodes{
+number title url body isDraft mergeable headRefName baseRefName isCrossRepository reviewDecision author{login} labels(first:10){nodes{name}}
+latestReviews(first:20){nodes{author{login} state body}}
+reviewRequests(first:10){nodes{requestedReviewer{... on Bot{login} ... on User{login}}}}
+commits(last:1){nodes{commit{statusCheckRollup{state}}}}}}}}`;
+// Unresolved Copilot threads of the given PRs, by alias p<number>.
+const threadsQuery = (numbers) => `query($owner:String!,$name:String!){repository(owner:$owner,name:$name){${numbers.map((n) =>
+  `p${n}:pullRequest(number:${n}){reviewThreads(first:30){nodes{isResolved comments(first:1){nodes{author{login} url}}}}}`).join(" ")}}}`;
+
+async function gql(query, owner, name, cwd, on, ttl) {
   const setup = (message) => Object.assign(new Error(message), { setup: true });
-  const r = await exec("gh", ["api", "graphql", "--cache", ttl, "-F", `owner=${owner}`, "-F", `name=${name}`, "-f", `query=${PRS_QUERY}`], { cwd, on, timeout: 60000 })
+  const r = await exec("gh", ["api", "graphql", "--cache", ttl, "-F", `owner=${owner}`, "-F", `name=${name}`, "-f", `query=${query}`], { cwd, on, timeout: 60000 })
     .catch(() => { throw setup("GitHub CLI (gh) is not installed · install it (brew install gh), then run gh auth login"); });
   if (r.code !== 0) {
     const text = (r.stderr || r.stdout).trim();
     if (/gh auth login|not logged in/i.test(text)) throw setup("GitHub CLI is not logged in · run gh auth login");
     throw new Error(text.split("\n").pop() || "gh failed");
   }
-  const data = JSON.parse(r.stdout).data, viewer = data.viewer?.login ?? null;
-  const prs = (data.repository?.pullRequests.nodes ?? []).map(({ labels, latestReviews, reviewRequests, reviewThreads, commits, ...pr }) => {
+  return JSON.parse(r.stdout).data;
+}
+
+export async function openPrs(repo, cwd, on, ttl = CACHE) {
+  const [owner, name] = repo.split("/");
+  const data = await gql(PRS_QUERY, owner, name, cwd, on, ttl), viewer = data.viewer?.login ?? null;
+  const prs = (data.repository?.pullRequests.nodes ?? []).map(({ labels, latestReviews, reviewRequests, commits, ...pr }) => {
     const asked = reviewRequests.nodes.map((n) => n.requestedReviewer).filter(Boolean);
+    // The rollup's one state stands in for the checks list: ci() reads FAILURE/ERROR, PENDING/EXPECTED, SUCCESS.
+    const state = commits.nodes[0]?.commit.statusCheckRollup?.state;
     return { ...pr, labels: labels.nodes, reviews: latestReviews.nodes, reviewRequests: asked,
-      statusCheckRollup: commits.nodes[0]?.commit.statusCheckRollup?.contexts.nodes ?? [],
-      cpAsked: asked.some(isCopilot), needMe: Boolean(viewer) && asked.some((x) => x.login === viewer),
-      cpUrls: reviewThreads.nodes.filter((t) => !t.isResolved && isCopilot(t.comments.nodes[0]?.author)).map((t) => t.comments.nodes[0].url) };
+      statusCheckRollup: state ? [{ state }] : [],
+      cpAsked: asked.some(isCopilot), needMe: Boolean(viewer) && asked.some((x) => x.login === viewer), cpUrls: [] };
   });
+  // Threads only where Copilot's latest review left comments ("done"); a failed call leaves the count unknown.
+  const withComments = prs.filter((pr) => copilot(pr) === "done").map((pr) => pr.number);
+  if (withComments.length) {
+    try {
+      const t = await gql(threadsQuery(withComments), owner, name, cwd, on, ttl);
+      for (const pr of prs) {
+        const nodes = t.repository?.[`p${pr.number}`]?.reviewThreads.nodes;
+        if (nodes) pr.cpUrls = nodes.filter((x) => !x.isResolved && isCopilot(x.comments.nodes[0]?.author)).map((x) => x.comments.nodes[0].url);
+      }
+    } catch { for (const pr of prs) if (withComments.includes(pr.number)) pr.cpUrls = undefined; }
+  }
   return { viewer, prs };
 }
 
