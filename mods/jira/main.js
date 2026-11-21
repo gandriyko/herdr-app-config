@@ -1,10 +1,10 @@
 import { View, div, svg, image } from "gpui-kit";
 import * as fs from "fs/promises";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
-import { exec, theme, shared, setShared, spaces, panes, focused, run, knownAgents, props, openOverlay, closeOverlay, appHome, notify } from "herdr";
+import { exec, theme, shared, setShared, spaces, panes, agents, focused, run, knownAgents, props, openOverlay, closeOverlay, appHome, notify } from "herdr";
 import { Buffer } from "buffer";
 import { Voice, asQuery } from "./voice.js";
-import { ci, approval, copilotGql, copilotBadge, copilotTip, repoOfUrl } from "./pr-badges.js";
+import { ci, approval, openPrs, STALE, FORCE, copilotBadge, copilotTip, repoOfUrl } from "./pr-badges.js";
 
 // My open Jira issues grouped by sprint, status or not at all and sorted by updated/created date, plus the backlog
 // of one or more projects (optional, its own request). Click opens the issue in Jira;
@@ -88,6 +88,8 @@ async function boardOrder(base, auth, keys) {
 // Jira's own issue type icons, saved as files (image() reads them from ~/.config/herdr-app/<path>) and kept across
 // restarts: one per type and avatar, a handful in all.
 const ICON_DIR = "data/jira/types";
+// The last loaded issues (see loadCache), under the app home.
+const CACHE_FILE = "data/jira/issues.json";
 const iconFile = (type) => `${ICON_DIR}/${String(type.id).replace(/\W/g, "")}-${/avatar\/(\d+)/.exec(type.iconUrl ?? "")?.[1] ?? "0"}.svg`;
 const isSvg = (text) => /^\s*(<\?xml[^>]*>\s*)?(<!--[\s\S]*?-->\s*)*(<!DOCTYPE[^>]*>\s*)?<svg[\s>]/i.test(text);
 
@@ -159,19 +161,72 @@ const worktreeTask = ({ key, summary, description, path, branch, base, main, fre
   `${key}: ${summary}${about(description)} — You are in ${fresh ? "a new" : "an existing"} git worktree ${path} on branch ${branch}${fresh ? `, created from origin/${base}` : ""}; the main checkout is ${main}. ` +
   `First prepare this worktree as the repo's own docs say (CLAUDE.md, AGENTS.md, .claude/, README): copy the gitignored files it needs from the main checkout ` +
   `(env files, certificates, local config) unless they are already there, install dependencies, and list what you copied; don't change the main checkout. Then work on ${key}.`;
-const branchTask = ({ key, summary, description, branch, base }) =>
-  `${key}: ${summary}${about(description)} — First run git fetch origin, then create and switch to branch ${branch} from origin/${base}, following the repo's own rules ` +
-  `(CLAUDE.md, AGENTS.md, .claude/). If the working tree has uncommitted changes, stop and ask me what to do with them. Then work on ${key}.`;
 
 const lastLine = (r) => (r.stderr || r.stdout).trim().split("\n").pop();
 
-// ── Open pull requests of every space's repo (gh), each shown under the issue whose key is in its title or head branch ──
-// latestReviews (each reviewer's latest), not reviews: Copilot's long review bodies made gh twice as slow (2.5 s vs 5.4 s).
-const PR_FIELDS = "number,title,headRefName,baseRefName,url,isDraft,mergeable,reviewDecision,latestReviews,statusCheckRollup,author";
+// ── Open pull requests of every space's repo (openPrs, gh), each shown under the issue whose key is in its title or head branch ──
 const REMOTES_MAX = 50;
 // Every key-like word of the title and head branch ("DA-123: …", "feature/DA-123-…"), upper-cased. Words that are no
 // issue key (UTF-8) match no issue, so they cost nothing.
 const prKeys = (pr) => new Set([...`${pr.title ?? ""} ${pr.headRefName ?? ""}`.matchAll(/[A-Za-z][A-Za-z0-9_]*-\d+/g)].map((m) => m[0].toUpperCase()));
+// ── Past sessions (human-history, github.com/gandriyko/human-history): before a new agent starts on an issue, its
+// latest past session in the folder's repo is resumed instead, so the context isn't lost ──
+// How each agent reopens a session: human-history's table (src/resume.rs), as the history mod has it.
+const RESUME = {
+  claude: (id) => ["claude", "--resume", id],
+  codex: (id) => ["codex", "resume", id],
+  opencode: (id) => ["opencode", "--session", id],
+  copilot: (id) => ["copilot", `--resume=${id}`],
+  pi: (id) => ["pi", "--session", id],
+  hermes: (id) => ["hermes", "--resume", id, "--no-restore-cwd"],
+};
+const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/; // never an option-looking id in argv
+// Herdr started from the Dock has a short PATH without ~/.cargo/bin, where `cargo install` puts human-history.
+// human-history takes the project from HH_CWD before its working directory: set to ours ($PWD, the exec's cwd).
+const HH = 'HH_CWD="$PWD" PATH="$PATH:$HOME/.cargo/bin" exec human-history "$@"';
+
+// The latest past session on the issue in the folder's repo (all its worktrees), or null: one whose title or branch
+// names the key first, else one whose own prompt does (jira's sessions start with "<key>: …"). Local folders only.
+// ponytail: an assistant's passing mention doesn't count; without human-history (or on failure) none is found.
+// `scope` "all": every project (to find which repo the issue was worked in), from `folder` (any, e.g. home).
+// pastSessions: the ranked list (at most `max`); pastSession: the best one.
+async function pastSession(key, folder, scope = "repository") { return (await pastSessions(key, folder, scope, 1))[0] ?? null; }
+async function pastSessions(key, folder, scope = "repository", max = 5) {
+  const r = await exec("/bin/sh", ["-c", HH, "sh", "search", key, "--json", "-f", scope, "--limit", "20"],
+    { cwd: folder, timeout: 30000 }).catch(() => null);
+  let list = [];
+  try { if (r?.code === 0) list = JSON.parse(r.stdout); } catch {}
+  // Best first: the key in the session's branch (work on the issue itself), then in its title (a session elsewhere may
+  // share a title), then in my own prompt; the latest activity within each.
+  const rank = (s) => mentions((s.branch ?? "").toUpperCase(), key) ? 0 : mentions((s.title ?? "").toUpperCase(), key) ? 1 : s.hit_role === "user" ? 2 : 9;
+  const ok = list.filter((s) => RESUME[s.agent] && SAFE_ID.test(s.session_id ?? "") && rank(s) < 9);
+  return ok.sort((a, b) => rank(a) - rank(b) || String(b.updated_at).localeCompare(String(a.updated_at))).slice(0, max);
+}
+
+// The argv that resumes `past` in `folder`, or null when it can't. Claude finds a session only under its folder's
+// project dir (~/.claude/projects/<path, non-alnum → "-">), so for another folder its conversation file is copied
+// there first (as the history mod does); the other agents find a session by id from anywhere.
+// ponytail: ignores CLAUDE_CONFIG_DIR; subagent transcripts (<id>/) are not copied.
+async function resumeArgv(past, folder) {
+  if (past.agent === "claude" && past.cwd !== folder) {
+    const copied = await exec("/bin/sh", ["-c",
+      'src=$(ls "$HOME"/.claude/projects/*/"$1".jsonl 2>/dev/null | head -n 1); [ -n "$src" ] || exit 1; ' +
+      'dst="$HOME/.claude/projects/$2"; mkdir -p "$dst" && { [ -e "$dst/$1.jsonl" ] || cp "$src" "$dst/"; }',
+      "sh", past.session_id, folder.replace(/[^A-Za-z0-9]/g, "-")], { timeout: 15000 }).catch(() => null);
+    if (copied?.code !== 0) return null;
+  }
+  return RESUME[past.agent](past.session_id);
+}
+
+// A new session's first message on a branch that already has work (a PR's, or one naming the issue): read and wait.
+const existingTask = ({ key, summary, description, branch, pr }) =>
+  `${key}: ${summary}${about(description)} — This folder is on branch ${branch}` +
+  (pr ? ` of pull request #${pr.number} (${pr.url}). Read the issue and the PR (description, diff, open review threads)`
+    : `, where work on ${key} already is. Read the issue and what the branch changed so far (git log and diff against its base)`) +
+  `, give a short summary, then wait for my instructions.`;
+
+// Whether an upper-cased text names the issue key as a whole (DA-2049 is not in DA-20493).
+const mentions = (text, key) => new RegExp(`(^|[^A-Z0-9])${key}(?!\\d)`).test(text);
 const repoName = (url) => /[:/]([^/:]+\/[^/]+?)(?:\.git)?\/?$/.exec(url)?.[1] ?? null;
 // CI, approval and Copilot badges: ./pr-badges.js (copy of lib/pr-badges.js, shared with prs, so both show the same).
 
@@ -190,39 +245,30 @@ async function agentArgv(want, on) {
   return agent?.run ?? [want];
 }
 
-// A worktree for `branch` and an agent there with the task; idempotent. A worktree that already has the branch is
-// reused (its space is selected if open, else a new space); a local branch without one gets `worktree add <path> <branch>`;
-// else fetch origin/<base> and `worktree add -b`. Returns an error string, or null.
-async function openWorktree({ main, on, branch, base, key, summary, description, argv }) {
-  const git = (args, timeout = 30000) => exec("git", args, { cwd: main, on, timeout });
-  const listed = await git(["worktree", "list", "--porcelain"]);
-  if (listed.code !== 0) return `git worktree list: ${lastLine(listed)}`;
-  let path = null, fresh = true;
-  for (const block of listed.stdout.split(/\n\s*\n/)) {
-    const lines = block.split("\n");
-    if (lines.includes(`branch refs/heads/${branch}`)) { path = lines.find((l) => l.startsWith("worktree "))?.slice(9) ?? null; break; }
+// Branch -> folder of every worktree of the repo (`git worktree list --porcelain` in any of its folders).
+async function worktreesOf(folder, on) {
+  const r = await exec("git", ["worktree", "list", "--porcelain"], { cwd: folder, on, timeout: 15000 }).catch(() => null);
+  const out = new Map();
+  for (const block of (r?.stdout ?? "").split(/\n\s*\n/)) {
+    const lines = block.split("\n"), path = lines.find((l) => l.startsWith("worktree "))?.slice(9);
+    const branch = lines.find((l) => l.startsWith("branch refs/heads/"))?.slice(18);
+    if (path && branch) out.set(branch, path);
   }
-  if (path) {
-    fresh = false;
-    const open = spaces().find((s) => s.folder === path && (s.machine || null) === (on || null));
-    if (open) { run("space.select", { id: open.id }); return null; }
-  } else {
-    path = worktreePath(main, branch);
-    const local = await git(["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]);
-    if (local.code === 0) {
-      const added = await git(["worktree", "add", path, branch]);
-      if (added.code !== 0) return `git worktree add: ${lastLine(added)}`;
-    } else {
-      const fetched = await git(["fetch", "origin", base], 120000);
-      if (fetched.code !== 0) return `git fetch origin ${base}: ${lastLine(fetched)}`;
-      const added = await git(["worktree", "add", "-b", branch, path, `origin/${base}`]);
-      if (added.code !== 0) return `git worktree add: ${lastLine(added)}`;
-    }
-  }
-  run("space.new", { name: tabName(key, summary), folder: path, machine: on ?? "", argv,
-    task: worktreeTask({ key, summary, description, path, branch, base, main, fresh }) });
-  return null;
+  return out;
 }
+
+// The Start session dialog's choice card: a radio dot and a title, a one-line note under it; min_w(0)
+// lets two share the row. And their button.
+const choiceCard = (t, id, on, title, about, pick) => h_flex().id(id).flex_1().min_w(0).p(10).gap(10).items_start().rounded(8).border_1().cursor_pointer()
+  .border_color(on ? t.accent : t.border).bg(on ? t.selected : t.background).hover((s) => s.border_color(t.accent))
+  .on_click((_e, cx) => { pick(); cx.notify(); })
+  .child(div().mt(2).size(14).flex_none().flex().items_center().justify_center().rounded(7).border_1().border_color(on ? t.accent : t.muted)
+    .child(div().size(6).rounded(3).bg(on ? t.accent : t.background)))
+  .child(v_flex().flex_1().min_w(0).gap(2)
+    .child(div().text_size(12).font_semibold().child(title))
+    .child(div().text_size(11).text_color(t.dim).truncate().child(about)));
+const dialogButton = (t, id, label, primary, onClick) => div().id(id).h(28).px(14).flex().items_center().justify_center().rounded(7).text_size(12)
+  .cursor_pointer().bg(primary ? t.solid : t.raised).text_color(primary ? t.solid_foreground : t.foreground).hover((s) => s.opacity(0.9)).on_click(onClick).child(label);
 
 // A saved JSON list of strings, or [] (missing or broken).
 const parseList = (text) => {
@@ -266,8 +312,20 @@ export default class Jira extends View {
     // PRs: repo key -> (issue key -> [PR rows]) for the repos of every space; prIndex merges them by issue key (what rows
     // read); folder -> repo (git remote, no API call).
     this.prsByRepo = new Map(); this.prIndex = new Map(); this.remotes = new Map();
+    // Issues whose PR lines are shown (the PR icon toggles them); closed by default, not saved.
+    this.prOpen = new Set();
+    // The last list from disk first (shown while the fresh load runs), then the fresh load.
+    cx.spawn((cx) => this.loadCache(cx));
     this.refresh(cx);
     cx.timer.every(5 * 60 * 1000, (cx) => { if (this.auto) this.refresh(cx); });
+    // contract: prs.refreshed ({ ts }) is set by the prs mod after its Refresh replaced gh's cached PR list; the cache
+    // is fresh then, so a plain load shows it with no GitHub call. Optional: without the prs mod nothing comes.
+    // A cheap compare every 2 s: render() can't start the load (a task spawned with render's cx never runs).
+    this.started = Date.now();
+    cx.timer.every(2000, (cx) => {
+      const r = shared("prs.refreshed");
+      if (r && r.ts !== this.prsTs) { this.prsTs = r.ts; if (r.ts > this.started) this.loadPrs(cx); }
+    });
   }
 
   // The repo of a folder by its origin remote: `{ key, name }`, or null outside a repo. Worktrees of one repo share it.
@@ -293,49 +351,55 @@ export default class Jira extends View {
 
   // The open PRs of every space's repo (on open, Refresh, auto-sync), one gh call per repo in parallel; repos no space
   // points at any more leave memory. Redraws only when the merged index changed.
+  // `force` (Refresh): GitHub is asked past gh's cache (FORCE), and the new answer replaces the cached one every mod reads.
   // ponytail: a repo of a space opened later shows its PRs after the next Refresh / auto-sync.
-  loadPrs(cx) {
-    if (this.prLoading) { this.prAgain = true; return; }
+  loadPrs(cx, force = false) {
+    if (this.prLoading) { this.prAgain = true; this.prAgainForce ||= force; return; }
     this.prLoading = true;
     const places = this.places();
     cx.spawn(async (cx) => {
       try {
         const repos = new Map();
         for (const p of places) { const r = await this.repoOf(p.folder, p.on); if (r && !repos.has(r.key)) repos.set(r.key, { ...p, name: r.name }); }
-        await Promise.all([...repos].map(([key, p]) => this.fetchPrs(key, p)));
-        for (const key of [...this.prsByRepo.keys()]) if (!repos.has(key)) this.prsByRepo.delete(key);
-        const index = new Map();
-        for (const byKey of this.prsByRepo.values()) for (const [k, rows] of byKey) index.set(k, [...(index.get(k) ?? []), ...rows]);
-        const sig = JSON.stringify([...index]);
-        if (sig !== this.prSig) { this.prSig = sig; this.prIndex = index; cx.notify(); }
+        // Merges the repos' lists by issue key; redraws only when that changed. Called after a repo's cached answer
+        // (so lines show at once) and once all fresh answers are in.
+        const publish = () => {
+          for (const key of [...this.prsByRepo.keys()]) if (!repos.has(key)) this.prsByRepo.delete(key);
+          const index = new Map();
+          for (const byKey of this.prsByRepo.values()) for (const [k, rows] of byKey) index.set(k, [...(index.get(k) ?? []), ...rows]);
+          const sig = JSON.stringify([...index]);
+          if (sig !== this.prSig) { this.prSig = sig; this.prIndex = index; cx.notify(); }
+        };
+        await Promise.all([...repos].map(([key, p]) => this.fetchPrs(key, p, publish, force)));
+        publish();
       } catch {}
       finally {
         this.prLoading = false;
-        if (this.prAgain) { this.prAgain = false; this.loadPrs(cx); }
+        // A Refresh replaced gh's cached PR list: tell the other panels (prs reads jira.refreshed and shows it from the cache).
+        if (force) setShared("jira.refreshed", { ts: Date.now() });
+        if (this.prAgain) { const f = this.prAgainForce; this.prAgain = false; this.prAgainForce = false; this.loadPrs(cx, f); }
       }
     });
   }
 
-  // One repo's open PRs (first 100) by issue key; rows keep only what the PR line and the prs mod's dialog use.
+  // One repo's open PRs (the newest-updated 100) by issue key; rows keep only what the PR line and the prs mod's
+  // dialog use. openPrs (pr-badges.js) is the cached query the prs mod sends too: a repo not shown yet gets gh's
+  // cached answer first (STALE, at once, published through `publish`), then the fresh one.
   // No gh or a failed call: that repo keeps its last good list (none at first).
-  async fetchPrs(key, { folder, on, name }) {
-    try {
-      const r = await exec("gh", ["pr", "list", "--state", "open", "--limit", "100", "--json", PR_FIELDS], { cwd: folder, on, timeout: 60000 });
-      if (r.code !== 0) return;
-      const listed = JSON.parse(r.stdout);
-      // Copilot: requests and open threads (GraphQL); a failed call (gql.ok false) leaves the badge to the review text.
-      const gql = await copilotGql(name, listed.map((pr) => pr.number), folder, on);
+  async fetchPrs(key, { folder, on, name }, publish, force) {
+    const apply = ({ prs }) => {
       const byKey = new Map();
-      for (const pr of listed) {
-        // latestReviews stand in for reviews (the badges need each reviewer's latest; Copilot's severity its latest overview).
-        const reviewed = { ...pr, reviews: pr.latestReviews, cpAsked: gql.get(pr.number)?.asked ?? false };
+      for (const pr of prs) {
         const row = { number: pr.number, title: pr.title, url: pr.url, headRefName: pr.headRefName, baseRefName: pr.baseRefName,
-          isDraft: pr.isDraft, mergeable: pr.mergeable, ci: ci(pr.statusCheckRollup), approval: approval(reviewed), author: pr.author?.login ?? "",
-          copilot: copilotBadge(reviewed, gql.ok ? gql.get(pr.number)?.urls ?? [] : undefined), repo: { cwd: folder, on } };
+          isDraft: pr.isDraft, mergeable: pr.mergeable, ci: ci(pr.statusCheckRollup), approval: approval(pr), author: pr.author?.login ?? "",
+          copilot: copilotBadge(pr, pr.cpUrls), repo: { cwd: folder, on } };
         for (const k of prKeys(pr)) byKey.set(k, [...(byKey.get(k) ?? []), row]);
       }
       this.prsByRepo.set(key, byKey);
-    } catch {}
+    };
+    if (!name) return;
+    if (!this.prsByRepo.has(key)) try { apply(await openPrs(name, folder, on, STALE)); publish(); } catch {}
+    try { apply(await openPrs(name, folder, on, force ? FORCE : undefined)); } catch {}
   }
 
   // The focused terminal's branch; for a mod pane (wb-diff), a terminal's of the focused tab. Null when none.
@@ -345,36 +409,35 @@ export default class Jira extends View {
     return pane?.branch || all.find((p) => p.branch && p.tab === f?.tab)?.branch || null;
   }
 
-  // "<machine>|<branch>" -> the first terminal pane on that branch and its space: where a PR line's go-to button leads.
-  // Built once per render.
+  // "<machine>|<branch>" -> the terminal panes on that branch, each { pane, space, agent, text, seq }: where a PR
+  // line's go-to button leads (see paneFor). `text` is an agent's tab name and titles, upper-cased. Built once per render.
   branchPanes() {
-    const spaceOf = new Map(), out = new Map();
+    const spaceOf = new Map(), out = new Map(), agentOf = new Map(agents().map((a) => [a.pane, a]));
     for (const s of spaces()) for (const tb of s.tabs ?? []) spaceOf.set(tb.id, s);
     for (const p of panes()) {
-      const s = spaceOf.get(p.tab), k = `${s?.machine ?? null}|${p.branch}`;
-      if (s && p.branch && !out.has(k)) out.set(k, { pane: p.pane, space: s });
+      const s = spaceOf.get(p.tab), k = `${s?.machine ?? null}|${p.branch}`, a = agentOf.get(p.pane);
+      if (!s || !p.branch) continue;
+      const text = a ? [a.tab_name, a.title, p.title].filter(Boolean).join("\n").toUpperCase() : "";
+      out.set(k, [...(out.get(k) ?? []), { pane: p.pane, space: s, cwd: p.cwd, branch: p.branch, agent: Boolean(a), text, seq: a?.seq ?? 0 }]);
     }
     return out;
   }
 
-  // The go-to button: the space (and pane) where a terminal is on the PR's head branch; else the branch's worktree in a
-  // new space; else a note (no checkout of it yet: the row's session button or prs' "Work in worktree" makes one).
-  goToPr(pr, cx) {
-    const { cwd, on } = pr.repo ?? {}, branch = pr.headRefName;
-    const hit = this.byBranch?.get(`${on ?? null}|${branch}`);
-    if (hit) { run("space.select", { id: hit.space.id }); run("pane.focus", { pane: hit.pane }); return; }
-    cx.spawn(async () => {
-      const r = await exec("git", ["worktree", "list", "--porcelain"], { cwd, on, timeout: 15000 }).catch(() => null);
-      let path = null, cur = null;
-      for (const line of (r?.stdout ?? "").split("\n")) {
-        if (line.startsWith("worktree ")) cur = line.slice(9);
-        else if (line === `branch refs/heads/${branch}`) { path = cur; break; }
-      }
-      if (!path) { notify({ title: "Jira", body: `${branch} isn't checked out anywhere: start a session to make a worktree`, level: "info" }); return; }
-      const open = spaces().find((s) => s.folder === path && (s.machine ?? null) === (on ?? null));
-      if (open) run("space.select", { id: open.id }); else run("space.new", { folder: path, machine: on ?? "" });
-    });
+  // The agent already working on the issue in any space: one whose tab name or title names the key (a session jira
+  // starts or resumes is named "<key> <title>"), the latest active one; on `branch` first when given (a PR's go-to).
+  // Null when none: then the Start session dialog asks what to do.
+  agentFor(issueKey, branch = null) {
+    const named = [...this.branchPanes().values()].flat().filter((p) => p.agent && mentions(p.text, issueKey)).sort((a, b) => b.seq - a.seq);
+    return (branch && named.find((p) => p.branch === branch)) || named[0] || null;
   }
+
+  // For the go-to button's color: an agent on the issue sits on the PR's branch (from the render's byBranch).
+  paneFor(pr, issueKey) {
+    return (this.byBranch?.get(`${pr.repo?.on ?? null}|${pr.headRefName}`) ?? []).find((p) => p.agent && mentions(p.text, issueKey)) ?? null;
+  }
+
+  // A PR line's go-to: as the session button, for that PR (openStart).
+  goToPr(pr, issueKey) { return this.openStart(issueKey, pr); }
 
   // A PR line's click: the prs mod's PR dialog (its props().pr: number, url, isDraft, repo { cwd, on }) when that mod is
   // installed here, else the PR in the browser.
@@ -413,8 +476,9 @@ export default class Jira extends View {
     });
   }
 
-  refresh(cx) {
-    this.loadPrs(cx);
+  // `force` (the Refresh button): PRs past gh's cache (see loadPrs); Jira itself is always asked.
+  refresh(cx, force = false) {
+    this.loadPrs(cx, force);
     // Herdr's fetch has no timeout or abort: a request that hangs would keep `loading` (and so every
     // refresh) blocked for good. After 2 minutes a new one may start; the hung one's finally leaves it be.
     if (this.loading && Date.now() - this.loadingSince < 120000) return;
@@ -454,7 +518,9 @@ export default class Jira extends View {
         if (orderKeys !== this.orderKeys) { this.statusOrder = await boardOrder(base, creds.auth, orderKeys.split(",").filter(Boolean)); this.orderKeys = orderKeys; }
         // render() groups and sorts them (regroup) by the settings.
         this.mine = issues; this.backlog = backlog; this.count = issues.length; this.error = null; this.view = null;
+        this.fresh = true;
         icons = { auth: creds.auth, base, site: s.site, issues: [...issues, ...backlog] };
+        this.saveCache(s);
       } catch (e) {
         // A revoked or expired token: back to the form.
         if (e.status === 401) {
@@ -470,7 +536,37 @@ export default class Jira extends View {
   // Jira's icons for the issue types of `issues` not asked for yet this session: a saved file is used as is, else
   // the icon is fetched (through `base`, so a token with scopes works too) and saved. One redraw if any is new.
   // ponytail: SVG only — Herdr's fetch has only text(); a PNG icon (a custom upload) keeps our own (typeIcon).
-  async loadIcons(cx, { auth, base, site, issues }) {
+  // The last loaded list, kept on disk (CACHE_FILE) so a new copy of the panel (another tab, a reload) shows it at
+  // once while the fresh load runs; the fresh list replaces it without a "Loading…" in between. Only the fields the
+  // rows, groups and sorting read; written only when it changed. Shown only for the same site.
+  async loadCache(cx) {
+    try {
+      const c = JSON.parse(await fs.readFile(`${appHome()}/${CACHE_FILE}`, "utf8"));
+      if (this.fresh || c.site !== this.settings().site) return;
+      this.mine = c.mine ?? []; this.backlog = c.backlog ?? []; this.count = this.mine.length; this.view = null;
+      this.statusOrder ??= new Map(c.statusOrder ?? []); this.cacheText = JSON.stringify(c);
+      cx.notify();
+      await this.loadIcons(cx, { issues: [...this.mine, ...this.backlog], savedOnly: true });
+    } catch {}
+  }
+
+  async saveCache(s) {
+    const slim = (i) => ({ key: i.key, sprint: i.sprint ? { id: i.sprint.id, name: i.sprint.name, state: i.sprint.state } : null, fields: {
+      summary: i.fields.summary, labels: i.fields.labels, updated: i.fields.updated, created: i.fields.created,
+      status: i.fields.status && { id: i.fields.status.id, name: i.fields.status.name, statusCategory: { key: i.fields.status.statusCategory?.key } },
+      issuetype: i.fields.issuetype && { id: i.fields.issuetype.id, name: i.fields.issuetype.name, iconUrl: i.fields.issuetype.iconUrl, subtask: i.fields.issuetype.subtask },
+      parent: i.fields.parent && { key: i.fields.parent.key, fields: { summary: i.fields.parent.fields?.summary } } } });
+    const text = JSON.stringify({ site: s.site, mine: this.mine.map(slim), backlog: this.backlog.map(slim), statusOrder: [...(this.statusOrder ?? [])] });
+    if (text === this.cacheText) return;
+    this.cacheText = text;
+    try {
+      await fs.mkdir(`${appHome()}/data/jira`, { recursive: true });
+      await fs.writeFile(`${appHome()}/${CACHE_FILE}`, text);
+    } catch {}
+  }
+
+  // `savedOnly` (the cached list, no credentials yet): only icons already on disk; the others wait for the fresh load.
+  async loadIcons(cx, { auth, base, site, issues, savedOnly = false }) {
     const types = new Map();
     for (const i of issues) { const ty = i.fields.issuetype; if (ty?.id && ty.iconUrl && !this.typeIcons.has(ty.id)) types.set(ty.id, ty); }
     if (!types.size) return;
@@ -484,6 +580,7 @@ export default class Jira extends View {
       const path = iconFile(ty);
       try {
         if (!(await fs.exists(`${root}/${path}`))) {
+          if (savedOnly) { this.typeIcons.delete(ty.id); return; }
           const url = ty.iconUrl.startsWith(site) ? base + ty.iconUrl.slice(site.length) : ty.iconUrl;
           const text = await withTimeout(cx, fetch(url, { headers: { Authorization: auth } }).then((r) => (r.ok ? r.text() : ""), () => ""), 15000, "");
           if (!isSvg(text)) return;
@@ -623,110 +720,222 @@ export default class Jira extends View {
     return [...this.mine, ...this.backlog].find((i) => i.key === key)?.fields.summary ?? "";
   }
 
-  // Opens the "Start session" dialog for an issue, for the focused folder (else the space's) and its machine.
-  // With our history mod installed here, the dialog also holds it below the form, searching the task key in the active
-  // space's project (history's props().query); its Resume closes the whole dialog (both blocks share props().overlay).
-  async openStart(key) {
-    const start = { key, summary: this.summaryOf(key), ...this.startPlace() };
-    this.home ??= (await exec("sh", ["-c", 'printf %s "$HOME"']).catch(() => null))?.stdout.trim() || null;
-    // ponytail: history reads this machine's sessions, so a space on another machine gets the plain dialog.
-    const history = !start.on && start.folder && this.home && await fs.exists(`${this.home}/.config/herdr-app/mods/history/main.js`).catch(() => false);
-    if (!history) { openOverlay({ mod: "jira", kind: "dialog", width: 580, height: 360, props: { start } }); return; }
-    openOverlay({ mod: "jira", kind: "dialog", width: 640, height: 720, layout: { type: "column", children: [
-      { type: "block", size: { px: 360 }, content: { mod: "jira", props: { start } } },
-      { type: "block", content: { mod: "history", props: { query: key, embedded: true, folder: start.folder } } },
-    ] } });
+  // The session button and a PR line's go-to (with that PR; the session button takes the issue's PR when it has
+  // exactly one). An agent already on the issue gets the focus (never a second copy of it). Otherwise always the
+  // Start session dialog, which asks where (worktree or here) and how (resume the past session or a new one).
+  openStart(key, pr = null) {
+    const prs = this.prIndex?.get(key) ?? [];
+    pr ??= prs.length === 1 ? prs[0] : null;
+    const hit = this.agentFor(key, pr?.headRefName);
+    if (hit) { run("space.select", { id: hit.space.id }); run("pane.focus", { pane: hit.pane }); return; }
+    return this.openStartDialog(key, pr);
   }
 
-  // The dialog: new worktree (the mod creates it from origin/<base>, then a new space runs the agent there and the
-  // agent copies env files etc. per the repo's docs) or a new branch here (the agent creates it). Outside a git
-  // repo it only starts the agent with the task. An agent no longer installed starts by its key, so the error shows.
+  // The folder the dialog works from, so it lands in the issue's repo whichever space is active:
+  // 1. a terminal already on the issue's branch (the PR's, else one naming the key);
+  // 2. a PR: the focused folder when it is in the PR's repo, else the folder the PR was loaded from;
+  // 3. the issue's latest past session in any project (human-history, this machine): its worktree when it still
+  //    exists, else its repo's main checkout (that session comes along as `past`);
+  // 4. the focused folder.
+  async startFolder(key, pr) {
+    const terms = [...this.branchPanes().values()].flat().filter((p) => p.cwd);
+    const on = (t) => (t.space.machine ?? null);
+    const onBranch = pr ? terms.find((t) => t.branch === pr.headRefName) : terms.find((t) => mentions(t.branch.toUpperCase(), key));
+    if (onBranch) return { folder: onBranch.cwd, on: on(onBranch) };
+    const place = this.startPlace();
+    if (pr) {
+      const { cwd, on: prOn } = pr.repo ?? {};
+      const same = place.folder && (place.on ?? null) === (prOn ?? null)
+        && (await this.repoOf(place.folder, prOn))?.key === (await this.repoOf(cwd, prOn))?.key;
+      return same ? place : { folder: cwd, on: prOn ?? null };
+    }
+    this.home ??= (await exec("sh", ["-c", 'printf %s "$HOME"']).catch(() => null))?.stdout.trim() || null;
+    const past = this.home ? await pastSession(key, this.home, "all") : null;
+    for (const dir of [past?.worktree, past?.cwd, past?.repo?.replace(/\/\.git\/?$/, "")].filter(Boolean)) {
+      if ((await exec("test", ["-d", dir]).catch(() => null))?.code === 0) return { folder: dir, on: null };
+    }
+    return place;
+  }
+
+  // Opens the Start session dialog (its own past sessions list replaces the history mod's panel it used to hold).
+  async openStartDialog(key, pr = null) {
+    const place = await this.startFolder(key, pr);
+    const start = { key, summary: this.summaryOf(key), ...place, pr: pr ? { number: pr.number, url: pr.url, headRefName: pr.headRefName } : null };
+    openOverlay({ mod: "jira", kind: "dialog", width: 620, height: 640, props: { start } });
+  }
+
+  // The dialog's facts, read once it opens: the repo (main checkout, default branch), its worktrees by branch, its
+  // branches (local and origin's), the folder's branch and whether it has uncommitted changes, and the issue's latest
+  // past session (human-history, local folders only). The branch field starts with the PR's branch, else an existing
+  // branch naming the key (local first), else a new name. "Here" is picked when the folder is already on that branch.
   initStart(cx) {
     const s = props().start;
-    this.st = { ...s, mode: "worktree", git: null, error: null, busy: false };
-    this.stBranch = InputState.new({ value: branchFor(s.key, s.summary), placeholder: "branch name" });
+    // sessions: undefined while searching; pick: the index of the session to resume, -1 = a new one.
+    this.st = { ...s, mode: "worktree", git: null, sessions: undefined, pick: -1, error: null, busy: false };
+    this.stBranch = InputState.new({ value: s.pr?.headRefName ?? branchFor(s.key, s.summary), placeholder: "branch name" });
     this.stBase = InputState.new({ value: "", placeholder: "base branch, e.g. master" });
     for (const i of [this.stBranch, this.stBase]) i.on("submit", (_e, cx) => this.start(cx));
+    this.stBranch.on("change", (_e, cx) => cx.notify());
     cx.spawn(async (cx) => {
+      const git = (args) => exec("git", args, { cwd: s.folder, on: s.on, timeout: 15000 }).catch(() => null);
       const info = s.folder ? await gitInfo(s.folder, s.on) : null;
-      if (info) {
-        // The main checkout (not a worktree's folder) and the remote's default branch.
-        const home = await exec("sh", ["-c", 'printf %s "$HOME"'], { on: s.on }).catch(() => null);
-        this.st.git = { main: info.main, repo: info.main.split("/").pop(), home: home?.stdout.trim() || "~" };
-        this.stBase.set_value(info.base);
-      } else this.st.git = false;
+      if (!info) { this.st.git = false; this.st.sessions = []; cx.notify(); return; }
+      const [home, wts, refs, cur, status] = await Promise.all([
+        exec("sh", ["-c", 'printf %s "$HOME"'], { on: s.on }).catch(() => null),
+        worktreesOf(s.folder, s.on),
+        git(["for-each-ref", "--format=%(refname:short)", "refs/heads", "refs/remotes/origin"]),
+        git(["rev-parse", "--abbrev-ref", "HEAD"]),
+        git(["status", "--porcelain", "-uno"]),
+      ]);
+      const names = (refs?.stdout ?? "").split("\n").filter(Boolean);
+      const local = new Set(names.filter((n) => !n.startsWith("origin/")));
+      const remote = new Set(names.filter((n) => n.startsWith("origin/") && n !== "origin/HEAD").map((n) => n.slice(7)));
+      this.st.git = { main: info.main, repo: info.main.split("/").pop(), home: home?.stdout.trim() || "~", wts, local, remote,
+        cur: cur?.stdout.trim() ?? "", dirty: Boolean(status?.stdout.trim()) };
+      this.stBase.set_value(info.base);
+      if (!s.pr) {
+        const named = [...local, ...remote].find((n) => mentions(n.toUpperCase(), s.key));
+        if (named) this.stBranch.set_value(named);
+      }
+      if (this.st.git.cur === this.stBranch.value().trim()) this.st.mode = "here";
+      cx.notify();
+      // The issue's past sessions in this repo (all worktrees), best first; the best is picked.
+      this.st.sessions = s.on ? [] : await pastSessions(s.key, info.main);
+      this.st.pick = this.st.sessions.length ? 0 : -1;
       cx.notify();
     });
   }
 
+  // Start: put the branch in place, then the agent there, in the space that already shows that folder (a new tab),
+  // else a new space (worktree) or the active one (here).
+  // - Worktree: the branch's worktree when it has one; else `git worktree add` next to the main checkout, from the
+  //   local branch, else origin's (fetched, tracked), else a new branch from origin/<base>.
+  // - Here: the folder switches to the branch (local, origin's tracked, or new from origin/<base>); refused while it
+  //   has uncommitted changes or another worktree has the branch. Nothing to do when it is already on it.
+  // - The agent: the past session resumed there (Claude's conversation file copied over when it ran in another
+  //   folder), or a new one with a task (a fresh worktree: prepare it; an existing branch: read and wait; a new branch
+  //   here: work on it). Outside a git repo only a new agent starts in the folder.
+  // ponytail: origin only; a PR from a fork fails at the fetch with git's message. `gh pr checkout` if forks matter.
   start(cx) {
-    const st = this.st;
-    if (st.busy || st.git === null) return;
+    const st = this.st, g = st.git;
+    if (st.busy || g === null) return;
+    const past = st.sessions?.[st.pick] ?? null;
     const branch = this.stBranch.value().trim(), base = this.stBase.value().trim().replace(/^origin\//, "");
-    const want = this.settings().agent ?? "claude";
     const fail = (m) => { st.error = m; st.busy = false; cx.notify(); };
-    if (st.git && (!branch || /\s/.test(branch))) return fail("Branch name without spaces");
-    if (st.git && !base) return fail("Base branch, e.g. master");
+    if (g && (!branch || /\s/.test(branch))) return fail("Branch name without spaces");
+    if (g && !g.local.has(branch) && !g.remote.has(branch) && !base) return fail("Base branch for the new branch, e.g. master");
+    const elsewhere = g && g.wts.get(branch);
+    if (g && st.mode === "here" && g.cur !== branch) {
+      if (g.dirty) return fail("This folder has uncommitted changes: commit or stash them, or pick Worktree");
+      if (elsewhere) return fail(`${branch} is checked out in ${elsewhere}: pick Worktree to go there`);
+    }
     st.busy = true; st.error = null; cx.notify();
     cx.spawn(async (cx) => {
       try {
-        const [argv, description] = await Promise.all([
-          agentArgv(want, st.on),
-          withTimeout(cx, describeIssue(this.settings(), st.key), 15000, ""),
-        ]);
-        if (st.git && st.mode === "worktree") {
-          const error = await openWorktree({ main: st.git.main, on: st.on, branch, base, key: st.key, summary: st.summary, description, argv });
-          if (error) return fail(error);
-        } else {
-          const task = st.git ? branchTask({ key: st.key, summary: st.summary, description, branch, base }) : `${st.key}: ${st.summary}${about(description)}`;
-          run("tab.new", { name: tabName(st.key, st.summary), argv, task, ...(st.folder ? { folder: st.folder } : {}) });
+        const git = (cwd, args, timeout = 30000) => exec("git", args, { cwd, on: st.on, timeout });
+        let folder = st.folder, fresh = false;
+        if (g) {
+          const isLocal = g.local.has(branch);
+          let isRemote = g.remote.has(branch);
+          // The newest of origin's branch (also one created since the dialog opened).
+          if (!isLocal) { const f = await git(g.main, ["fetch", "origin", branch], 120000); isRemote = f.code === 0; }
+          const from = async (args) => {
+            if (isLocal) return [branch];
+            if (isRemote) return ["--track", "-b", branch, ...args, `origin/${branch}`];
+            const f = await git(g.main, ["fetch", "origin", base], 120000);
+            if (f.code !== 0) throw new Error(`git fetch origin ${base}: ${lastLine(f)}`);
+            fresh = true;
+            return ["-b", branch, ...args, `origin/${base}`];
+          };
+          if (st.mode === "worktree") {
+            folder = elsewhere ?? worktreePath(g.main, branch);
+            if (!elsewhere) {
+              const how = await from([folder]);
+              const added = await git(g.main, ["worktree", "add", ...(isLocal ? [folder, branch] : how)]);
+              if (added.code !== 0) throw new Error(`git worktree add: ${lastLine(added)}`);
+            }
+          } else if (g.cur !== branch) {
+            const done = await git(folder, ["checkout", ...(await from([]))]);
+            if (done.code !== 0) throw new Error(`git checkout: ${lastLine(done)}`);
+          }
         }
+        const name = tabName(st.key, st.summary);
+        let launch = null;
+        if (past) {
+          const argv = await resumeArgv(past, folder);
+          if (argv) { launch = { name, argv }; notify({ title: `Resumed ${st.key}`, body: past.title || past.session_id, level: "info" }); }
+        }
+        if (!launch) {
+          const [argv, description] = await Promise.all([
+            agentArgv(this.settings().agent ?? "claude", st.on),
+            withTimeout(cx, describeIssue(this.settings(), st.key), 15000, ""),
+          ]);
+          const facts = { key: st.key, summary: st.summary, description, branch, base, pr: st.pr };
+          const task = !g ? `${st.key}: ${st.summary}${about(description)}`
+            : st.mode === "worktree" && (fresh || !elsewhere) ? worktreeTask({ ...facts, path: folder, main: g.main, fresh })
+            : fresh ? `${st.key}: ${st.summary}${about(description)} — You are on the new branch ${branch}, created from origin/${base}. Work on ${st.key}.`
+            : existingTask(facts);
+          launch = { name, argv, task };
+        }
+        // The space that already shows this folder (its own folder, or a terminal there).
+        const tabSpace = new Map();
+        for (const s of spaces()) if ((s.machine ?? null) === (st.on ?? null)) for (const tb of s.tabs ?? []) tabSpace.set(tb.id, s);
+        const shown = [...new Set(tabSpace.values())].find((s) => s.folder === folder)
+          ?? tabSpace.get(panes().find((p) => p.cwd === folder && tabSpace.has(p.tab))?.tab);
+        if (shown) { run("space.select", { id: shown.id }); run("tab.new", { ...launch, folder }); }
+        else if (st.mode === "worktree" && g) run("space.new", { ...launch, folder, machine: st.on ?? "" });
+        else run("tab.new", { ...launch, ...(folder ? { folder } : {}) });
         closeOverlay(props().overlay);
       } catch (e) { fail(String(e.message ?? e)); }
     });
   }
 
   startView(t) {
-    const st = this.st, agentName = this.settings().agentName ?? "Claude Code";
-    // A choice card: a radio dot and a title, a short wrapped line under it. min_w(0) lets two share the row.
-    const choice = (mode, title, about) => {
-      const on = st.mode === mode;
-      return h_flex().id(`mode-${mode}`).flex_1().min_w(0).p(10).gap(10).items_start().rounded(8).border_1().cursor_pointer()
-        .border_color(on ? t.accent : t.border).bg(on ? t.selected : t.background).hover((s) => s.border_color(t.accent))
-        .on_click((_e, cx) => { st.mode = mode; cx.notify(); })
-        .child(div().mt(2).size(14).flex_none().flex().items_center().justify_center().rounded(7).border_1().border_color(on ? t.accent : t.muted)
-          .child(div().size(6).rounded(3).bg(on ? t.accent : t.background)))
-        .child(v_flex().flex_1().min_w(0).gap(2)
-          .child(div().text_size(12).font_semibold().child(title))
-          .child(div().text_size(11).text_color(t.dim).child(about)));
-    };
-    const button = (id, label, primary, onClick) => div().id(id).h(28).px(14).flex().items_center().justify_center().rounded(7).text_size(12)
-      .cursor_pointer().bg(primary ? t.solid : t.raised).text_color(primary ? t.solid_foreground : t.foreground).hover((s) => s.opacity(0.9)).on_click(onClick).child(label);
-    const tilde = (p) => st.git?.home && p?.startsWith(st.git.home) ? "~" + p.slice(st.git.home.length) : p;
-    const where = !st.git ? null : st.mode === "worktree"
-      ? `Opens a new space in ${tilde(worktreePath(st.git.main, this.stBranch.value().trim()))}`
-      : `Opens a new tab in ${tilde(st.folder)}; the agent creates the branch`;
+    const st = this.st, g = st.git, agentName = this.settings().agentName ?? "Claude Code";
+    const branch = this.stBranch.value().trim();
+    const button = (...a) => dialogButton(t, ...a);
+    const tilde = (p) => g?.home && p?.startsWith(g.home) ? "~" + p.slice(g.home.length) : p;
+    const choice = (id, on, title, about, pick) => choiceCard(t, id, on, title, about, () => { pick(); st.error = null; });
+    const wt = g ? g.wts.get(branch) : null;
+    const known = g && (g.local.has(branch) || g.remote.has(branch));
+    const kind = !g ? "" : st.pr && branch === st.pr.headRefName ? `PR #${st.pr.number} branch` : g.local.has(branch) ? "Existing branch"
+      : g.remote.has(branch) ? "Existing branch on origin" : `New branch from origin/${this.stBase.value().trim() || "…"}`;
+    const hereAbout = !g ? "" : g.cur === branch ? `${tilde(st.folder)} is on this branch`
+      : g.dirty ? `${tilde(st.folder)} has uncommitted changes` : wt ? `Checked out in ${tilde(wt)}` : `Switch ${tilde(st.folder)} to it`;
+    const sessions = st.sessions;
+    // A past session's line: agent, age, branch, folder.
+    const sessAbout = (s) => [s.agent, s.updated_at ? daysAgo(s.updated_at) : "", s.branch, tilde(s.cwd)].filter(Boolean).join(" · ");
+    const section = (label) => div().text_size(10).font_semibold().text_color(t.dim).child(label.toUpperCase());
     return v_flex().id("start").size_full().bg(t.background).text_color(t.foreground).text_size(12)
       .child(v_flex().flex_none().px(16).pt(14).pb(12).gap(4).border_b(1).border_color(t.border)
         .child(div().font_semibold().text_size(14).child(`Start ${agentName} session`))
         .child(h_flex().gap(6).items_center().min_w(0)
           .child(div().flex_none().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(st.key))
           .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(st.summary))))
-      .child(v_flex().flex_1().min_h(0).px(16).py(14).gap(14)
-        .child(st.git === null ? div().text_color(t.dim).child("Checking the folder…")
-          : st.git === false ? div().text_color(t.dim).child(`${tilde(st.folder) ?? "No folder"} is not a git repository: the agent starts there with the task.`)
-          : v_flex().gap(14)
-            .child(h_flex().gap(8).items_stretch()
-              .child(choice("worktree", "New worktree", "Own folder and space; the agent copies env files and certificates"))
-              .child(choice("branch", "New branch here", `In the current ${st.git.repo} folder`)))
+      .child(v_flex().id("start-body").flex_1().min_h(0).overflow_y_scroll().px(16).py(12).gap(12)
+        .child(g === null ? div().text_color(t.dim).child("Checking the folder…")
+          : g === false ? div().text_color(t.dim).child(`${tilde(st.folder) ?? "No folder"} is not a git repository: the agent starts there.`)
+          : v_flex().gap(12)
             .child(h_flex().gap(8).items_end()
-              .child(div().flex_1().min_w(0).child(this.field("st-branch", "Branch", this.stBranch, t)))
-              .child(div().w(150).flex_none().child(this.field("st-base", "From origin/", this.stBase, t))))
-            .child(div().text_size(11).text_color(t.dim).truncate().child(where)))
+              .child(div().flex_1().min_w(0).child(this.field("st-branch", `Branch · ${kind}`, this.stBranch, t)))
+              .when(!known, (e) => e.child(div().w(150).flex_none().child(this.field("st-base", "From origin/", this.stBase, t)))))
+            .child(section("Where: the folder and branch the agent works in"))
+            .child(h_flex().gap(8).items_stretch()
+              .child(choice("mode-worktree", st.mode === "worktree", wt ? "Its worktree" : "New worktree",
+                tilde(wt ?? worktreePath(g.main, branch || "…")), () => { st.mode = "worktree"; }))
+              .child(choice("mode-here", st.mode === "here", `Here · ${g.repo}`, hereAbout, () => { st.mode = "here"; }))))
+        // The session: one of the issue's past sessions to resume (the best picked) or a new one, one card each.
+        .child(div().h(1).bg(t.border))
+        .child(section("Session: the conversation the agent starts with"))
+        .child(sessions === undefined ? div().text_size(11).text_color(t.dim).child("Looking for past sessions…")
+          : v_flex().gap(6)
+            .children(sessions.map((s, i) => choice(`sess-${i}`, st.pick === i, `Resume: ${s.title || s.session_id}`, sessAbout(s), () => { st.pick = i; })))
+            .child(choice("sess-new", st.pick === -1, `New ${agentName} session`,
+              sessions.length ? "Without the past context" : "No past session mentions this issue", () => { st.pick = -1; })))
         .when(Boolean(st.error), (e) => e.child(div().text_size(11).text_color(t.ansi1).child(st.error))))
       .child(h_flex().flex_none().px(16).py(12).gap(8).justify_end().border_t(1).border_color(t.border)
         .child(button("st-cancel", "Cancel", false, () => closeOverlay(props().overlay)))
-        .child(button("st-start", st.busy ? (st.mode === "worktree" ? "Creating worktree…" : "Starting…") : "Start", true, (_e, cx) => this.start(cx))));
+        .child(button("st-start", st.busy ? "Starting…" : st.pick >= 0 ? "Resume" : "Start", true, (_e, cx) => this.start(cx))));
   }
 
   menuView(t) {
@@ -739,7 +948,7 @@ export default class Jira extends View {
       // The menu floats over issue rows: without this the press falls through to the row below and opens Jira.
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .child(item("menu-copy-key", "Copy task ID", (cx) => cx.write_to_clipboard(key)))
-      .child(item("menu-session", `Start ${this.settings().agentName ?? "Claude Code"} session…`, () => this.openStart(key)));
+      .child(item("menu-session", `Start ${this.settings().agentName ?? "Claude Code"} session…`, () => { const prs = this.prIndex?.get(key) ?? []; this.openStartDialog(key, prs.length === 1 ? prs[0] : null); }));
   }
 
   saveFilters() {
@@ -801,10 +1010,16 @@ export default class Jira extends View {
     const f = issue.fields, cat = f.status?.statusCategory?.key;
     const color = cat === "indeterminate" ? t.working : cat === "done" ? t.done : t.muted;
     const hotfix = (f.labels ?? []).some((l) => l.toLowerCase() === "hotfix");
-    const prs = this.prIndex.get(issue.key) ?? [];
-    // Two parts side by side in one group: the issue (hover, click, menu, tooltip) and its PR lines below it, each with
-    // its own hover, so pointing at a PR doesn't light up the issue. The group carries the highlights and the hotfix bar.
-    return v_flex().id(`issue-${section}-${issue.key}`).flex_none().rounded(5).relative().when(prs.length > 0, (e) => e.pb(3))
+    const prs = this.prIndex.get(issue.key) ?? [], open = prs.length > 0 && this.prOpen.has(issue.key);
+    // The PR icon's color: red when a PR has failed CI, conflicts or requested changes; yellow while CI runs; green when
+    // every PR is approved with CI passed; else dim.
+    const prColor = prs.some((p) => p.ci === "fail" || p.mergeable === "CONFLICTING" || p.approval === "changes") ? t.ansi1
+      : prs.some((p) => p.ci === "wait") ? t.working
+      : prs.every((p) => p.approval === "approved" && p.ci !== "fail") ? t.done : t.dim;
+    // Two parts side by side in one group: the issue (hover, click, menu, tooltip) and its PR lines below it (shown by
+    // the PR icon), each with its own hover, so pointing at a PR doesn't light up the issue. The group carries the
+    // highlights and the hotfix bar.
+    return v_flex().id(`issue-${section}-${issue.key}`).flex_none().rounded(5).relative().when(open, (e) => e.pb(3))
       // Label "hotfix": a red bar on the row's left edge.
       .when(hotfix, (e) => e.child(div().absolute().left(1).top(4).bottom(4).w(3).rounded(2).bg(t.ansi1)))
       // The last opened issue: a faint background, so it isn't taken for the current worktree's (below); the right-click menu's row: selected.
@@ -818,28 +1033,41 @@ export default class Jira extends View {
         .on_mouse_down("left", (_e, cx) => { this.selected = issue.key; exec("open", [this.url(issue.key)]); cx.notify(); })
         // The root's own right-press handler (it runs next) places the menu.
         .on_mouse_down("right", () => { this.menuKey = issue.key; })
-        // Two lines: the summary, then the type icon, the key (dim), the status (its category's color), the age and the session button, small.
-        .child(div().truncate().child(f.summary ?? ""))
-        .child(h_flex().gap(6).items_center().text_size(10)
-          .child(image(this.typeIcons.get(f.issuetype?.id) ?? typeIcon(f.issuetype)).size(12).flex_none())
+        // Two lines, as prs lays out a PR: the type icon, the key (dim), the status (its category's color), the age, the PR
+        // icon and the session button; then the summary, under the key. Icon sizes as in prs (14 in a 15 box, buttons 18).
+        .child(h_flex().gap(6).items_center()
+          .child(div().size(15).flex_none().flex().items_center().justify_center()
+            .child(image(this.typeIcons.get(f.issuetype?.id) ?? typeIcon(f.issuetype)).size(14)))
           .child(div().flex_none().text_color(t.dim).child(issue.key))
           .child(div().min_w(0).truncate().text_color(color).child(f.status?.name ?? ""))
           .when(Boolean(f.created), (e) => e.child(div().flex_none().text_color(t.dim).child(daysAgo(f.created))))
           .child(div().flex_1())
+          // The issue has open PRs: their icon (with the count from two on) shows or hides their lines; the press
+          // stops here, so the row doesn't open Jira.
+          .when(prs.length > 0, (e) => e.child(h_flex().id(`prs-${section}-${issue.key}`).flex_none().h(18).px(3).gap(2).items_center().rounded(4)
+            .text_color(prColor).when(open, (s) => s.bg(t.hover)).hover((s) => s.bg(t.hover))
+            .tooltip(`${prs.length === 1 ? "1 pull request" : `${prs.length} pull requests`}: ${prs.map((p) => `#${p.number}`).join(", ")}\nClick to ${open ? "hide" : "show"}`)
+            .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); if (!this.prOpen.delete(issue.key)) this.prOpen.add(issue.key); cx.notify(); })
+            .child(svg("mods/jira/pr.svg").size(14))
+            .when(prs.length > 1, (e) => e.child(div().text_size(11).font_semibold().child(String(prs.length))))))
           // Start a Claude session for this task; the press stops here, so the row doesn't open Jira.
-          .child(div().id(`session-${section}-${issue.key}`).flex_none().size(16).flex().items_center().justify_center().rounded(4)
-            .text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(`Start a ${this.settings().agentName ?? "Claude Code"} session for ${issue.key}`)
+          .child(div().id(`session-${section}-${issue.key}`).flex_none().size(18).flex().items_center().justify_center().rounded(4)
+            .text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(`Go to the agent on ${issue.key} in any space; else start or resume a session (asks where)`)
             .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.openStart(issue.key); })
-            .child(svg("mods/jira/session.svg").size(12)))))
-      .children(prs.map((pr) => this.prLine(pr, t, `${section}-${issue.key}`)));
+            .child(svg("mods/jira/session.svg").size(12))))
+        .child(div().pl(21).truncate().child(f.summary ?? "")))
+      .children(open ? prs.map((pr) => this.prLine(pr, t, issue.key, `${section}-${issue.key}`, new Set(prs.map((p) => repoOfUrl(p.url))).size > 1)) : []);
   }
 
   // A PR of any space's repo under its issue: CI dot, approval, conflict, draft, number and head branch. Click opens it.
-  prLine(pr, t, id) {
+  // `repos`: the issue's PRs are in more than one repo, so the line names its repo before the number.
+  prLine(pr, t, issueKey, row, repos) {
     const dot = { ok: t.done, fail: t.ansi1, wait: t.working }[pr.ci] ?? t.border;
     const [apIcon, apColor] = pr.approval === "approved" ? ["approved", t.done] : pr.approval === "changes" ? ["changes", t.ansi1] : ["approved", t.border];
     const repo = repoOfUrl(pr.url);
-    const here = this.byBranch?.get(`${pr.repo?.on ?? null}|${pr.headRefName}`);
+    // Two repos can both have a PR #n: the element ids carry the repo too.
+    const id = `${row}-${repo ?? ""}`;
+    const here = this.paneFor(pr, issueKey);
     const tip = [repo ? `${repo} #${pr.number}` : `#${pr.number}`, pr.title, `${pr.headRefName} → ${pr.baseRefName}`, pr.author ? `By ${pr.author}` : null,
       { ok: "CI: passed", fail: "CI: a check failed", wait: "CI: running" }[pr.ci] ?? "CI: no checks",
       pr.approval === "approved" ? "Approved" : pr.approval === "changes" ? "Changes requested" : "Not approved yet",
@@ -852,7 +1080,7 @@ export default class Jira extends View {
     return h_flex().id(`pr-${id}-${pr.number}`).mx(6).mt(1).px(2).py(1).gap(6).items_center().rounded(4).text_size(12).text_color(t.dim)
       .hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(tip)
       .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.openPr(pr); })
-      .child(div().size(9).flex_none().flex().items_center().justify_center().child(div().size(8).rounded(4).bg(dot)))
+      .child(div().size(9).flex_none().flex().items_center().justify_center().child(div().size(7).rounded(4).bg(dot)))
       .child(div().id(`cp-${id}-${pr.number}`).flex_none().size(15).flex().items_center().justify_center().rounded(4).border_1().text_size(10).font_semibold()
         .border_color(fill ?? (level === "asked" ? t.working : t.border)).bg(fill ?? t.background)
         .text_color(fill ? t.background : level === "asked" ? t.working : t.dim)
@@ -860,22 +1088,23 @@ export default class Jira extends View {
       .child(icon(apIcon, apColor))
       .when(pr.mergeable === "CONFLICTING", (e) => e.child(icon("conflict", t.ansi1)))
       .when(Boolean(pr.isDraft), (e) => e.child(icon("draft", t.ansi5)))
-      .child(div().flex_none().text_color(t.muted).child(`#${pr.number}`))
+      .child(div().flex_none().max_w(140).truncate().text_color(t.muted).child(repos && repo ? `${repo} #${pr.number}` : `#${pr.number}`))
       // Head branch, then the target as "→ base" (kept short, the head truncates first), then the author on the right, as prs shows them.
       .child(div().min_w(0).truncate().child(pr.headRefName ?? ""))
       .when(Boolean(pr.baseRefName), (e) => e.child(div().flex_none().max_w(110).truncate().text_color(t.muted).child(`→ ${pr.baseRefName}`)))
       .child(div().flex_1())
       .when(Boolean(pr.author), (e) => e.child(div().flex_none().max_w(120).truncate().text_color(t.muted).child(pr.author)))
       // Go to where the branch is checked out (accent while a terminal is on it); the press stops here, so the line doesn't open the PR.
-      .child(div().id(`goto-${id}-${pr.number}`).flex_none().size(16).flex().items_center().justify_center().rounded(4)
-        .text_color(here ? t.accent : t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
-        .tooltip(here ? `Go to ${here.space.name}` : `Open the worktree of ${pr.headRefName}`)
-        .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.goToPr(pr, cx); })
+      .child(div().id(`goto-${id}-${pr.number}`).flex_none().size(18).flex().items_center().justify_center().rounded(4)
+        .text_color(here?.agent ? t.accent : t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .tooltip(here?.agent ? `Go to the agent on ${issueKey} in ${here.space.name}`
+          : `Start or resume a session on ${pr.headRefName} (asks where)`)
+        .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.goToPr(pr, issueKey); })
         .child(svg("mods/jira/goto.svg").size(12)));
   }
 
   // The panel goes: a running recording stops.
-  async close() { await this.voice.close(); }
+  async close() { await this.voice?.close(); }
 
   render(cx) {
     if (this.st) return this.startView(theme());
@@ -936,7 +1165,7 @@ export default class Jira extends View {
             .border_color(this.auto ? t.accent : t.border).bg(this.auto ? t.accent : t.background).text_color(t.accent_foreground).child(this.auto ? "✓" : ""))
           .child(div().text_size(10).text_color(t.muted).child("Auto"))))
         .when(!this.setup, (e) => e.child(iconButton("settings", "mods/jira/settings.svg", "Settings", (_e, cx) => this.openSettings(cx))))
-        .child(iconButton("refresh", "mods/jira/refresh.svg", "Refresh", (_e, cx) => this.refresh(cx), this.loading)))
+        .child(iconButton("refresh", "mods/jira/refresh.svg", "Refresh", (_e, cx) => this.refresh(cx, true), this.loading)))
       .when(!form, (e) => e.child(h_flex().flex_none().px(8).pt(8).gap(6).items_center()
         .child(div().id("search").flex_1().min_w(0).h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().text_size(12).text_color(t.foreground)))

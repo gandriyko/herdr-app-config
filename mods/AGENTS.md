@@ -49,6 +49,27 @@ day of uptime.
 - **Measure when in doubt:** `footprint <pid>` / `vmmap --summary <pid>` for the Herdr process
   before and after; note any measured ceiling in a `ponytail:` comment.
 
+## Caching: show cached data first, share one request
+
+Panels are opened, switched and reloaded often. A panel must never show an empty list or "Loading…" when an
+earlier answer exists, and two panels that show the same remote data must not each ask for it.
+
+- **Cached first, then fresh (stale-while-revalidate).** On open, show the last answer at once, start the
+  fresh request, and replace the data in place when it arrives. Redraw only when it changed (no blink).
+- **Share remote data through one cached request.** For `gh`: put the query in a `lib/` helper and send it
+  with `gh api graphql --cache <ttl>` from every mod that needs it (see `openPrs` in `lib/pr-badges.js`).
+  gh keeps one disk entry per request, whatever the TTL (measured), so:
+  `--cache 24h` = show what is cached (~0.2 s), `--cache 60s` = normal load, `--cache 1s` = Refresh.
+  Ask for the union of the fields the mods need, so the request stays identical. A new panel on data that a
+  `lib/` query already fetches reuses that query instead of writing its own.
+- **Other remote data (Jira, ...):** keep the last answer in the mod's own `data/<mod>/` file, only the
+  fields the view reads; write only when it changed (see `data/jira/issues.json`).
+- **Refresh always skips the cache.** The Refresh button asks the server past every cache (`--cache 1s`),
+  which also replaces the cached answer for every mod. Timers and opening use the normal TTL.
+- **Tell the other panels after a Refresh.** Set `<mod>.refreshed` (`{ ts }`); a mod showing the same data
+  reads it (a documented contract, optional) and reloads with the normal TTL, so it shows the new answer
+  from the cache without another server call.
+
 ## Isolation: every mod stands alone
 
 A mod must work when copied alone into another person's `mods/` folder, and must not break when

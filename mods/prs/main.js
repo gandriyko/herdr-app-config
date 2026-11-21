@@ -2,7 +2,7 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, TextView, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, theme, notify, props, openOverlay, closeOverlay, shared, setShared, run, knownAgents, layout } from "herdr";
 import { migrate, modelFor, settingsFor, projectKey, projectName, languageLine, runModel, describe } from "./ai.js";
-import { ci, isCopilot, copilot, reviewed, copilotGql, copilotBadge, copilotTip, approval, copilotOverview, repoOfUrl } from "./pr-badges.js";
+import { ci, isCopilot, copilot, reviewed, openPrs, STALE, FORCE, copilotBadge, copilotTip, approval, copilotOverview, repoOfUrl } from "./pr-badges.js";
 
 // My open pull requests in the repo of the focused folder, via the `gh` CLI. Click opens the PR in a popup
 // (description, who approved, comments and reviews); the popup has Open (browser) and Copy link.
@@ -42,25 +42,15 @@ function shownIn(node) {
 
 // CI, approval and Copilot badges: ./pr-badges.js (copy of lib/pr-badges.js, shared with jira).
 
-const FIELDS ="number,title,headRefName,baseRefName,labels,mergeable,isDraft,reviewDecision,url,statusCheckRollup,reviewRequests,reviews,body,author,isCrossRepository";
-// `all`: every open PR of the repo; else mine, then those waiting for my review (a second gh call), by number.
-async function list(cwd, on, all) {
-  if (all) return listBy(cwd, on, []);
-  const [mine, asked] = await Promise.all([listBy(cwd, on, ["--author", "@me"]), listBy(cwd, on, ["--search", "review-requested:@me"])]);
-  const have = new Set(mine.map((pr) => pr.number));
-  return [...mine, ...asked.filter((pr) => !have.has(pr.number))];
-}
-async function listBy(cwd, on, filter) {
-  // exec rejects when the program can't start (gh not installed); gh itself says "gh auth login" when not logged in.
-  const setup = (message) => Object.assign(new Error(message), { setup: true });
-  const r = await exec("gh", ["pr", "list", ...filter, "--state", "open", "--limit", "100", "--json", FIELDS], { cwd, on, timeout: 60000 })
-    .catch(() => { throw setup("GitHub CLI (gh) is not installed · install it (brew install gh), then run gh auth login"); });
-  if (r.code !== 0) {
-    const text = (r.stderr || r.stdout).trim();
-    if (/gh auth login|not logged in/i.test(text)) throw setup("GitHub CLI is not logged in · run gh auth login");
-    throw new Error(text.split("\n").pop() || "gh failed");
-  }
-  return JSON.parse(r.stdout);
+// `all`: every open PR of the repo; else mine, then those waiting for my review. One call either way: openPrs
+// (pr-badges.js), the same cached query the jira mod sends, filtered here.
+// `ttl`: STALE to show what gh has cached (no wait) before a fresh call.
+async function list(repo, cwd, on, all, ttl) {
+  if (!repo) throw new Error("Not a GitHub repo (no origin on github.com)");
+  const { viewer, prs } = await openPrs(repo, cwd, on, ttl);
+  if (all || !viewer) return { viewer, prs };
+  const mine = prs.filter((pr) => pr.author?.login === viewer), asked = prs.filter((pr) => pr.needMe && pr.author?.login !== viewer);
+  return { viewer, prs: [...mine, ...asked] };
 }
 
 // Who approved: each reviewer's latest review that counts, those that are APPROVED.
@@ -226,7 +216,11 @@ export default class Prs extends View {
     cx.timer.every(2000, (cx) => {
       const k = this.locKey(); if (k !== this.key) { this.key = k; this.focus(cx); }
       const changed = shared("prs.changed");
-      if (changed && changed.ts !== this.changedTs) { this.changedTs = changed.ts; if (changed.ts > (this.started ?? 0)) this.poll(cx); }
+      if (changed && changed.ts !== this.changedTs) { this.changedTs = changed.ts; if (changed.ts > (this.started ?? 0)) this.poll(cx, true); }
+      // contract: jira.refreshed ({ ts }) is set by the jira mod after its Refresh replaced gh's cached PR list; the
+      // cache is fresh then, so a plain poll shows it with no GitHub call. Optional: without the jira mod nothing comes.
+      const other = shared("jira.refreshed");
+      if (other && other.ts !== this.otherTs) { this.otherTs = other.ts; if (other.ts > (this.started ?? 0)) this.poll(cx); }
       const shown = this.shown();
       if (shown && !this.wasShown && this.auto && (Date.now() - (this.polledAt ?? 0) >= POLL_EVERY || !this.byRepo.has(this.focusRepo))) this.poll(cx);
       this.wasShown = shown;
@@ -278,16 +272,43 @@ export default class Prs extends View {
   focus(cx) {
     cx.spawn(async (cx) => {
       const r = await this.repoOf(this.loc());
+      // With auto-sync off, a repo not loaded yet still shows gh's cached answer (peek), if there is one.
+      if (!this.byRepo.has(r.key) && !this.auto) { this.focusRepo = r.key; await this.peek(r.key, { ...r, ...this.loc() }, cx); }
       if (this.byRepo.has(r.key) || !this.auto || !this.shown()) { this.focusRepo = r.key; this.show(); cx.notify(); } else this.poll(cx);
     });
+  }
+
+  // A repo's list as kept in memory: only what a row, the search and the popup use. Reviews, checks and full bodies
+  // (Copilot's reviews are long) are reduced to their badges here, once per answer. `prs` keeps the full PRs (toasts).
+  entry(r, viewer, listed) {
+    // Opened by me (null when my login is unknown: the list isn't grouped).
+    const prs = listed.map((pr) => ({ ...pr, mine: viewer ? pr.author?.login === viewer : null }));
+    return { prs, entry: { name: r.name, prs: prs.map(({ statusCheckRollup, reviews, reviewRequests, body, labels, cpUrls, ...pr }) => ({ ...pr,
+      hotfix: (labels ?? []).some((l) => /hotfix/i.test(l.name ?? "")),
+      ciState: ci(statusCheckRollup), approvalState: approval({ reviews, reviewDecision: pr.reviewDecision }), body: (body ?? "").slice(0, 500),
+      cpBadge: copilotBadge({ ...pr, reviews, reviewRequests }, cpUrls),
+      repo: { cwd: r.cwd, on: r.on } })), error: null } };
+  }
+
+  // gh's cached answer for a repo (up to a day old, STALE), shown at once while nothing is; the fresh call replaces it.
+  // No toasts from it (the `seen` baseline comes from fresh calls). A miss or failure shows nothing.
+  async peek(k, r, cx) {
+    try {
+      const all = this.all, { viewer, prs } = await list(r.name, r.cwd, r.on, all, STALE);
+      if (all !== this.all || this.byRepo.has(k)) return;
+      this.byRepo.set(k, this.entry(r, viewer, prs).entry);
+      if (k === this.focusRepo || !this.byRepo.has(this.focusRepo)) { this.focusRepo = (await this.repoOf(this.loc())).key; this.show(); cx.notify(); }
+    } catch {}
   }
 
   // Every 2 minutes (and on demand): the open PRs of every repo among all spaces' folders and the focused one,
   // one gh call per repo. A toast when Copilot's review shows up on a PR that was already there.
   // The timers call it only while the panel is shown; refresh, prs.changed and the Mine/All switch call it any time.
+  // `force` (Refresh, prs.changed): past gh's cache (FORCE): GitHub is asked, and the cached answer every mod reads is
+  // replaced with the new one. Else gh's cache answers when it is under a minute old.
   // ponytail: in memory only (a reload re-baselines).
-  poll(cx) {
-    if (this.loading) { this.again = true; return; }
+  poll(cx, force = false) {
+    if (this.loading) { this.again = true; this.againForce ||= force; return; }
     this.loading = true; this.polledAt = Date.now(); cx.notify();
     const focus = this.loc(), places = new Map();
     for (const p of [focus, ...spaces().map((s) => ({ cwd: s.folder, on: s.machine ?? null }))]) if (p.cwd) places.set(`${p.on}|${p.cwd}`, p);
@@ -297,27 +318,16 @@ export default class Prs extends View {
         for (const p of places.values()) { const r = await this.repoOf(p); if (!repos.has(r.key)) repos.set(r.key, { ...r, ...p }); }
         const next = new Map(), done = [];
         await Promise.all([...repos].map(async ([k, r]) => {
+          // Nothing shown for this repo yet: gh's cached answer first (peek), so the list appears at once.
+          if (!this.byRepo.has(k)) await this.peek(k, r, cx);
           const old = this.byRepo.get(k);
           try {
-            const all = this.all, listed = await list(r.cwd, r.on, all);
-            const gql = r.name ? await copilotGql(r.name, listed.map((pr) => pr.number), r.cwd, r.on) : new Map();
+            const all = this.all, { viewer, prs: listed } = await list(r.name, r.cwd, r.on, all, force ? FORCE : undefined);
             if (all !== this.all) return; // switched while loading: the `again` poll fills it
-            // A failed GraphQL call keeps each PR's last Copilot state instead of flipping the badges.
-            const was = new Map((old?.prs ?? []).map((pr) => [pr.number, pr]));
-            const prs = listed.map((pr) => ({ ...pr,
-              cpAsked: gql.ok ? gql.get(pr.number)?.asked ?? false : was.get(pr.number)?.cpAsked ?? false,
-              needMe: gql.ok ? gql.get(pr.number)?.me ?? false : was.get(pr.number)?.needMe ?? false,
-              // Opened by me (null when my login is unknown: the list isn't grouped).
-              mine: gql.viewer ? pr.author?.login === gql.viewer : was.get(pr.number)?.mine ?? null }));
-            // Kept in memory: only what a row, the search and the popup use. Reviews, checks and full bodies
-            // (Copilot's reviews are long) are reduced to their badges here, once per poll.
-            this.byRepo.set(k, { name: r.name, prs: prs.map(({ statusCheckRollup, reviews, reviewRequests, body, labels, ...pr }) => ({ ...pr,
-              hotfix: (labels ?? []).some((l) => /hotfix/i.test(l.name ?? "")),
-              ciState: ci(statusCheckRollup), approvalState: approval({ reviews, reviewDecision: pr.reviewDecision }), body: (body ?? "").slice(0, 500),
-              cpBadge: gql.ok || !was.has(pr.number) ? copilotBadge({ ...pr, reviews, reviewRequests }, gql.get(pr.number)?.urls) : was.get(pr.number).cpBadge,
-              repo: { cwd: r.cwd, on: r.on } })), error: null });
+            const { prs, entry } = this.entry(r, viewer, listed);
+            this.byRepo.set(k, entry);
             // Copilot toast only for PRs I opened (when my login is unknown: everything in Mine, nothing in All).
-            for (const pr of prs) if (gql.viewer ? pr.author?.login === gql.viewer : !all) next.set(pr.url, { state: copilot(pr), pr });
+            for (const pr of prs) if (viewer ? pr.author?.login === viewer : !all) next.set(pr.url, { state: copilot(pr), pr });
           } catch (e) {
             // A failed refresh keeps the last good list as it was; the error shows only when there is none.
             this.byRepo.set(k, old?.prs?.length ? old : { name: r.name, prs: [], error: String(e.message ?? e) });
@@ -335,7 +345,9 @@ export default class Prs extends View {
       } catch (e) { this.error = String(e.message ?? e); }
       finally {
         this.loading = false; cx.notify();
-        if (this.again) { this.again = false; this.poll(cx); }
+        // A Refresh replaced gh's cached list: tell the other panels (jira reads prs.refreshed and shows it from the cache).
+        if (force) setShared("prs.refreshed", { ts: Date.now() });
+        if (this.again) { const f = this.againForce; this.again = false; this.againForce = false; this.poll(cx, f); }
       }
     });
   }
@@ -726,7 +738,7 @@ export default class Prs extends View {
     const shown = !q ? this.prs : this.prs.filter((pr) => [pr.title, pr.body, pr.headRefName, pr.author?.login, `#${pr.number}`].some((s) => (s ?? "").toLowerCase().includes(q)));
     const empty = this.error || (this.loading && !this.prs.length ? "Loading…" : !this.prs.length ? "No open pull requests" : !shown.length ? "No matches" : null);
     const refresh = div().id("refresh").size(24).flex().items_center().justify_center().rounded(6).cursor_pointer()
-      .text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip("Refresh").on_click((_e, cx) => this.poll(cx))
+      .text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip("Refresh").on_click((_e, cx) => this.poll(cx, true))
       .child(svg("mods/prs/refresh.svg").size(14).when(this.loading, (s) => s.spin(900)));
     return v_flex().id("prs").size_full().min_h(0).relative().rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(12)
       .child(h_flex().h(42).flex_none().px(14).gap(6).items_center().border_b(1).border_color(t.border)

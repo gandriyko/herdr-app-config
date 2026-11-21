@@ -1,6 +1,6 @@
 // Copy of lib/pr-badges.js (prs, jira): edit lib/pr-badges.js, then run scripts/sync-lib.
 // A PR's badges, worked out the same way in every mod that shows one: CI state, approval and Copilot's review
-// (requested, reviewing, open threads by severity). Pure helpers plus one gh GraphQL call; the mod keeps the state.
+// (requested, reviewing, open threads by severity). Pure helpers plus one cached gh GraphQL call (openPrs); the mod keeps the state.
 import { exec } from "herdr";
 
 // CI of the PR: "fail" if any check failed, "wait" if any is still running, else "ok" (or "" without checks).
@@ -18,8 +18,7 @@ export function ci(rollup) {
 // ponytail: "no comments" is read from the review text: "No open issues" (ccr-overview-v2), or the older
 // "...generated no (new) comments."; gh gives no comment count. A new Copilot wording needs a new pattern here.
 export const isCopilot = (x) => /copilot/i.test(x?.login ?? x?.name ?? "");
-// `gh pr list --json reviewRequests` leaves bots out, so the request comes from GraphQL as `pr.cpAsked` (copilotGql).
-// `pr.reviews` may be gh's `reviews` or `latestReviews` (each reviewer's latest; enough for the state).
+// The request comes as `pr.cpAsked` (openPrs). `pr.reviews` is each reviewer's latest (enough for the state).
 export const copilot = (pr) => {
   if (pr.cpAsked || pr.reviewRequests?.some(isCopilot)) return "asked";
   const last = pr.reviews?.filter((r) => isCopilot(r.author)).pop();
@@ -27,28 +26,47 @@ export const copilot = (pr) => {
 };
 export const reviewed = (state) => state === "done" || state === "clean";
 
-// Per PR number: `asked` = Copilot is among the pending review requests (it is reviewing), `me` = my review is
-// requested, `urls` = unresolved Copilot threads as their first comments' URLs (a thread is Copilot's by its first
-// comment); one GraphQL call per repo. `ok` is false when the call failed, `viewer` is my login.
-// ponytail: first 50 PRs × 100 threads; a failed call leaves the map empty (the row falls back to gh's fields).
-// ponytail: a request to a team I'm in doesn't count as mine; add `... on Team{members}` if that's wanted.
-export async function copilotGql(repo, numbers, cwd, on) {
-  const out = new Map(), [owner, name] = repo.split("/");
-  if (!numbers.length) return out;
-  const prs = numbers.slice(0, 50).map((n) => `p${n}:pullRequest(number:${n}){reviewRequests(first:20){nodes{requestedReviewer{... on Bot{login} ... on User{login}}}} reviewThreads(first:100){nodes{isResolved comments(first:1){nodes{author{login} url}}}}}`).join(" ");
-  const r = await exec("gh", ["api", "graphql", "-f", `query={viewer{login} repository(owner:${JSON.stringify(owner)},name:${JSON.stringify(name)}){${prs}}}`], { cwd, on, timeout: 60000 }).catch(() => null);
-  try {
-    const data = JSON.parse(r.stdout).data;
-    out.ok = Boolean(data.repository);
-    out.viewer = data.viewer?.login; // my login: whose PRs get the Copilot toast in the "All" list
-    for (const [k, pr] of Object.entries(data.repository ?? {}))
-      if (pr) out.set(Number(k.slice(1)), {
-        asked: pr.reviewRequests.nodes.some((n) => isCopilot(n.requestedReviewer)),
-        me: Boolean(out.viewer) && pr.reviewRequests.nodes.some((n) => n.requestedReviewer?.login === out.viewer),
-        urls: pr.reviewThreads.nodes.filter((t) => !t.isResolved && isCopilot(t.comments.nodes[0]?.author)).map((t) => t.comments.nodes[0].url),
-      });
-  } catch {}
-  return out;
+// The open PRs of a repo ("owner/name"), the newest-updated 100, with all that the badges and rows of every mod need,
+// in one GraphQL call. gh keeps the answer on disk for CACHE keyed by the exact request, so the mods sending this
+// query (prs, jira) share one GitHub call: whichever asks first fetches, the other reads it until it expires.
+// Each PR comes in `gh pr list --json` shape (reviews = each reviewer's latest, statusCheckRollup = the head commit's
+// checks), plus `cpAsked` (Copilot's review is requested: it is reviewing), `needMe` (my review is requested) and
+// `cpUrls` (unresolved Copilot threads as their first comments' URLs). Returns { viewer, prs }; throws on failure,
+// with `setup` set when gh is missing or not logged in.
+// gh keeps one entry per request whatever the TTL (the TTL is only the age it accepts), so a mod that has nothing to
+// show yet asks with STALE first (any answer from the last day, ~0.2 s, no network when there is one), shows it,
+// then asks again with the default CACHE, which fetches when the entry is older and so refreshes it for every mod.
+// A Refresh asks with FORCE: an entry is never that young, so GitHub is asked, and the new answer replaces the entry
+// for every mod (measured: 2s and 3s rewrite the same cache file, 1h then reads it).
+// ponytail: 100 PRs × 100 threads × 100 checks; a request to a team I'm in doesn't count as mine.
+const CACHE = "60s";
+export const STALE = "24h";
+export const FORCE = "1s";
+const PRS_QUERY = `query($owner:String!,$name:String!){viewer{login} repository(owner:$owner,name:$name){pullRequests(states:OPEN,first:100,orderBy:{field:UPDATED_AT,direction:DESC}){nodes{
+number title url body isDraft mergeable headRefName baseRefName isCrossRepository reviewDecision author{login} labels(first:20){nodes{name}}
+latestReviews(first:30){nodes{author{login} state body}}
+reviewRequests(first:20){nodes{requestedReviewer{... on Bot{login} ... on User{login}}}}
+reviewThreads(first:100){nodes{isResolved comments(first:1){nodes{author{login} url}}}}
+commits(last:1){nodes{commit{statusCheckRollup{contexts(first:100){nodes{... on CheckRun{status conclusion} ... on StatusContext{state}}}}}}}}}}}`;
+export async function openPrs(repo, cwd, on, ttl = CACHE) {
+  const [owner, name] = repo.split("/");
+  const setup = (message) => Object.assign(new Error(message), { setup: true });
+  const r = await exec("gh", ["api", "graphql", "--cache", ttl, "-F", `owner=${owner}`, "-F", `name=${name}`, "-f", `query=${PRS_QUERY}`], { cwd, on, timeout: 60000 })
+    .catch(() => { throw setup("GitHub CLI (gh) is not installed · install it (brew install gh), then run gh auth login"); });
+  if (r.code !== 0) {
+    const text = (r.stderr || r.stdout).trim();
+    if (/gh auth login|not logged in/i.test(text)) throw setup("GitHub CLI is not logged in · run gh auth login");
+    throw new Error(text.split("\n").pop() || "gh failed");
+  }
+  const data = JSON.parse(r.stdout).data, viewer = data.viewer?.login ?? null;
+  const prs = (data.repository?.pullRequests.nodes ?? []).map(({ labels, latestReviews, reviewRequests, reviewThreads, commits, ...pr }) => {
+    const asked = reviewRequests.nodes.map((n) => n.requestedReviewer).filter(Boolean);
+    return { ...pr, labels: labels.nodes, reviews: latestReviews.nodes, reviewRequests: asked,
+      statusCheckRollup: commits.nodes[0]?.commit.statusCheckRollup?.contexts.nodes ?? [],
+      cpAsked: asked.some(isCopilot), needMe: Boolean(viewer) && asked.some((x) => x.login === viewer),
+      cpUrls: reviewThreads.nodes.filter((t) => !t.isResolved && isCopilot(t.comments.nodes[0]?.author)).map((t) => t.comments.nodes[0].url) };
+  });
+  return { viewer, prs };
 }
 
 // The list's Copilot badge, worked out once per poll: "high" = an open Copilot thread that is High or Medium (or of
