@@ -1,9 +1,10 @@
 import { View, div, svg, image } from "gpui-kit";
 import * as fs from "fs/promises";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
-import { exec, theme, shared, setShared, spaces, panes, focused, run, knownAgents, props, openOverlay, closeOverlay } from "herdr";
+import { exec, theme, shared, setShared, spaces, panes, focused, run, knownAgents, props, openOverlay, closeOverlay, appHome, notify } from "herdr";
 import { Buffer } from "buffer";
 import { Voice, asQuery } from "./voice.js";
+import { ci, approval, copilotGql, copilotBadge, copilotTip, repoOfUrl } from "./pr-badges.js";
 
 // My open Jira issues grouped by sprint, status or not at all and sorted by updated/created date, plus the backlog
 // of one or more projects (optional, its own request). Click opens the issue in Jira;
@@ -164,6 +165,16 @@ const branchTask = ({ key, summary, description, branch, base }) =>
 
 const lastLine = (r) => (r.stderr || r.stdout).trim().split("\n").pop();
 
+// ── Open pull requests of every space's repo (gh), each shown under the issue whose key is in its title or head branch ──
+// latestReviews (each reviewer's latest), not reviews: Copilot's long review bodies made gh twice as slow (2.5 s vs 5.4 s).
+const PR_FIELDS = "number,title,headRefName,baseRefName,url,isDraft,mergeable,reviewDecision,latestReviews,statusCheckRollup,author";
+const REMOTES_MAX = 50;
+// Every key-like word of the title and head branch ("DA-123: …", "feature/DA-123-…"), upper-cased. Words that are no
+// issue key (UTF-8) match no issue, so they cost nothing.
+const prKeys = (pr) => new Set([...`${pr.title ?? ""} ${pr.headRefName ?? ""}`.matchAll(/[A-Za-z][A-Za-z0-9_]*-\d+/g)].map((m) => m[0].toUpperCase()));
+const repoName = (url) => /[:/]([^/:]+\/[^/]+?)(?:\.git)?\/?$/.exec(url)?.[1] ?? null;
+// CI, approval and Copilot badges: ./pr-badges.js (copy of lib/pr-badges.js, shared with prs, so both show the same).
+
 // The main checkout and origin's default branch for a folder, or null when it isn't a git repo.
 async function gitInfo(folder, on) {
   const git = (args) => exec("git", args, { cwd: folder, on, timeout: 15000 }).catch(() => null);
@@ -252,8 +263,124 @@ export default class Jira extends View {
     } }, cx);
     // Auto-sync is off until switched on (jira.auto = "1"); the list loads once on open either way.
     this.auto = (() => { try { return localStorage.getItem("jira.auto") === "1"; } catch { return false; } })();
+    // PRs: repo key -> (issue key -> [PR rows]) for the repos of every space; prIndex merges them by issue key (what rows
+    // read); folder -> repo (git remote, no API call).
+    this.prsByRepo = new Map(); this.prIndex = new Map(); this.remotes = new Map();
     this.refresh(cx);
     cx.timer.every(5 * 60 * 1000, (cx) => { if (this.auto) this.refresh(cx); });
+  }
+
+  // The repo of a folder by its origin remote: `{ key, name }`, or null outside a repo. Worktrees of one repo share it.
+  async repoOf(folder, on) {
+    const id = `${on}|${folder}`;
+    if (!this.remotes.has(id)) {
+      const r = await exec("git", ["remote", "get-url", "origin"], { cwd: folder, on, timeout: 15000 }).catch(() => null);
+      const name = r?.code === 0 ? repoName(r.stdout.trim()) : null;
+      this.remotes.set(id, name ? { key: `${on}|${name}`, name } : null);
+      if (this.remotes.size > REMOTES_MAX) this.remotes.delete(this.remotes.keys().next().value);
+    }
+    return this.remotes.get(id);
+  }
+
+  // Where PRs load from: every terminal folder of every space, one per folder. Not the focus: the list is the same
+  // whichever terminal is focused.
+  places() {
+    const out = new Map(), machineOf = new Map();
+    for (const s of spaces()) for (const tb of s.tabs ?? []) machineOf.set(tb.id, s.machine ?? null);
+    for (const p of panes()) if (p.cwd && machineOf.has(p.tab)) out.set(`${machineOf.get(p.tab)}|${p.cwd}`, { folder: p.cwd, on: machineOf.get(p.tab) });
+    return [...out.values()];
+  }
+
+  // The open PRs of every space's repo (on open, Refresh, auto-sync), one gh call per repo in parallel; repos no space
+  // points at any more leave memory. Redraws only when the merged index changed.
+  // ponytail: a repo of a space opened later shows its PRs after the next Refresh / auto-sync.
+  loadPrs(cx) {
+    if (this.prLoading) { this.prAgain = true; return; }
+    this.prLoading = true;
+    const places = this.places();
+    cx.spawn(async (cx) => {
+      try {
+        const repos = new Map();
+        for (const p of places) { const r = await this.repoOf(p.folder, p.on); if (r && !repos.has(r.key)) repos.set(r.key, { ...p, name: r.name }); }
+        await Promise.all([...repos].map(([key, p]) => this.fetchPrs(key, p)));
+        for (const key of [...this.prsByRepo.keys()]) if (!repos.has(key)) this.prsByRepo.delete(key);
+        const index = new Map();
+        for (const byKey of this.prsByRepo.values()) for (const [k, rows] of byKey) index.set(k, [...(index.get(k) ?? []), ...rows]);
+        const sig = JSON.stringify([...index]);
+        if (sig !== this.prSig) { this.prSig = sig; this.prIndex = index; cx.notify(); }
+      } catch {}
+      finally {
+        this.prLoading = false;
+        if (this.prAgain) { this.prAgain = false; this.loadPrs(cx); }
+      }
+    });
+  }
+
+  // One repo's open PRs (first 100) by issue key; rows keep only what the PR line and the prs mod's dialog use.
+  // No gh or a failed call: that repo keeps its last good list (none at first).
+  async fetchPrs(key, { folder, on, name }) {
+    try {
+      const r = await exec("gh", ["pr", "list", "--state", "open", "--limit", "100", "--json", PR_FIELDS], { cwd: folder, on, timeout: 60000 });
+      if (r.code !== 0) return;
+      const listed = JSON.parse(r.stdout);
+      // Copilot: requests and open threads (GraphQL); a failed call (gql.ok false) leaves the badge to the review text.
+      const gql = await copilotGql(name, listed.map((pr) => pr.number), folder, on);
+      const byKey = new Map();
+      for (const pr of listed) {
+        // latestReviews stand in for reviews (the badges need each reviewer's latest; Copilot's severity its latest overview).
+        const reviewed = { ...pr, reviews: pr.latestReviews, cpAsked: gql.get(pr.number)?.asked ?? false };
+        const row = { number: pr.number, title: pr.title, url: pr.url, headRefName: pr.headRefName, baseRefName: pr.baseRefName,
+          isDraft: pr.isDraft, mergeable: pr.mergeable, ci: ci(pr.statusCheckRollup), approval: approval(reviewed), author: pr.author?.login ?? "",
+          copilot: copilotBadge(reviewed, gql.ok ? gql.get(pr.number)?.urls ?? [] : undefined), repo: { cwd: folder, on } };
+        for (const k of prKeys(pr)) byKey.set(k, [...(byKey.get(k) ?? []), row]);
+      }
+      this.prsByRepo.set(key, byKey);
+    } catch {}
+  }
+
+  // The focused terminal's branch; for a mod pane (wb-diff), a terminal's of the focused tab. Null when none.
+  focusBranch() {
+    const f = focused(), all = panes();
+    const pane = f?.pane ? all.find((p) => p.pane === f.pane) : null;
+    return pane?.branch || all.find((p) => p.branch && p.tab === f?.tab)?.branch || null;
+  }
+
+  // "<machine>|<branch>" -> the first terminal pane on that branch and its space: where a PR line's go-to button leads.
+  // Built once per render.
+  branchPanes() {
+    const spaceOf = new Map(), out = new Map();
+    for (const s of spaces()) for (const tb of s.tabs ?? []) spaceOf.set(tb.id, s);
+    for (const p of panes()) {
+      const s = spaceOf.get(p.tab), k = `${s?.machine ?? null}|${p.branch}`;
+      if (s && p.branch && !out.has(k)) out.set(k, { pane: p.pane, space: s });
+    }
+    return out;
+  }
+
+  // The go-to button: the space (and pane) where a terminal is on the PR's head branch; else the branch's worktree in a
+  // new space; else a note (no checkout of it yet: the row's session button or prs' "Work in worktree" makes one).
+  goToPr(pr, cx) {
+    const { cwd, on } = pr.repo ?? {}, branch = pr.headRefName;
+    const hit = this.byBranch?.get(`${on ?? null}|${branch}`);
+    if (hit) { run("space.select", { id: hit.space.id }); run("pane.focus", { pane: hit.pane }); return; }
+    cx.spawn(async () => {
+      const r = await exec("git", ["worktree", "list", "--porcelain"], { cwd, on, timeout: 15000 }).catch(() => null);
+      let path = null, cur = null;
+      for (const line of (r?.stdout ?? "").split("\n")) {
+        if (line.startsWith("worktree ")) cur = line.slice(9);
+        else if (line === `branch refs/heads/${branch}`) { path = cur; break; }
+      }
+      if (!path) { notify({ title: "Jira", body: `${branch} isn't checked out anywhere: start a session to make a worktree`, level: "info" }); return; }
+      const open = spaces().find((s) => s.folder === path && (s.machine ?? null) === (on ?? null));
+      if (open) run("space.select", { id: open.id }); else run("space.new", { folder: path, machine: on ?? "" });
+    });
+  }
+
+  // A PR line's click: the prs mod's PR dialog (its props().pr: number, url, isDraft, repo { cwd, on }) when that mod is
+  // installed here, else the PR in the browser.
+  async openPr(pr) {
+    const prs = await fs.exists(`${appHome()}/mods/prs/main.js`).catch(() => false);
+    if (prs) openOverlay({ mod: "prs", kind: "dialog", width: 780, height: 0.85, props: { pr } }); else exec("open", [pr.url]);
   }
 
   toggleAuto(cx) {
@@ -287,6 +414,7 @@ export default class Jira extends View {
   }
 
   refresh(cx) {
+    this.loadPrs(cx);
     // Herdr's fetch has no timeout or abort: a request that hangs would keep `loading` (and so every
     // refresh) blocked for good. After 2 minutes a new one may start; the hung one's finally leaves it be.
     if (this.loading && Date.now() - this.loadingSince < 120000) return;
@@ -480,11 +608,15 @@ export default class Jira extends View {
       : div().text_size(11).text_color(this.agentsError ? t.ansi1 : t.dim).child(this.agentsError ?? "No installed agents found"), t);
   }
 
-  // The focused folder (else the space's) and the machine of the active space: where a session for an issue starts.
+  // The focused folder and the machine of the active space: where a session for an issue starts and whose repo's PRs show.
+  // A mod pane (wb-diff) has no folder: then a terminal of the focused tab, else of the space; space.folder last (it can
+  // be stale, e.g. home).
   startPlace() {
-    const space = spaces().find((s) => s.active), f = focused();
-    const pane = f?.pane ? panes().find((p) => p.pane === f.pane) : null;
-    return { folder: pane?.cwd || f?.cwd || space?.folder || null, on: space?.machine ?? null };
+    const space = spaces().find((s) => s.active), f = focused(), all = panes();
+    const tabs = new Set((space?.tabs ?? []).map((tb) => tb.id));
+    const pane = f?.pane ? all.find((p) => p.pane === f.pane) : null;
+    const near = pane?.cwd || f?.cwd || all.find((p) => p.cwd && p.tab === f?.tab)?.cwd || all.find((p) => p.cwd && tabs.has(p.tab))?.cwd;
+    return { folder: near || space?.folder || null, on: space?.machine ?? null };
   }
 
   summaryOf(key) {
@@ -669,17 +801,24 @@ export default class Jira extends View {
     const f = issue.fields, cat = f.status?.statusCategory?.key;
     const color = cat === "indeterminate" ? t.working : cat === "done" ? t.done : t.muted;
     const hotfix = (f.labels ?? []).some((l) => l.toLowerCase() === "hotfix");
-    return h_flex().id(`issue-${section}-${issue.key}`).flex_none().px(8).py(3).gap(6).items_center().rounded(5).cursor_pointer().relative()
+    const prs = this.prIndex.get(issue.key) ?? [];
+    // Two parts side by side in one group: the issue (hover, click, menu, tooltip) and its PR lines below it, each with
+    // its own hover, so pointing at a PR doesn't light up the issue. The group carries the highlights and the hotfix bar.
+    return v_flex().id(`issue-${section}-${issue.key}`).flex_none().rounded(5).relative().when(prs.length > 0, (e) => e.pb(3))
       // Label "hotfix": a red bar on the row's left edge.
       .when(hotfix, (e) => e.child(div().absolute().left(1).top(4).bottom(4).w(3).rounded(2).bg(t.ansi1)))
-      .when(this.selected === issue.key || this.menu?.key === issue.key, (s) => s.bg(t.selected))
-      .hover((s) => s.bg(t.hover)).tooltip(`${issue.key} · ${f.issuetype?.name ?? ""}\n${f.summary}`)
-      // on_click fires for the right button too (ClickEvent has no button), so the left press is used.
-      .on_mouse_down("left", (_e, cx) => { this.selected = issue.key; exec("open", [this.url(issue.key)]); cx.notify(); })
-      // The root's own right-press handler (it runs next) places the menu.
-      .on_mouse_down("right", () => { this.menuKey = issue.key; })
-      // Two lines: the summary, then the type icon, the key (dim), the status (its category's color), the age and the session button, small.
-      .child(v_flex().flex_1().min_w(0)
+      // The last opened issue: a faint background, so it isn't taken for the current worktree's (below); the right-click menu's row: selected.
+      .when(this.selected === issue.key, (s) => s.bg(t.hover))
+      .when(this.menu?.key === issue.key, (s) => s.bg(t.selected))
+      // The focused terminal's branch is this issue's (as prs marks the PR of the current branch).
+      .when(Boolean(this.currentKeys?.has(issue.key)), (s) => s.bg(t.selected).border_l_2().border_color(t.accent))
+      .child(v_flex().id(`issue-body-${section}-${issue.key}`).px(8).py(3).rounded(5).cursor_pointer()
+        .hover((s) => s.bg(t.hover)).tooltip(`${issue.key} · ${f.issuetype?.name ?? ""}\n${f.summary}`)
+        // on_click fires for the right button too (ClickEvent has no button), so the left press is used.
+        .on_mouse_down("left", (_e, cx) => { this.selected = issue.key; exec("open", [this.url(issue.key)]); cx.notify(); })
+        // The root's own right-press handler (it runs next) places the menu.
+        .on_mouse_down("right", () => { this.menuKey = issue.key; })
+        // Two lines: the summary, then the type icon, the key (dim), the status (its category's color), the age and the session button, small.
         .child(div().truncate().child(f.summary ?? ""))
         .child(h_flex().gap(6).items_center().text_size(10)
           .child(image(this.typeIcons.get(f.issuetype?.id) ?? typeIcon(f.issuetype)).size(12).flex_none())
@@ -691,7 +830,48 @@ export default class Jira extends View {
           .child(div().id(`session-${section}-${issue.key}`).flex_none().size(16).flex().items_center().justify_center().rounded(4)
             .text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(`Start a ${this.settings().agentName ?? "Claude Code"} session for ${issue.key}`)
             .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.openStart(issue.key); })
-            .child(svg("mods/jira/session.svg").size(12)))));
+            .child(svg("mods/jira/session.svg").size(12)))))
+      .children(prs.map((pr) => this.prLine(pr, t, `${section}-${issue.key}`)));
+  }
+
+  // A PR of any space's repo under its issue: CI dot, approval, conflict, draft, number and head branch. Click opens it.
+  prLine(pr, t, id) {
+    const dot = { ok: t.done, fail: t.ansi1, wait: t.working }[pr.ci] ?? t.border;
+    const [apIcon, apColor] = pr.approval === "approved" ? ["approved", t.done] : pr.approval === "changes" ? ["changes", t.ansi1] : ["approved", t.border];
+    const repo = repoOfUrl(pr.url);
+    const here = this.byBranch?.get(`${pr.repo?.on ?? null}|${pr.headRefName}`);
+    const tip = [repo ? `${repo} #${pr.number}` : `#${pr.number}`, pr.title, `${pr.headRefName} → ${pr.baseRefName}`, pr.author ? `By ${pr.author}` : null,
+      { ok: "CI: passed", fail: "CI: a check failed", wait: "CI: running" }[pr.ci] ?? "CI: no checks",
+      pr.approval === "approved" ? "Approved" : pr.approval === "changes" ? "Changes requested" : "Not approved yet",
+      pr.mergeable === "CONFLICTING" ? "Merge conflicts" : null, pr.isDraft ? "Draft" : null].filter(Boolean).join("\n");
+    const icon = (name, color) => svg(`mods/jira/${name}.svg`).size(14).flex_none().text_color(color);
+    // Copilot badge "C", as prs: filled red = open High/Medium threads; filled blue = only Low ones open; filled green =
+    // reviewed, none open; yellow spinner = reviewing (requested); faint = not run yet.
+    const { level } = pr.copilot ?? { level: "", open: 0 }, cpTip = copilotTip(pr.copilot ?? { level: "", open: 0 });
+    const fill = { high: t.ansi1, low: t.accent, ok: t.done }[level];
+    return h_flex().id(`pr-${id}-${pr.number}`).mx(6).mt(1).px(2).py(1).gap(6).items_center().rounded(4).text_size(12).text_color(t.dim)
+      .hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(tip)
+      .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.openPr(pr); })
+      .child(div().size(9).flex_none().flex().items_center().justify_center().child(div().size(8).rounded(4).bg(dot)))
+      .child(div().id(`cp-${id}-${pr.number}`).flex_none().size(15).flex().items_center().justify_center().rounded(4).border_1().text_size(10).font_semibold()
+        .border_color(fill ?? (level === "asked" ? t.working : t.border)).bg(fill ?? t.background)
+        .text_color(fill ? t.background : level === "asked" ? t.working : t.dim)
+        .tooltip(cpTip).child(level === "asked" ? svg("mods/jira/spinner.svg").size(11).text_color(t.working).spin(900) : "C"))
+      .child(icon(apIcon, apColor))
+      .when(pr.mergeable === "CONFLICTING", (e) => e.child(icon("conflict", t.ansi1)))
+      .when(Boolean(pr.isDraft), (e) => e.child(icon("draft", t.ansi5)))
+      .child(div().flex_none().text_color(t.muted).child(`#${pr.number}`))
+      // Head branch, then the target as "→ base" (kept short, the head truncates first), then the author on the right, as prs shows them.
+      .child(div().min_w(0).truncate().child(pr.headRefName ?? ""))
+      .when(Boolean(pr.baseRefName), (e) => e.child(div().flex_none().max_w(110).truncate().text_color(t.muted).child(`→ ${pr.baseRefName}`)))
+      .child(div().flex_1())
+      .when(Boolean(pr.author), (e) => e.child(div().flex_none().max_w(120).truncate().text_color(t.muted).child(pr.author)))
+      // Go to where the branch is checked out (accent while a terminal is on it); the press stops here, so the line doesn't open the PR.
+      .child(div().id(`goto-${id}-${pr.number}`).flex_none().size(16).flex().items_center().justify_center().rounded(4)
+        .text_color(here ? t.accent : t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .tooltip(here ? `Go to ${here.space.name}` : `Open the worktree of ${pr.headRefName}`)
+        .on_mouse_down("left", (_e, cx) => { cx.stop_propagation(); this.goToPr(pr, cx); })
+        .child(svg("mods/jira/goto.svg").size(12)));
   }
 
   // The panel goes: a running recording stops.
@@ -705,6 +885,11 @@ export default class Jira extends View {
     const match = (issue) => byStatus(issue) && (!q || issue.key.toLowerCase().includes(q) || (issue.fields.summary ?? "").toLowerCase().includes(q));
     const s = this.settings(), view = `${s.groupBy}|${s.sort}|${s.project}`;
     if (this.view !== view) { this.view = view; this.regroup(); }
+    // Only while some PR line shows (render reruns when panes change, so it stays current).
+    this.byBranch = this.prIndex.size ? this.branchPanes() : null;
+    // The issue(s) of the focused terminal's branch (a worktree's "DPM-1143-…"), highlighted; render reruns on focus moves.
+    const branch = this.focusBranch();
+    this.currentKeys = new Set(branch ? [...branch.matchAll(/[A-Za-z][A-Za-z0-9_]*-\d+/g)].map((m) => m[0].toUpperCase()) : []);
     const inCurrent = (issue) => !this.current || issue.sprint?.state === "active";
     const groups = this.groups.map((g) => ({ ...g, issues: g.issues.filter((i) => inCurrent(i) && match(i)) })).filter((g) => g.issues.length);
     const showBacklog = !this.current && s.backlog !== false;

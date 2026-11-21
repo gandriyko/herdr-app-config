@@ -2,6 +2,7 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, TextView, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, theme, notify, props, openOverlay, closeOverlay, shared, setShared, run, knownAgents, layout } from "herdr";
 import { migrate, modelFor, settingsFor, projectKey, projectName, languageLine, runModel, describe } from "./ai.js";
+import { ci, isCopilot, copilot, reviewed, copilotGql, copilotBadge, copilotTip, approval, copilotOverview, repoOfUrl } from "./pr-badges.js";
 
 // My open pull requests in the repo of the focused folder, via the `gh` CLI. Click opens the PR in a popup
 // (description, who approved, comments and reviews); the popup has Open (browser) and Copy link.
@@ -39,74 +40,7 @@ function shownIn(node) {
   return null;
 }
 
-// CI of the PR: "fail" if any check failed, "wait" if any is still running, else "ok" (or "" without checks).
-function ci(rollup) {
-  if (!rollup?.length) return "";
-  const bad = ["FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE"];
-  if (rollup.some((c) => bad.includes(c.conclusion) || c.state === "FAILURE" || c.state === "ERROR")) return "fail";
-  if (rollup.some((c) => (c.status && c.status !== "COMPLETED") || c.state === "PENDING" || c.state === "EXPECTED")) return "wait";
-  return "ok";
-}
-
-// Copilot: "asked" while its request is pending (also a re-request after an earlier review: it is reviewing),
-// "clean" if its latest review left no comments, "done" if it left some, else "".
-// ponytail: matches the login by /copilot/i (its review login is copilot-pull-request-reviewer, the request's is Copilot).
-// ponytail: "no comments" is read from the review text: "No open issues" (ccr-overview-v2), or the older
-// "...generated no (new) comments."; gh gives no comment count. A new Copilot wording needs a new pattern here.
-const isCopilot = (x) => /copilot/i.test(x?.login ?? x?.name ?? "");
-// `gh pr list --json reviewRequests` leaves bots out, so the request comes from GraphQL as `pr.cpAsked` (copilotGql).
-const copilot = (pr) => {
-  if (pr.cpAsked || pr.reviewRequests?.some(isCopilot)) return "asked";
-  const last = pr.reviews?.filter((r) => isCopilot(r.author)).pop();
-  return !last ? "" : /no open issues|generated no (new )?comments/i.test(last.body ?? "") ? "clean" : "done";
-};
-const reviewed = (state) => state === "done" || state === "clean";
-
-// Per PR number: `asked` = Copilot is among the pending review requests (it is reviewing), `me` = my review is
-// requested, `urls` = unresolved Copilot threads as their first comments' URLs (a thread is Copilot's by its first
-// comment); one GraphQL call per repo.
-// ponytail: first 50 PRs × 100 threads; a failed call leaves the map empty (the row falls back to gh's fields).
-// ponytail: a request to a team I'm in doesn't count as mine; add `... on Team{members}` if that's wanted.
-async function copilotGql(repo, numbers, cwd, on) {
-  const out = new Map(), [owner, name] = repo.split("/");
-  if (!numbers.length) return out;
-  const prs = numbers.slice(0, 50).map((n) => `p${n}:pullRequest(number:${n}){reviewRequests(first:20){nodes{requestedReviewer{... on Bot{login} ... on User{login}}}} reviewThreads(first:100){nodes{isResolved comments(first:1){nodes{author{login} url}}}}}`).join(" ");
-  const r = await exec("gh", ["api", "graphql", "-f", `query={viewer{login} repository(owner:${JSON.stringify(owner)},name:${JSON.stringify(name)}){${prs}}}`], { cwd, on, timeout: 60000 }).catch(() => null);
-  try {
-    const data = JSON.parse(r.stdout).data;
-    out.ok = Boolean(data.repository);
-    out.viewer = data.viewer?.login; // my login: whose PRs get the Copilot toast in the "All" list
-    for (const [k, pr] of Object.entries(data.repository ?? {}))
-      if (pr) out.set(Number(k.slice(1)), {
-        asked: pr.reviewRequests.nodes.some((n) => isCopilot(n.requestedReviewer)),
-        me: Boolean(out.viewer) && pr.reviewRequests.nodes.some((n) => n.requestedReviewer?.login === out.viewer),
-        urls: pr.reviewThreads.nodes.filter((t) => !t.isResolved && isCopilot(t.comments.nodes[0]?.author)).map((t) => t.comments.nodes[0].url),
-      });
-  } catch {}
-  return out;
-}
-
-// The list's Copilot badge, worked out once per poll: "high" = an open Copilot thread that is High or Medium (or of
-// unknown severity), "low" = only Low ones open, "ok" = reviewed and none open, else copilot()'s "asked" / "".
-// Severity comes from Copilot's overview reviews, matched by thread URL. `urls` is undefined when the count is unknown.
-function copilotBadge(pr, urls) {
-  const cp = copilot(pr);
-  if (!reviewed(cp)) return { level: cp, open: 0 };
-  if (!urls) return { level: cp === "clean" ? "ok" : "high", open: null };
-  if (!urls.length) return { level: "ok", open: 0 };
-  const sev = new Map((pr.reviews ?? []).filter((r) => isCopilot(r.author)).flatMap((r) => copilotOverview(r.body)?.issues ?? []).map((i) => [i.url, i.severity.toLowerCase()]));
-  return { level: urls.every((u) => sev.get(u) === "low") ? "low" : "high", open: urls.length };
-}
-
-// "approved" if a human's latest review approves, "changes" if it requests changes, else "".
-// By reviews, not only reviewDecision: that one stays empty in repos that don't require reviews.
-function approval(pr) {
-  const last = new Map();
-  for (const r of pr.reviews ?? []) if (["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(r.state)) last.set(r.author?.login, r.state);
-  const states = [...last.values()];
-  return pr.reviewDecision === "CHANGES_REQUESTED" || states.includes("CHANGES_REQUESTED") ? "changes"
-    : pr.reviewDecision === "APPROVED" || states.includes("APPROVED") ? "approved" : "";
-}
+// CI, approval and Copilot badges: ./pr-badges.js (copy of lib/pr-badges.js, shared with jira).
 
 const FIELDS ="number,title,headRefName,baseRefName,labels,mergeable,isDraft,reviewDecision,url,statusCheckRollup,reviewRequests,reviews,body,author,isCrossRepository";
 // `all`: every open PR of the repo; else mine, then those waiting for my review (a second gh call), by number.
@@ -138,20 +72,6 @@ function approvedBy(reviews) {
 // A PR's line-comment threads with their comments. ponytail: first 100 threads, 30 comments each.
 const THREADS = "query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){pullRequest(number:$n){reviewThreads(first:100){nodes{isResolved isOutdated path line originalLine comments(first:30){nodes{author{login} body createdAt url}}}}}}}";
 
-// Copilot's overview review (<!-- ccr-overview-v2 -->): verdict, summary, issues { severity, title, url, note },
-// "What changed" (markdown) and the review effort. Null for any other text (an older overview stays a plain comment).
-// ponytail: parsed from Copilot's markdown; a new layout falls back to the plain comment.
-function copilotOverview(body) {
-  if (!/ccr-overview/.test(body ?? "")) return null;
-  const verdict = /^###\s+(.+)$/m.exec(body)?.[1]?.trim();
-  if (!verdict) return null;
-  const summary = body.split(/^###.+$/m)[1]?.split("<details")[0].trim() ?? "";
-  const issues = [...body.matchAll(/^- .*?alt="(\w+) severity".*?\[([^\]]+)\]\(([^)]+)\)(.*)$/gm)]
-    .map(([, severity, title, url, rest]) => ({ severity, title, url, note: rest.replace(/^\s*·\s*/, "").trim() }));
-  const what = /<summary><strong>What changed in this PR<\/strong><\/summary>([\s\S]*?)<\/details>/.exec(body)?.[1]?.trim() ?? "";
-  const effort = /<sub>([^<]+)<\/sub>/.exec(body)?.[1]?.trim() ?? "";
-  return { verdict, summary, issues, what, effort };
-}
 // a toward b by w (0..1), both "#rrggbb"; a when either isn't. (Same as files-copy's mixHex.)
 function mixHex(a, b, w) {
   const p = (c) => /^#[0-9a-f]{6}/i.test(c) ? [1, 3, 5].map((i) => parseInt(c.slice(i, i + 2), 16)) : null, x = p(a), y = p(b);
@@ -626,13 +546,16 @@ export default class Prs extends View {
 
   detailView(t) {
     const pr = this.detailPr, d = this.detail;
+    // The repo (the popup also opens from other mods, e.g. jira, where the repo isn't on screen).
+    const repo = repoOfUrl(pr.url);
     const btn = (id, label, act) => div().id(id).h(26).px(10).flex().items_center().rounded(6).border_1().border_color(t.border).text_size(12).cursor_pointer()
       .text_color(t.foreground).hover((s) => s.bg(t.hover)).on_click(act).child(label);
     const meta = (label, value) => !value ? null : h_flex().gap(8).items_center().text_size(12)
       .child(div().w(80).flex_none().text_color(t.dim).child(label)).child(div().flex_1().min_w(0).truncate().child(value));
     return v_flex().id("pr-detail").size_full().min_h(0).relative().bg(t.background).text_color(t.foreground).text_size(13)
       .child(h_flex().h(44).flex_none().px(16).gap(8).items_center().border_b(1).border_color(t.border)
-        .child(div().text_size(12).text_color(t.dim).child(`#${pr.number}`))
+        .when(Boolean(repo), (e) => e.child(div().min_w(0).truncate().text_size(12).font_semibold().child(repo)))
+        .child(div().flex_none().text_size(12).text_color(t.dim).child(`#${pr.number}`))
         .when(Boolean(d?.approvedBy?.length), (e) => e.child(div().px(6).py(1).rounded(4).border_1().border_color(t.done).text_size(11).text_color(t.done).child(`✓ approved · ${d.approvedBy.length}`)))
         .when(pr.isDraft, (e) => e.child(div().px(6).py(1).rounded(4).border_1().border_color(t.border).text_size(11).text_color(t.dim).child("draft")))
         .child(div().flex_1())
@@ -733,10 +656,7 @@ export default class Prs extends View {
     const { level, open } = pr.cpBadge;
     const taskKey = /^[A-Za-z]+-\d+/.exec(pr.title ?? "")?.[0];
     const fill = { high: t.ansi1, low: t.accent, ok: t.done }[level];
-    const s = open === 1 ? "" : "s";
-    const cpTip = level === "high" ? (open ? `Copilot: ${open} open thread${s}, High or Medium among them` : "Copilot reviewed: left comments")
-      : level === "low" ? `Copilot: ${open} open thread${s}, all Low` : level === "ok" ? "Copilot reviewed: no open threads"
-      : level === "asked" ? "Copilot is reviewing (requested, no answer yet)" : "Copilot not run yet";
+    const cpTip = copilotTip(pr.cpBadge);
     // The PR of the focused folder's branch (a fork PR's local branch is pr-<n>-<branch>, see startWorktree).
     const b = this.branch;
     const current = Boolean(b) && (b === pr.headRefName || b === `pr-${pr.number}-${worktreeSlug(pr.headRefName ?? "")}`);
