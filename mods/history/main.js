@@ -1,6 +1,6 @@
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, TextView, InputState, Input } from "gpui-base";
-import { exec, home, theme, spaces, panes, run, notify, props, closeOverlay, openOverlay, shared } from "herdr";
+import { exec, home, theme, spaces, panes, focused, readTextFile, run, notify, props, closeOverlay, openOverlay, shared } from "herdr";
 import { modelFor, runModel, describe, USE, PROJECT } from "./ai.js";
 import { Voice, asQuery } from "./voice.js";
 
@@ -224,7 +224,28 @@ export default class History extends View {
     // a task spawned with render's cx never ran, which left the spinner on until the next re-index.
     // ponytail: a 2 s string compare, no exec; nothing to subscribe to for "the place changed".
     // Each tick copies spaces/panes from the host, so not every 500 ms.
-    cx.timer.every(2000, (cx) => { if (!this.missing && place() !== this.where) this.find(cx); });
+    cx.timer.every(2000, (cx) => { if (!this.missing && place() !== this.where) this.find(cx); this.track(cx); });
+    this.current = null; this.term = undefined; // the focused agent's session id, highlighted in the list
+    this.track(cx);
+  }
+
+  // The session of the agent in the focused terminal, highlighted in the list. Claude Code only: it writes
+  // ~/.claude/sessions/<pid>.json (sessionId) for each running process; `hc get` gives the terminal's foreground pid.
+  // ponytail: other agents keep no such file. Asked on a focus change or a new list (`force`), not every tick:
+  // a Claude started (or /clear) in the same terminal shows after the next list refresh.
+  track(cx, force = false) {
+    const term = focused()?.terminal;
+    if (!term || (!force && term === this.term)) return; // a mod pane or no focus: keep the last one
+    this.term = term;
+    cx.spawn(async (cx) => {
+      let id = null;
+      try {
+        const r = await exec("hc", ["get", term, "--json"], { timeout: 5000 });
+        const pid = r.code === 0 ? JSON.parse(r.stdout).foreground?.pid : null;
+        if (Number.isInteger(pid)) id = JSON.parse(await readTextFile(`${home()}/.claude/sessions/${pid}.json`) ?? "{}").sessionId ?? null;
+      } catch { /* hc missing, not Claude, or no file: nothing to highlight */ }
+      if (term === this.term && id !== this.current) { this.current = id; cx.notify(); }
+    });
   }
 
   // The panel goes: a running recording stops.
@@ -286,6 +307,7 @@ export default class History extends View {
         if (seq !== this.seq) return; // a newer query is on its way
         if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
         this.results = JSON.parse(r.stdout); this.error = null;
+        this.track(cx, true);
       } catch (e) {
         if (seq === this.seq) { this.error = String(e.message ?? e); this.results = []; }
       } finally {
@@ -401,8 +423,10 @@ export default class History extends View {
     const snippet = (s.snippet ?? "").replace(/\s+/g, " ").trim();
     const where = s.worktree ?? s.cwd ?? "";
     // Left: agent, title, snippet, details. Right: how long ago, the favorite star under it.
+    // The focused agent's own session: selected look, as in the other lists.
+    const current = Boolean(this.current) && s.session_id === this.current;
     return h_flex().id(`s-${s.key}`).flex_none().px(8).py(6).gap(8).items_start().rounded(6).cursor_pointer()
-      .hover((st) => st.bg(t.hover)).tooltip(`${s.agent} · ${where}${s.branch ? ` · ${s.branch}` : ""}`)
+      .when(current, (e) => e.bg(t.selected)).hover((st) => st.bg(t.hover)).tooltip(`${s.agent} · ${where}${s.branch ? ` · ${s.branch}` : ""}`)
       .on_mouse_down("left", (_e, cx) => this.show(s, cx))
       .on_mouse_down("right", (_e, cx) => cx.write_to_clipboard(s.session_id))
       .child(v_flex().flex_1().min_w(0).gap(2)
