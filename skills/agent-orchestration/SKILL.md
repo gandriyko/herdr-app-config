@@ -52,6 +52,11 @@ hc run --bg --name da-20519-pr-1-review --cwd "$wt" claude "Review branch $branc
 
 `hc send --if idle <name> "…"` only types when it is idle; `hc send --wait` also waits for that turn.
 
+A send from an agent arrives wrapped as `<hc from="…">…</hc>`, so the child knows who wrote and where
+to report: keep it for messages. A slash command (`/rename`, `/clear`, `/compact`) wrapped that way is
+only chat text the agent can't run; send it bare, without your caller id:
+`env -u HC_TERMINAL_ID hc send --if idle <name> "/rename DA-20519 short title"`.
+
 ## Finish
 
 When the user asked for PRs: per worktree, push and `gh pr create` (title "PR n/N: …", body
