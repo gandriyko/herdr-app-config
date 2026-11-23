@@ -189,9 +189,10 @@ const HH = 'HH_CWD="$PWD" PATH="$PATH:$HOME/.cargo/bin" exec human-history "$@"'
 // names the key first, else one whose own prompt does (jira's sessions start with "<key>: …"). Local folders only.
 // ponytail: an assistant's passing mention doesn't count; without human-history (or on failure) none is found.
 // `scope` "all": every project (to find which repo the issue was worked in), from `folder` (any, e.g. home).
-// pastSessions: the ranked list (at most `max`); pastSession: the best one.
+// pastSessions: the ranked list (at most `max`); pastSession: the best one. `byDate`: newest day first (the day the
+// card shows, "today" / "3d ago"), the rank only within a day.
 async function pastSession(key, folder, scope = "repository") { return (await pastSessions(key, folder, scope, 1))[0] ?? null; }
-async function pastSessions(key, folder, scope = "repository", max = 5) {
+async function pastSessions(key, folder, scope = "repository", max = 5, byDate = false) {
   const r = await exec("/bin/sh", ["-c", HH, "sh", "search", key, "--json", "-f", scope, "--limit", "20"],
     { cwd: folder, timeout: 30000 }).catch(() => null);
   let list = [];
@@ -204,7 +205,8 @@ async function pastSessions(key, folder, scope = "repository", max = 5) {
     return br && ti ? 0 : ti ? 1 : br ? 2 : s.hit_role === "user" ? 3 : 9;
   };
   const ok = list.filter((s) => RESUME[s.agent] && SAFE_ID.test(s.session_id ?? "") && rank(s) < 9);
-  return ok.sort((a, b) => rank(a) - rank(b) || (b.hits ?? 0) - (a.hits ?? 0)
+  const day = (s) => byDate ? Math.floor((Date.now() - timeOf(s.updated_at)) / 86400000) : 0;
+  return ok.sort((a, b) => day(a) - day(b) || rank(a) - rank(b) || (b.hits ?? 0) - (a.hits ?? 0)
     || String(b.updated_at).localeCompare(String(a.updated_at))).slice(0, max);
 }
 
@@ -805,7 +807,7 @@ export default class Jira extends View {
       if (this.st.git.cur === this.stBranch.value().trim()) this.st.mode = "here";
       cx.notify();
       // The issue's past sessions in this repo (all worktrees), best first; a new session stays picked.
-      this.st.sessions = s.on ? [] : await pastSessions(s.key, info.main);
+      this.st.sessions = s.on ? [] : await pastSessions(s.key, info.main, "repository", 5, true);
       cx.notify();
     });
   }
