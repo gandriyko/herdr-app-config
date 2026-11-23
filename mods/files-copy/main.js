@@ -163,6 +163,8 @@ function location() {
 const key = () => { const l = location(); return l ? JSON.stringify(l) : null; }; // null: keep the current folder
 const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", toml: "yaml", jsonc: "json", svelte: "html", vue: "html" };
 const PER_FOLDER = 500, TOTAL = 5000, ALL = 20000, MATCHES = 500;
+// Ignored folders the filter doesn't search inside (same names as the find -prune in loadAll).
+const SKIP_DIR = /^(\.?venv.*|node_modules|\.git|__pycache__)$/;
 // The panel's props.exclude: globs on a file or folder name ("__pycache__", "*.pyc"); matches are hidden in the tree and the filter.
 const globs = list => (Array.isArray(list) ? list : []).map(g => new RegExp("^" + String(g).replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".") + "$"));
 
@@ -355,11 +357,19 @@ export default class Files extends View {
       try {
         let r = await exec("git", ["ls-files", "-z", "-co", "--exclude-standard"], { cwd, on, timeout: 10000 }).catch(() => null);
         let paths = r?.code === 0 ? r.stdout.split("\0") : null;
-        // Ignored files too (.env.local), but not the inside of ignored folders (node_modules/, build/): with
-        // --directory such a folder comes as one "dir/" entry, dropped here.
+        // Ignored files too (.env.local) and the inside of ignored folders (tmp/, build/): with --directory such a
+        // folder comes as one "dir/" entry, listed with find. Virtualenvs and node_modules are skipped (SKIP_DIR).
         if (paths) {
           const ig = await exec("git", ["ls-files", "-z", "-o", "-i", "--exclude-standard", "--directory"], { cwd, on, timeout: 10000 }).catch(() => null);
-          if (ig?.code === 0) paths.push(...ig.stdout.split("\0").filter(p => p && !p.endsWith("/")));
+          const entries = ig?.code === 0 ? ig.stdout.split("\0").filter(Boolean) : [];
+          paths.push(...entries.filter(p => !p.endsWith("/")));
+          // git lists nested ignored folders too (a/ and a/b/): keep only the outermost, or find lists a/b twice.
+          const dirs = entries.filter(p => p.endsWith("/") && !p.slice(0, -1).split("/").some(n => SKIP_DIR.test(n)))
+            .filter((d, _, all) => !all.some(o => o !== d && d.startsWith(o)));
+          if (dirs.length) {
+            const f = await exec("find", [...dirs, "-type", "d", "(", "-name", "venv*", "-o", "-name", ".venv*", "-o", "-name", "node_modules", "-o", "-name", ".git", "-o", "-name", "__pycache__", ")", "-prune", "-o", "-type", "f", "-print0"], { cwd, on, timeout: 10000 }).catch(() => null);
+            if (f) paths.push(...f.stdout.split("\0").filter(Boolean).slice(0, ALL).map(p => p.replace(/\/\/+/g, "/")));
+          }
         }
         if (!paths) {
           r = await exec("sh", ["-c", `find . -type f -not -path '*/.git/*' -not -path '*/node_modules/*' | head -n ${ALL}`], { cwd, on, timeout: 10000 });

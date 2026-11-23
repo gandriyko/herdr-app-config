@@ -20,8 +20,9 @@ asked with each refresh. Cloned from the shipped `files` mod.
 The input above the tree filters it: every word typed must be in a file's path (case-insensitive), and the
 tree then shows only the matching files with their folders, all open (first 500 matches). With dot files
 hidden, a dot file or folder still matches when a typed word is in its name (`env` finds `.env.local`). The list comes
-from `git ls-files -co --exclude-standard` (tracked and untracked) plus ignored files outside ignored folders
-(`git ls-files -oi --exclude-standard --directory`, so `.env.local` but not `node_modules/`), or `find` outside git
+from `git ls-files -co --exclude-standard` (tracked and untracked) plus ignored files
+(`git ls-files -oi --exclude-standard --directory`, so `.env.local`) and the files inside ignored folders (`find`, so
+`tmp/x.py`), except inside `venv*`, `.venv*`, `node_modules`, `.git` and `__pycache__`; or `find` outside git
 (skips node_modules), at most 20,000 files; it is asked again on each refresh while a filter is typed.
 ↑/↓ in the input move a highlight over the matching files (wrapping, the list scrolls to it); Enter opens
 the highlighted file, or the first match when none is.
