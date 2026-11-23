@@ -694,9 +694,9 @@ export default class Agents extends View {
     const withKids = (a, i) => {
       const subs = collapsed ? [] : treeOf(a.address);
       if (!subs.length || this.folded.has(a.address)) return [row(a, i, subs)];
-      // Sub-agents in their own block right under the parent's card (the card's mb shrinks to 2),
-      // indented so it reads as the card's; each one a small card, deeper ones indented more.
-      return [row(a, i, subs).mb(2), v_flex().ml(12).mb(5).gap(2).flex_none()
+      // Sub-agents right under the parent's card, the same 5 px apart as the cards, indented so they
+      // read as the card's; each one a small card, deeper ones indented more.
+      return [row(a, i, subs), v_flex().ml(12).mb(5).gap(5).flex_none()
         .children(subs.map((x) => this.subRow(t, x, shown, now)))];
     };
 
