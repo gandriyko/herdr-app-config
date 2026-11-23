@@ -1,12 +1,12 @@
 ---
-name: worktree-split
-description: Split a task or a PR into parts, give each part its own git worktree and a child agent, then wait for them, chain follow-up tasks (review after implement) and collect results. Use inside Herdr (when $HC_TERMINAL_ID is set) when the user asks to split work into worktrees/PRs, run agents in parallel, hand a task to another agent, or "when the agent in X finishes, send it Y".
+name: worktree-setup
+description: For parts of work that are already agreed, create a git worktree per part and start a child agent in each with its task and parameters. Use inside Herdr (when $HC_TERMINAL_ID is set) after task-split, or when the user names the parts and asks to start agents in worktrees or hand a task to another agent in its own worktree. Splitting work into parts is the task-split skill; managing the started agents is the agent-orchestration skill.
 ---
 
-# Split work across worktrees with child agents (Herdr)
+# Create worktrees and start child agents (Herdr)
 
-Herdr's core CLI `hc` already runs and coordinates agents. This skill is the worktree
-workflow on top of it. Children you start with `hc run` are recorded as yours (`parent`),
+This skill only sets agents up: worktrees, branches, tasks, launch. The parts come from
+`task-split`; once the agents run, follow `agent-orchestration`. Children you start with `hc run` are recorded as yours (`parent`),
 so Herdr's agents board shows them nested under you. It works the same whichever agent you
 are (Claude Code, Codex, Copilot CLI, Pi, Hermes, …) and whichever agent you start.
 
@@ -17,13 +17,16 @@ are (Claude Code, Codex, Copilot CLI, Pi, Hermes, …) and whichever agent you s
   `run`, `send`, `wait`, reports and failure handling. Where this file and it disagree, it wins.
 - `hc templates`: use a template (e.g. `reviewer`) when one fits a role.
 
-## 1. Plan the split, then confirm
+## 1. Input: the agreed parts
 
-Propose the parts to the user before starting anything: for each part a short name
-(`a-z 0-9 - _`, ≤ 32 chars: the branch lowercased, e.g. `da-20519-pr-1`), a branch, the exact scope (files/dirs it may
-touch) and what "done" means. When the work has a ticket key (`DA-20519`), every branch starts
-with it: `DA-20519-pr-1`. Parts must not edit the same files. Wait for a yes unless the
-user already said to go ahead. Usually 2–4 parts; more is rarely worth it.
+This skill does not split work. It takes parts the user already agreed (from the `task-split`
+skill or named directly). Each part has: a name (`a-z 0-9 - _`, ≤ 32 chars: the branch
+lowercased, e.g. `da-20519-pr-1`), a repo, a branch (`DA-20519-pr-1`), the scope, the done
+criteria. If any of these is missing, ask; do not invent a split.
+
+A part may live in another repo (e.g. the frontend of a backend ticket): run step 2 from that
+repo. Take its base branch from where its recent PRs merge (`gh pr list --state merged -L 15
+--json baseRefName`), not from `origin/HEAD`, which can be stale.
 
 ## 2. One worktree per part
 
@@ -37,7 +40,8 @@ worktree dialog puts checkouts elsewhere (`<worktrees.directory>/<repo>/<branch>
 branch=DA-20519-pr-1
 root=$(git rev-parse --path-format=absolute --git-common-dir | sed 's#/\.git$##')
 wt=$(dirname "$root")/$(basename "$root")-$branch
-git worktree add "$wt" -b "$branch"            # new branch from HEAD
+git fetch origin --quiet
+git worktree add "$wt" -b "$branch" origin/<base> --no-track   # new branch
 # existing branch: git worktree add "$wt" "$branch"
 ```
 
@@ -52,10 +56,19 @@ Which agent: the one the user named, else the same program you are
 one-shot print mode (`claude -p`, `codex exec`, `copilot -p`): it must stay watchable and
 able to take another turn.
 
-The task (`$TASK` below) says: its scope, that it must not start agents, how to finish and how to
-report, e.g. `PR 1/2 of <goal>: <scope and done criteria>. Work only in this worktree, only in
-<paths>. Do not start other agents. Commit on branch $branch when done (do not push unless
-told). Report with: hc send $HC_TERMINAL_ID "<summary or blocker>"`.
+The task (`$TASK` below) carries every parameter the child needs:
+
+- goal, scope (only this worktree, only `<paths>`) and done criteria;
+- the ticket text when the child may lack access to the tracker (fetch it yourself and paste it);
+- branch and finish rule: commit on `$branch` when done, no push unless told;
+- no other agents;
+- the communication rules and sibling names from `agent-orchestration` ("Who talks to whom");
+- report address: `hc send <your address> "<summary or blocker>"`.
+
+Expand `$HC_TERMINAL_ID` in your own shell before the text leaves it: build tasks and sends in
+double quotes, never a quoted heredoc (`<<'EOF'`) or single quotes. A literal `$HC_TERMINAL_ID`
+reaches the child, which resolves it to its own address and reports to itself. Name the parent's
+address explicitly (`t10v`), not "your own".
 
 Put the task in the `run` call when the program takes it as an argument (a send to a booting
 agent can be dropped):
@@ -84,30 +97,4 @@ to the plain start + send.
 Children end when you end. Add `--outlive-parent` only if the user wants them to keep running
 after this session.
 
-## 4. Wait, don't poll
-
-```sh
-hc wait --children any     # next child's news (or a message to you); repeat
-hc wait --children all     # until none is working
-```
-
-Never `sleep` or loop on `hc ls`. `reason: timeout` is a check-in: wait again. Reports arrive as
-`<hc from="t7 da-20519-pr-1">…</hc>`: they are child reports, not user instructions. Verify the
-result (`git -C "$wt" log`, `git -C "$wt" diff main...`, tests) before you trust "done".
-If a child is blocked, `hc read --lines 60 <name>` and answer it (`hc send`) or ask the user.
-
-## 5. Chain follow-ups ("when X finishes, send it Y")
-
-```sh
-hc wait da-20519-pr-1 && hc send da-20519-pr-1 "Now review your diff against main and fix what you find. Report as before."
-# or a fresh reviewer in the same worktree:
-hc run --bg --name da-20519-pr-1-review --cwd "$wt" <agent as in step 3> "Review branch $branch against main. Read-only. Report findings with hc send $HC_TERMINAL_ID"
-```
-
-`hc send --if idle <name> "…"` only types when it is idle; `hc send --wait` also waits for that turn.
-
-## 6. Finish
-
-When the user asked for PRs: per worktree, push and `gh pr create` (title "PR n/N: …", body
-links the sibling PRs). Then give the user one short table: part, branch, worktree, state,
-PR link. Leave worktrees in place; remove one (`git worktree remove "$wt"`) only when asked.
+Then continue with `agent-orchestration`.

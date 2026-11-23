@@ -65,11 +65,13 @@ symlink, not a copy, so `git pull` here updates the skill too.
 
 - Re-run the step 4 loop after a pull that adds a skill, or after installing Hermes. `ln -sfn` replaces an old link, so running it again is safe.
 - Start a new agent session after linking (Copilot: `/skills reload`; Hermes picks it up without a restart).
-- Check: `ls -l ~/.claude/skills ~/.agents/skills` shows the links; in Claude, `/worktree-split` autocompletes.
-- Use: ask in words ("split this PR into two worktrees") or call the skill by name.
+- Check: `ls -l ~/.claude/skills ~/.agents/skills` shows the links; in Claude, `/worktree-setup` autocompletes.
+- Use: ask in words ("split this task into backend and frontend parts") or call the skill by name.
 - Remove: `rm ~/.claude/skills/<name> ~/.agents/skills/<name>` (deletes the links only).
 - Only for one project: link it into `<project>/.claude/skills/` or `<project>/.agents/skills/` instead.
 
 | Skill | What it does |
 | --- | --- |
-| `worktree-split` | Splits a task or PR into git worktrees (next to the repo as `<repo>-<branch>`, branches prefixed with the ticket key), runs a child agent in each with `hc run`, waits for them and chains follow-ups (review after implement), with Claude Code, Codex, Copilot CLI, Pi or Hermes as parent or child. The children show nested under their parent in `agents-board`. Needs `hc`, `git`, `gh` (for PRs). |
+| `task-split` | Splits a task or PR into parts for parallel agents (name, repo, branch, scope, done, the contract between parts) and agrees the split with the user. Plans only. |
+| `worktree-setup` | For the agreed parts, creates git worktrees (next to the repo as `<repo>-<branch>`, branches prefixed with the ticket key) and starts a child agent in each with `hc run`, passing its task and parameters, with Claude Code, Codex, Copilot CLI, Pi or Hermes as parent or child. The children show nested under their parent in `agents-board`. Needs `hc`, `git`. |
+| `agent-orchestration` | Leads the running children: they agree with each other directly and escalate through the parent, the user talks only to the parent and gets plain status updates; waits for reports, verifies them, chains follow-ups (review after implement), opens PRs and stops the agents. Needs `hc`, `gh` (for PRs). |
