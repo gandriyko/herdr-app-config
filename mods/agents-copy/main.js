@@ -473,9 +473,10 @@ export default class Agents extends View {
       .flex_none()
       .rounded(o.small ? 6 : 7)
       .border(1)
-      // The agent being worked with: an accent border and tint (its border wins over blocked's; blocked keeps its tint).
-      .border_color(focused ? t.accent : blocked ? t.blocked + "66" : t.border)
-      .bg(blocked ? t.blocked + "14" : focused ? t.accent + "1f" : t.raised)
+      // The agent being worked with: the selected fill, border in the same colour, as the shipped agents list does
+      // (its border wins over blocked's; blocked keeps its tint). Other cards are outlined only.
+      .border_color(focused ? t.selected : blocked ? t.blocked + "66" : t.border)
+      .bg(blocked ? t.blocked + "14" : focused ? t.selected : t.background + "00")
       .cursor_pointer()
       .hover((s) => s.bg(blocked ? t.blocked + "22" : t.hover))
       .child(h_flex()
