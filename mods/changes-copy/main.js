@@ -134,17 +134,20 @@ export default class Changes extends View {
   }
 
   refresh(cx) {
-    // A change during a refresh runs one more after it (see finally), instead of one per change.
-    if (this.loading || this.busy) { this.again = true; return; }
     const { cwd, on } = location(this.places), context = this.key();
     const shown = this.shownState();
     if (context !== this.context) {
       this.context = context; this.collapsed = new Set(); this.root = null; this.files = []; this.open = null;
       this.pk = null; this.message = ""; this.input.set_value(""); this.error = null; this.note = null; this.watched = null; this.limited = false;
+      // A load left behind in the old folder (a slow git) must not hold this one: stale() drops its
+      // result, and the new generation owns `loading` and `again` from here.
+      this.loading = false; this.again = false; this.loadGen = (this.loadGen ?? 0) + 1;
     }
+    // A change during a refresh runs one more after it (see finally), instead of one per change.
+    if (this.loading || this.busy) { this.again = true; return; }
     if (!cwd) return;
     this.loading = true;
-    const scope = this.scope, baseGen = this.baseGen, stale = () => this.key() !== context || this.scope !== scope || this.baseGen !== baseGen;
+    const gen = this.loadGen, scope = this.scope, baseGen = this.baseGen, stale = () => this.key() !== context || this.scope !== scope || this.baseGen !== baseGen;
     cx.spawn(async (cx) => {
       try {
         const top = await exec("git", ["rev-parse", "--show-toplevel", "--absolute-git-dir"], { cwd, on });
@@ -218,6 +221,7 @@ export default class Changes extends View {
         if (this.open && !files.some((f) => f.path === this.open)) this.open = null;
       } catch (e) { if (!stale()) this.error = String(e); }
       finally {
+        if (gen !== this.loadGen) return; // an old folder's load: the current one is already running
         this.loading = false;
         if (this.scope !== scope || this.baseGen !== baseGen) this.refresh(cx);
         else if (this.again) { this.again = false; cx.timer.after(500, (cx) => this.refresh(cx)); }
