@@ -196,11 +196,16 @@ async function pastSessions(key, folder, scope = "repository", max = 5) {
     { cwd: folder, timeout: 30000 }).catch(() => null);
   let list = [];
   try { if (r?.code === 0) list = JSON.parse(r.stdout); } catch {}
-  // Best first: the key in the session's branch (work on the issue itself), then in its title (a session elsewhere may
-  // share a title), then in my own prompt; the latest activity within each.
-  const rank = (s) => mentions((s.branch ?? "").toUpperCase(), key) ? 0 : mentions((s.title ?? "").toUpperCase(), key) ? 1 : s.hit_role === "user" ? 2 : 9;
+  // Best first: the key in both the session's title and its branch, then in the title only (work on the issue from
+  // another branch), then in the branch only (often a side task, e.g. a worklog, run while on the issue's branch), then
+  // in my own prompt. Within each: more messages naming the key (`hits`), then the latest activity.
+  const rank = (s) => {
+    const br = mentions((s.branch ?? "").toUpperCase(), key), ti = mentions((s.title ?? "").toUpperCase(), key);
+    return br && ti ? 0 : ti ? 1 : br ? 2 : s.hit_role === "user" ? 3 : 9;
+  };
   const ok = list.filter((s) => RESUME[s.agent] && SAFE_ID.test(s.session_id ?? "") && rank(s) < 9);
-  return ok.sort((a, b) => rank(a) - rank(b) || String(b.updated_at).localeCompare(String(a.updated_at))).slice(0, max);
+  return ok.sort((a, b) => rank(a) - rank(b) || (b.hits ?? 0) - (a.hits ?? 0)
+    || String(b.updated_at).localeCompare(String(a.updated_at))).slice(0, max);
 }
 
 // The argv that resumes `past` in `folder`, or null when it can't. Claude finds a session only under its folder's
@@ -799,9 +804,8 @@ export default class Jira extends View {
       }
       if (this.st.git.cur === this.stBranch.value().trim()) this.st.mode = "here";
       cx.notify();
-      // The issue's past sessions in this repo (all worktrees), best first; the best is picked.
+      // The issue's past sessions in this repo (all worktrees), best first; a new session stays picked.
       this.st.sessions = s.on ? [] : await pastSessions(s.key, info.main);
-      this.st.pick = this.st.sessions.length ? 0 : -1;
       cx.notify();
     });
   }
@@ -924,14 +928,14 @@ export default class Jira extends View {
               .child(choice("mode-worktree", st.mode === "worktree", wt ? "Its worktree" : "New worktree",
                 tilde(wt ?? worktreePath(g.main, branch || "…")), () => { st.mode = "worktree"; }))
               .child(choice("mode-here", st.mode === "here", `Here · ${g.repo}`, hereAbout, () => { st.mode = "here"; }))))
-        // The session: one of the issue's past sessions to resume (the best picked) or a new one, one card each.
+        // The session: a new one (first, picked) or one of the issue's past sessions to resume, best first, one card each.
         .child(div().h(1).bg(t.border))
         .child(section("Session: the conversation the agent starts with"))
         .child(sessions === undefined ? div().text_size(11).text_color(t.dim).child("Looking for past sessions…")
           : v_flex().gap(6)
-            .children(sessions.map((s, i) => choice(`sess-${i}`, st.pick === i, `Resume: ${s.title || s.session_id}`, sessAbout(s), () => { st.pick = i; })))
             .child(choice("sess-new", st.pick === -1, `New ${agentName} session`,
-              sessions.length ? "Without the past context" : "No past session mentions this issue", () => { st.pick = -1; })))
+              sessions.length ? "Without the past context" : "No past session mentions this issue", () => { st.pick = -1; }))
+            .children(sessions.map((s, i) => choice(`sess-${i}`, st.pick === i, `Resume: ${s.title || s.session_id}`, sessAbout(s), () => { st.pick = i; }))))
         .when(Boolean(st.error), (e) => e.child(div().text_size(11).text_color(t.ansi1).child(st.error))))
       .child(h_flex().flex_none().px(16).py(12).gap(8).justify_end().border_t(1).border_color(t.border)
         .child(button("st-cancel", "Cancel", false, () => closeOverlay(props().overlay)))
