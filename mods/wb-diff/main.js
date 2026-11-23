@@ -11,8 +11,11 @@ import { FIND_CAP, findAll, findRegex } from "./find.js";
 import { props, shared, setShared, spaces, panes, theme, settings, exec, readTextFile, run, notify, appHome } from "herdr";
 
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false", "-c", "core.quotepath=false"];
-// The code's text size matches the side panels' (Changes, Files: 13); ROW is a code line's height, HEAD a file header's.
-const FONT = 13, ROW = 22, HEAD = 32, CHAR_W = FONT * 0.6;
+// The code's text size is the terminal font size (settings().font_size, as Herdr's Changes uses); ROW is a code line's
+// height (22 at 13 px), HEAD a file header's. render() refreshes them, so a settings change applies on the next frame.
+const HEAD = 32;
+let FONT = 14, ROW = 24, CHAR_W = FONT * 0.6;
+const setFont = () => { FONT = settings().font_size ?? 14; ROW = Math.round(FONT * 22 / 13); CHAR_W = FONT * 0.6; };
 // Caps: lines per file, lines in all, files per view; STEP context lines per reveal click.
 const MAX_LINES = 20000, MAX_TOTAL = 100000, MAX_FILES = 300, STEP = 20;
 
@@ -431,7 +434,7 @@ export default class DiffView extends View {
   // longer side needs. Offsets are prefix sums, cached per (rows, cols).
   geo() {
     const cols = this.wrap ? this.cols : 0, c = this.geoCache;
-    if (c && c.rows === this.rows && c.cols === cols) return c;
+    if (c && c.rows === this.rows && c.cols === cols && c.row === ROW) return c;
     const n = this.rows.length, ys = new Array(n + 1), hs = new Array(n);
     const lines = (s) => (cols ? Math.max(1, Math.ceil(((s ?? "").length || 1) / cols)) : 1);
     let y = 0;
@@ -441,7 +444,7 @@ export default class DiffView extends View {
       ys[i] = y; y += hs[i];
     }
     ys[n] = y;
-    return (this.geoCache = { rows: this.rows, cols, ys, hs });
+    return (this.geoCache = { rows: this.rows, cols, row: ROW, ys, hs });
   }
   yOf(i) { return this.geo().ys[Math.max(0, Math.min(i, this.rows.length))]; }
   totalH() { return this.geo().ys[this.rows.length]; }
@@ -737,6 +740,7 @@ export default class DiffView extends View {
   }
 
   render(cx) {
+    setFont();
     this.pickRequest(cx);
     this.pal = palette(theme(), this.pal);
     const t = this.pal.p;

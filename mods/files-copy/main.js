@@ -9,9 +9,11 @@ import { FIND_CAP, findAll, findRegex } from "./find.js";
 
 const PY = languageFor("x.py");
 // ponytail: CHAR_W assumes a monospace font at 0.6 em (JetBrains Mono, Menlo, SF Mono); another font puts the underline off.
-// The view is drawn to match the built-in editor (measured from screenshots): row 21, gutter numbers at the code's size,
-// code 49 px from the left for a 2-digit gutter, faint indent guides every 2 columns, the editor's syntax colours.
-const FONT = 13, ROW = 21, CHAR_W = FONT * 0.6;
+// The view is drawn to match the built-in editor (measured from screenshots): row 21 at 13 px, gutter numbers at the code's
+// size, code 49 px from the left for a 2-digit gutter, faint indent guides every 2 columns, the editor's syntax colours.
+// The code's size is the terminal font size (settings().font_size, as Herdr's Files uses); render() refreshes it.
+let FONT = 14, ROW = 23, CHAR_W = FONT * 0.6;
+const setFont = () => { FONT = settings().font_size ?? 14; ROW = Math.round(FONT * 21 / 13); CHAR_W = FONT * 0.6; };
 
 // argv: project root, file, line (1-based), column. Prints [{path, line, col}]; uses the project's .venv/venv when present.
 const GOTO = `import sys, os, json, jedi
@@ -1260,6 +1262,7 @@ export default class Files extends View {
   }
 
   render(cx) {
+    setFont();
     const t = theme();
     if (props()?.unsaved) return this.saveDialog(t);
     if (this.tab) { this.pickRequest(cx); return this.renderTab(t, cx); }
