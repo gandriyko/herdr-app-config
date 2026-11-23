@@ -419,47 +419,109 @@ export default class Agents extends View {
     run("terminal.peek", { terminal: addr });
   }
 
-  // Live sub-agents of `addr`, depth first, each with the tree lines in front of it.
+  // Live sub-agents of `addr`, depth first, each with its depth (0 = a direct child).
   // `kidsBy`: parent address -> its live terminals, built once per render.
-  tree(kidsBy, addr, lead = []) {
-    const kids = kidsBy.get(addr) ?? [];
-    return kids.flatMap((k, i) => {
-      const last = i === kids.length - 1;
-      return [
-        { t: k, lines: [...lead, last ? "└" : "├"] },
-        ...this.tree(kidsBy, k.address, [...lead, last ? "" : "│"]),
-      ];
-    });
+  tree(kidsBy, addr, depth = 0) {
+    return (kidsBy.get(addr) ?? []).flatMap((k) => [{ t: k, depth }, ...this.tree(kidsBy, k.address, depth + 1)]);
   }
 
-  subRow(t, s, shown, compact) {
-    const k = s.t;
-    const st = kidStatus(k, this.listed);
-    const pic = icon(k.program, 14, t.foreground);
-    const on = k.address === shown;
-    return h_flex()
-      .id(`sub-${k.address}`)
-      .pl(15)
-      .pr(0)
-      .rounded(6)
-      .h(26)
+  // The eye button of a card or a sub-agent row: shows or hides that agent's last message.
+  eyeBtn(t, addr) {
+    const open = this.expanded === addr;
+    return div()
+      .id(`ag-eye-${addr}`)
       .flex_none()
-      .gap(0)
-      .items_center()
-      .text_size(12.5)
-      .when(on, (el) => el.bg(t.raised))
-      .hover((s) => s.bg(t.hover))
+      .p(2)
+      .rounded(4)
+      .text_color(open ? t.accent : t.dim)
+      .hover((s) => s.bg(t.hover).text_color(open ? t.accent : t.foreground))
+      .tooltip(open ? "Hide last message" : "Show last message")
       .on_click((_e, cx) => {
         cx.stop_propagation();
+        this.toggleExpand(addr, cx);
+      })
+      .child(svg("mods/agents-copy/eye.svg").size(13));
+  }
+
+  // The open last message (this.lastMsg) in a box, or null when `addr` isn't the open one.
+  msgBox(t, addr) {
+    const open = this.expanded === addr ? this.lastMsg : null;
+    if (!open) return null;
+    return v_flex().mt(2).p(6).gap(2).rounded(5).bg(t.background).border_1().border_color(t.border).max_h(240).overflow_hidden()
+      .when(Boolean(open.msg), (el) => el
+        .child(div().text_size(10).font_semibold().text_color(open.msg.who === "you" ? t.accent : t.dim).child(open.msg.who === "you" ? "YOU" : "AGENT"))
+        .children(open.msg.text.split("\n").map((l) => div().text_size(11).line_height("15px").text_color(t.muted).child(l || " "))))
+      .when(!open.msg, (el) => el.child(div().text_size(11).text_color(t.dim).child(open.loading ? "Loading…" : open.failed ? "Could not read the screen" : "No message on screen")));
+  }
+
+  // An agent card from its parts; `small` is the sub-agent size. Both cards share this layout:
+  // icon with the status glyph under it, line 1 (title … right), line 2 (report, eye), message box, bottom row.
+  card(t, o) {
+    const sz = o.small ? { pad: [5, 7], gap: 3, col: 14, colGap: 4, title: 12, report: 11.5, lh: 15 } : { pad: [8, 9], gap: 4, col: 16, colGap: 6, report: 12, lh: 17 };
+    const { blocked, focused } = o;
+    return v_flex()
+      .id(o.id)
+      .py(sz.pad[0])
+      .px(sz.pad[1])
+      .gap(sz.gap)
+      .flex_none()
+      .rounded(o.small ? 6 : 7)
+      .border(1)
+      // The agent being worked with: an accent border and tint (its border wins over blocked's; blocked keeps its tint).
+      .border_color(focused ? t.accent : blocked ? t.blocked + "66" : t.border)
+      .bg(blocked ? t.blocked + "14" : focused ? t.accent + "1f" : t.raised)
+      .cursor_pointer()
+      .hover((s) => s.bg(blocked ? t.blocked + "22" : t.hover))
+      .child(h_flex()
+        .gap(o.small ? 6 : 7)
+        .items_start()
+        .child(v_flex().flex_none().w(sz.col).gap(sz.colGap).items_center()
+          .when(Boolean(o.pic), (el) => el.child(o.pic))
+          .child(div().flex_none().w(16).h(16).flex().items_center().justify_center().when(Boolean(o.glyph), (el) => el.child(o.glyph))))
+        .child(v_flex().flex_1().min_w(0).gap(sz.gap)
+          .child(h_flex()
+            .gap(7)
+            .items_center()
+            .when(Boolean(o.small), (el) => el.text_size(sz.title))
+            .child(h_flex().flex_1().min_w(0).gap(5).items_center().children(o.title.filter(Boolean)))
+            .children(o.right.filter(Boolean)))
+          .child(h_flex().gap(4).items_start()
+            .child(div().flex_1().min_w(0).max_h(sz.lh * 2).overflow_hidden().text_size(sz.report).line_height(`${sz.lh}px`).text_color(o.reportOn ? (blocked ? t.blocked : t.muted) : t.dim).child(o.report))
+            .when(Boolean(o.eye), (el) => el.child(o.eye)))
+          .when(Boolean(o.box), (el) => el.child(o.box))
+          .when(Boolean(o.bottom), (el) => el.child(o.bottom))));
+  }
+
+  // A sub-agent as a small card: the same layout as its parent's, indented by depth.
+  subRow(t, s, shown, now) {
+    const k = s.t;
+    const st = kidStatus(k, this.listed);
+    const when = this.since(k);
+    const prog = k.program?.name ?? "";
+    let report = reportText(k.report) || reportText(k.title);
+    if (report.toLowerCase() === prog.trim().toLowerCase()) report = "";
+    return this.card(t, {
+      id: `sub-${k.address}`,
+      small: true,
+      blocked: st === "blocked",
+      focused: k.address === shown,
+      pic: icon(k.program, 14, t.foreground),
+      glyph: glyph(t, st, "mods/agents-copy/"),
+      title: [div().min_w(0).truncate().text_color(t.foreground).font_semibold().child(k.name || k.template || prog || k.address)],
+      right: [when && div().flex_none().whitespace_nowrap().text_size(11).text_color(st === "blocked" ? t.blocked : t.dim).child(duration(now - when))],
+      report: report || prog || k.address,
+      reportOn: Boolean(report),
+      eye: !k.address.includes("/") && this.eyeBtn(t, k.address),
+      box: this.msgBox(t, k.address),
+    })
+      .ml(s.depth * 12)
+      .when(this.expanded === k.address, (el) => el.on_mouse_down_out((_e, cx) => this.collapse(cx)))
+      .on_click((_e, cx) => {
+        cx.stop_propagation();
+        this.collapse(cx);
         this.endSearch(cx);
         this.listed.has(k.address) ? run("pane.focus", { terminal: k.address }) : this.openSub(k.address, cx);
-      })
-      .children(s.lines.map(l => div().self_start().mt(-4).w(9).h(17).mr(4).flex_none()
-        .when(Boolean(l), el => el.border_l(1.5).border_color(t.input))
-        .when(l === "└" || l === "├", el => el.border_b(1.5).rounded_bl(6))))
-      .when(Boolean(pic), el => el.child(div().mr(8).child(pic)))
-      .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).child(k.name || k.template || k.program?.name || k.address))
-      .child(this.status(t, { status: st }, compact));
+      });
   }
 
   // compact: a ! for blocked where a header already says "Needs you".
@@ -487,7 +549,9 @@ export default class Agents extends View {
     this.listed = new Map(list.map((a) => [a.address, a.status]));
     // The open card follows its agent: a new turn or status re-reads its screen (render reruns on those).
     if (this.expanded) {
-      const key = `${all.find((k) => k.address === this.expanded)?.turn}|${this.listed.get(this.expanded)}`;
+      const term = all.find((k) => k.address === this.expanded);
+      // A sub-agent without a pane isn't in agents(): its terminal's status instead.
+      const key = `${term?.turn}|${this.listed.get(this.expanded) ?? term?.status}`;
       if (this.expandKey === null) this.expandKey = key; // the first read is already running
       else if (key !== this.expandKey) {
         this.expandKey = key;
@@ -498,12 +562,14 @@ export default class Agents extends View {
     const termBy = new Map(all.map((k) => [k.address, k]));
     const shown = focused()?.agent;
     const now = Date.now();
-    this.track(list, now);
     // A kept sub-agent (one with a pane) is in agents() too: where a tree shows
     // it, it gets no row of its own, unless it's pinned.
     // One pass over the terminals, and each agent's tree once per render (it's needed three times below).
     const kidsBy = new Map();
     for (const k of all) if (k.parent && k.state === "live") kidsBy.set(k.parent, [...(kidsBy.get(k.parent) ?? []), k]);
+    // Sub-agents without a pane get their time in state stamped too (their row shows it).
+    const paneless = [...kidsBy.values()].flat().filter((k) => !this.listed.has(k.address)).map((k) => ({ address: k.address, status: kidStatus(k, this.listed) }));
+    this.track([...list, ...paneless], now);
     const trees = new Map();
     const treeOf = (addr) => trees.get(addr) ?? trees.set(addr, this.tree(kidsBy, addr)).get(addr);
     const nested = new Set(collapsed ? [] : list.flatMap((a) => treeOf(a.address).map((s) => s.t.address)));
@@ -627,7 +693,11 @@ export default class Agents extends View {
 
     const withKids = (a, i) => {
       const subs = collapsed ? [] : treeOf(a.address);
-      return [row(a, i, subs)];
+      if (!subs.length || this.folded.has(a.address)) return [row(a, i, subs)];
+      // Sub-agents in their own block right under the parent's card (the card's mb shrinks to 2),
+      // indented so it reads as the card's; each one a small card, deeper ones indented more.
+      return [row(a, i, subs).mb(2), v_flex().ml(12).mb(5).gap(2).flex_none()
+        .children(subs.map((x) => this.subRow(t, x, shown, now)))];
     };
 
     // The fold chevron; folded, the count too, colored by the most urgent one.
@@ -785,65 +855,33 @@ export default class Agents extends View {
       const pr = prFor(a);
       const jiraKey = jiraSite ? jiraFor(a) : null;
       const g = glyph(t, a.status, "mods/agents-copy/");
-      const open = this.expanded === a.address ? this.lastMsg : null;
       const canPeek = !a.address.includes("/"); // the screen of another machine's agent isn't read
-      const eye = div()
-        .id(`ag-eye-${a.address}`)
-        .flex_none()
-        .p(2)
-        .rounded(4)
-        .text_color(open ? t.accent : t.dim)
-        .hover((s) => s.bg(t.hover).text_color(open ? t.accent : t.foreground))
-        .tooltip(open ? "Hide last message" : "Show last message")
-        .on_click((_e, cx) => {
-          cx.stop_propagation();
-          this.toggleExpand(a.address, cx);
-        })
-        .child(svg("mods/agents-copy/eye.svg").size(13));
-      const msgBox = !open ? null : v_flex().mt(2).p(6).gap(2).rounded(5).bg(t.background).border_1().border_color(t.border).max_h(240).overflow_hidden()
-        .when(Boolean(open.msg), (el) => el
-          .child(div().text_size(10).font_semibold().text_color(open.msg.who === "you" ? t.accent : t.dim).child(open.msg.who === "you" ? "YOU" : "AGENT"))
-          .children(open.msg.text.split("\n").map((l) => div().text_size(11).line_height("15px").text_color(t.muted).child(l || " "))))
-        .when(!open.msg, (el) => el.child(div().text_size(11).text_color(t.dim).child(open.loading ? "Loading…" : open.failed ? "Could not read the screen" : "No message on screen")));
-      return hover(v_flex()
-        .id(`ag-${a.address}`)
-        .py(8)
-        .px(9)
-        .gap(4)
-        .flex_none()
-        .mb(5)
-        .rounded(7)
-        .border(1)
-        // The agent being worked with: an accent border and tint (its border wins over blocked's; blocked keeps its tint).
-        .border_color(a.focused ? t.accent : blocked ? t.blocked + "66" : t.border)
-        .bg(blocked ? t.blocked + "14" : a.focused ? t.accent + "1f" : t.raised)
-        .cursor_pointer()
-        .hover((s) => s.bg(blocked ? t.blocked + "22" : t.hover)))
-        .child(h_flex()
-          .gap(7)
-          .items_start()
-          .child(v_flex().flex_none().w(16).gap(6).items_center()
-            .when(Boolean(pic), (el) => el.child(picFold(pic)))
-            .child(div().flex_none().w(16).h(16).flex().items_center().justify_center().when(Boolean(g), (el) => el.child(g))))
-          .child(v_flex().flex_1().min_w(0).gap(4)
-            .child(h_flex()
-              .gap(7)
-              .items_center()
-              .child(h_flex().flex_1().min_w(0).gap(5).items_center()
-                .child(div().min_w(0).when(Boolean(tabTxt), (el) => el.max_w(120)).truncate().text_color(t.foreground).font_semibold().child(lead))
-                .when(Boolean(tabTxt), (el) => el.child(div().min_w(0).truncate().text_color(t.dim).child(`/ ${tabTxt}`))))
-              .when(Boolean(machine), (el) => el.child(div().text_size(10).text_color(t.dim).child(machine)))
-              .when(subs.length > 0, (el) => el.child(fold(a, subs)))
-              .when(Boolean(timeOrPin), (el) => el.child(timeOrPin)))
-            .child(h_flex().gap(4).items_start()
-              .child(div().flex_1().min_w(0).max_h(34).overflow_hidden().text_size(12).line_height("17px").text_color(report ? (blocked ? t.blocked : t.muted) : t.dim).child(report || prog || label(a)))
-              .when(canPeek, (el) => el.child(eye)))
-            .when(Boolean(msgBox), (el) => el.child(msgBox))
-            // PR and Jira chips on their own row at the bottom, so the name and the report keep the width.
-            .when(Boolean(pr || jiraKey), (el) => el.child(h_flex().gap(5).items_center()
-              .when(Boolean(jiraKey), (el) => el.child(jiraChip(a, jiraKey)))
-              .when(Boolean(pr), (el) => el.child(prChip(a, pr)))))))
-        .when(subs.length > 0 && !this.folded.has(a.address), (el) => el.children(subs.map((x) => this.subRow(t, x, shown, byPriority))));
+      const eye = this.eyeBtn(t, a.address);
+      const msgBox = this.msgBox(t, a.address);
+      return hover(this.card(t, {
+        id: `ag-${a.address}`,
+        blocked,
+        focused: a.focused,
+        pic: pic && picFold(pic),
+        glyph: g,
+        title: [
+          div().min_w(0).when(Boolean(tabTxt), (el) => el.max_w(120)).truncate().text_color(t.foreground).font_semibold().child(lead),
+          tabTxt && div().min_w(0).truncate().text_color(t.dim).child(`/ ${tabTxt}`),
+        ],
+        right: [
+          machine && div().text_size(10).text_color(t.dim).child(machine),
+          subs.length > 0 && fold(a, subs),
+          timeOrPin,
+        ],
+        report: report || prog || label(a),
+        reportOn: Boolean(report),
+        eye: canPeek && eye,
+        box: msgBox,
+        // PR and Jira chips on their own row at the bottom, so the name and the report keep the width.
+        bottom: (pr || jiraKey) && h_flex().gap(5).items_center()
+          .when(Boolean(jiraKey), (el) => el.child(jiraChip(a, jiraKey)))
+          .when(Boolean(pr), (el) => el.child(prChip(a, pr))),
+      }).mb(5));
     };
 
     // Groups in list order: repos/spaces (grouped) or priority sections. `rest` is
