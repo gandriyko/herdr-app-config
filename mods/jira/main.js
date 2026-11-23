@@ -940,7 +940,7 @@ export default class Jira extends View {
           : v_flex().gap(6)
             .child(choice("sess-new", st.pick === -1, `New ${agentName} session`,
               sessions.length ? "Without the past context" : "No past session mentions this issue", () => { st.pick = -1; }))
-            .children(sessions.map((s, i) => choice(`sess-${i}`, st.pick === i, `Resume: ${s.title || s.session_id}`, sessAbout(s), () => { st.pick = i; }))))
+            .children(sessions.map((s, i) => choice(`sess-${i}`, st.pick === i, s.title || s.session_id, sessAbout(s), () => { st.pick = i; }))))
         .when(Boolean(st.error), (e) => e.child(div().text_size(11).text_color(t.ansi1).child(st.error))))
       .child(h_flex().flex_none().px(16).py(12).gap(8).justify_end().border_t(1).border_color(t.border)
         .child(button("st-cancel", "Cancel", false, () => closeOverlay(props().overlay)))
