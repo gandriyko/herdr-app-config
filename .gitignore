@@ -37,6 +37,8 @@
 !mods/history/**
 !mods/status-copy/
 !mods/status-copy/**
+!mods/start-tab/
+!mods/start-tab/**
 !mods/agents-board/
 !mods/agents-board/**
 !mods/agents-copy/

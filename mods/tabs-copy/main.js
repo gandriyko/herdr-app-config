@@ -1,6 +1,6 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, panes, run, openOverlay, theme, window, layout, settings, nextCommand } from "herdr";
+import { spaces, panes, run, openOverlay, theme, window, layout, settings, nextCommand, readTextFile, appHome } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -26,16 +26,37 @@ function togglePanel(id) {
 
 const openNewMenu = () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 });
 
+// Herdr closes a space with its last tab. To keep the space, the last tab is replaced by a start tab
+// (mod start-tab: Terminal or an agent) before it closes; closing the start tab itself closes the space.
+// Without the start-tab mod, a plain terminal tab takes its place.
+// ponytail: a program exiting in the last tab (`exit`) still closes the space; Herdr has no hook for it.
+function closeTab(id, hasStart) {
+  const space = spaces().find((s) => s.tabs.some((t) => t.id === id));
+  const own = panes().filter((p) => p.tab === id);
+  if (space?.tabs.length === 1 && !own.every((p) => p.mod === "start-tab")) {
+    const folder = own.find((p) => p.cwd)?.cwd ?? space.folder;
+    if (hasStart) run("tab.new", { space: space.id, name: "Start", mod: "start-tab", props: { space: space.id, folder } });
+    else run("tab.new", { space: space.id, folder: folder || undefined });
+  }
+  run("tab.close", { id });
+}
+
 export default class Tabs extends View {
   init(_props, cx) {
     this.pressed = null;
     this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}");
     // keys.json: "cmd-shift-j": "tabs-copy.jira" (any panel id works: tabs-copy.files, tabs-copy.changes);
     // "cmd-shift-t": "tabs-copy.new" opens the + popup.
+    // "cmd-w": "tabs-copy.close", "cmd-shift-w": "tabs-copy.close-pane" keep the space open (closeTab).
+    this.hasStart = false;
+    readTextFile(`${appHome()}/mods/start-tab/main.js`).then((s) => { this.hasStart = Boolean(s); }, () => {});
     cx.spawn(async () => {
       for (;;) {
         const id = await nextCommand();
-        if (id === "new") openNewMenu();
+        const tab = spaces().find((s) => s.active)?.tabs.find((t) => t.active);
+        if (id === "close") { if (tab) closeTab(tab.id, this.hasStart); }
+        else if (id === "close-pane") { if (tab?.panes === 1) closeTab(tab.id, this.hasStart); else run("pane.close"); }
+        else if (id === "new") openNewMenu();
         else if (panelsOf(layout()).some(([p]) => p === id)) togglePanel(id);
       }
     });
@@ -99,7 +120,7 @@ export default class Tabs extends View {
         .child(div().max_w(170).truncate().child(c.zoomed ? `${name} Z` : name))
         .when(c.status === "working", el => el.child(svg("mods/tabs-copy/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
         .when(c.status === "blocked" || c.status === "done", el => el.child(div().size(6).rounded(3).bg(t[c.status])))
-        .when(c.active, el => el.child(div().id(`close-${c.id}`).text_color(t.dim).on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); run("tab.close", { id: c.id }); }).child(svg("mods/tabs-copy/close.svg").size(12))));
+        .when(c.active, el => el.child(div().id(`close-${c.id}`).text_color(t.dim).on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); closeTab(c.id, this.hasStart); }).child(svg("mods/tabs-copy/close.svg").size(12))));
     };
     const root = layout(), sidebar = find(root, "sidebar"), w = window();
     // Old saved rails and a dragged-narrow sidebar can be smaller than the window buttons.
