@@ -101,9 +101,13 @@ reports only the left, right and middle buttons. The view is read-only with a ca
 double-click selects a word, triple-click a line; arrows (Shift extends), Home/End, PageUp/PageDown,
 ⌘←/⌘→ (line indent/end), ⌘↑/⌘↓ (file start/end) move it; ⌘A selects all and ⌘C copies. Typing changes nothing there: the Edit button switches to the built-in editor with the same caret or selection (⌘-click definitions are off until View). The wheel scrolls. Other languages have no go-to-definition.
 
+⌘-click (Ctrl-click) on a file path in a terminal opens it in this tab, centred on the line of a `path:line` or `path:line:col` suffix. It gets local paths with an extension (or Makefile, Dockerfile, Justfile, Procfile) and asks `file --mime`: text (SVG included) opens here, binary content (pictures, PDF, Office files, archives, media) opens in its macOS app (`open`). Folders, missing files and other machines' files go to Herdr's usual opener. The project root for go-to-definition is the space's folder when the file is in it, else the terminal's folder.
+
 ## Files
 - main.js: the panel (tree), the file tab (same class, opened with props) and go-to-definition (the jedi
   script is the `GOTO` string, so it also runs on remote machines).
+- open.js: `openFile(req)`, the one-tab-per-space opening shared by the panel and link.js.
+- link.js: the terminal link handler (`handleLink`); mod.json's `link_handlers` rule picks the paths it gets.
 - highlight.js: per-line syntax highlighter for the Python view (copy of `lib/highlight.js`; edit it there and run `scripts/sync-lib`).
 - find.js: the find box's query as a RegExp and its hits (case, word, regex; capped at 1000). Copy of `lib/find.js`; edit it there and run `scripts/sync-lib`.
 - chevron-down.svg, chevron-right.svg, file.svg, folder.svg: tree icons; spinner.svg: while finding; close.svg: clears the filter; options.svg: the filter options button.
@@ -112,7 +116,7 @@ double-click selects a word, triple-click a line; arrows (Shift extends), Home/E
 - gpui-kit.d.ts, jsconfig.json: editor typings only.
 
 ## Settings and data
-- Shared state `files-copy.open` ({ space, root, on, path, ts }): written by the panel on a click (and by
+- Shared state `files-copy.open` ({ space, root, on, path, line?, col?, ts }; line and col 1-based): written by the panel on a click, by link.js (and by
   wb-diff's Open in Files button: a documented contract, keep the shape), read by that space's file tab.
 - `localStorage` `files-copy.hidden`: "1" when dot files are shown.
 - Exclude masks: globs on a file or folder name (`*`, `?`), e.g. `__pycache__, *.pyc`; matching files and folders

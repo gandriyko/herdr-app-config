@@ -6,6 +6,7 @@ import { v_flex, h_flex, TextView, ScrollHandle, Editor, EditorState, Input, Inp
 import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder, theme, settings, window, run, shared, setShared, props, openOverlay, closeOverlay, appHome } from "herdr";
 import { highlight, languageFor } from "./highlight.js";
 import { FIND_CAP, findAll, findRegex } from "./find.js";
+import { REQUEST, PLACE, openFile } from "./open.js";
 
 const PY = languageFor("x.py");
 // ponytail: CHAR_W assumes a monospace font at 0.6 em (JetBrains Mono, Menlo, SF Mono); another font puts the underline off.
@@ -38,8 +39,8 @@ const wordAt = (text, offset) => {
   while (end < text.length && /\w/.test(text[end])) end++;
   return { start, end };
 };
-const REQUEST = "files-copy.open"; // { space, root, on, path, ts }: written by the panel, read by the tab
-const PLACE = "files-copy.place"; // "tab" | "pane": the viewer's last tab ⇄ pane move, used for the next new viewer
+// A request's 1-based line:col (from a terminal link) as open()'s 0-based position, or null.
+const lineAt = req => (req?.line ? { line: req.line - 1, col: Math.max(0, (req.col ?? 1) - 1) } : null);
 const EXCLUDE = "files-copy.exclude"; // [glob]: names hidden in the tree and the filter
 // Dot names hidden unless "Show hidden files" is on; .gitignore is always shown.
 const dotHidden = name => name.startsWith(".") && name !== ".gitignore";
@@ -222,7 +223,7 @@ export default class Files extends View {
       this.replaceOpen = false; this.replaceInput = InputState.new({ placeholder: "Replace with" }); // shown while editing; Enter replaces the current hit
       this.replaceInput.on("submit", (_e, cx) => this.replaceOne(cx));
       this.applied = Math.max(p.ts ?? 0, shared(REQUEST)?.ts ?? 0);
-      this.open(p, cx);
+      this.open(p, cx, lineAt(p));
       // Another program (or a git checkout) changing the open file: noticed every 3 s while this tab is on screen.
       cx.timer.every(3000, acx => this.checkDisk(acx));
       return;
@@ -450,23 +451,7 @@ export default class Files extends View {
     this.file = path;
     const space = spaces().find(s => s.active);
     // from: the tab shown at the click, where "As pane" puts the viewer beside its terminal.
-    const req = { space: space?.id ?? null, root: this.root, on: this.on ?? null, path, ts: Date.now(), from: space?.tabs.find(t => t.active)?.id ?? null };
-    const ids = new Set((space?.tabs ?? []).map(t => t.id));
-    const existing = panes().find(p => p.mod === "files-copy" && ids.has(p.tab));
-    const name = path.split("/").pop();
-    setShared(REQUEST, req);
-    if (existing) {
-      run("tab.select", { id: existing.tab });
-      // A viewer pane beside terminals: their tab keeps its name.
-      if (!panes().some(p => p.tab === existing.tab && p.pane !== existing.pane)) run("tab.rename", { id: existing.tab, name });
-    }
-    else {
-      // The last tab ⇄ pane choice (PLACE): "pane" opens beside the shown tab's terminal, if it has one.
-      const terms = shared(PLACE) === "pane" ? panes().filter(p => p.tab === req.from && p.terminal) : [];
-      const target = terms.find(p => p.focused) ?? terms[0];
-      if (target) run("pane.split", { pane: target.pane, direction: "right", mod: "files-copy", props: req });
-      else run("tab.new", { name, mod: "files-copy", props: req, space: space?.id ?? undefined });
-    }
+    openFile({ space: space?.id ?? null, root: this.root, on: this.on ?? null, path, ts: Date.now(), from: space?.tabs.find(t => t.active)?.id ?? null });
     cx.notify();
   }
 
@@ -498,7 +483,7 @@ export default class Files extends View {
     const req = shared(REQUEST);
     if (!req?.path || req.ts <= this.applied || (req.space && req.space !== this.space)) return;
     this.applied = req.ts; this.back = []; this.fwd = [];
-    cx.timer.after(0, acx => this.open(req, acx));
+    cx.timer.after(0, acx => this.open(req, acx, lineAt(req)));
   }
 
   // req: { root, on, path } (path relative to root, or absolute: a definition outside the folder).
