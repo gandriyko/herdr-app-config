@@ -866,8 +866,11 @@ export default class Jira extends View {
         const name = tabName(st.key, st.summary);
         let launch = null;
         if (past) {
+          // A session that can't be resumed is an error in the dialog, never a silent new session.
           const argv = await resumeArgv(past, folder);
-          if (argv) { launch = { name, argv }; notify({ title: `Resumed ${st.key}`, body: past.title || past.session_id, level: "info" }); }
+          if (!argv) throw new Error(`Can't resume "${past.title || past.session_id}": its conversation file wasn't copied into this folder's project; pick New session`);
+          launch = { name, argv };
+          notify({ title: `Resumed ${st.key}`, body: past.title || past.session_id, level: "info" });
         }
         if (!launch) {
           const [argv, description] = await Promise.all([
