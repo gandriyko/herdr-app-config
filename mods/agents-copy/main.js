@@ -620,7 +620,8 @@ export default class Agents extends View {
       if (k) byPlace.set(k, [...(byPlace.get(k) ?? []), a]);
     }
     const mentions = (a, key) => textOf(a).includes(key);
-    const mentionsOther = (a, key) => keysIn(textOf(a)).some((k) => k !== key);
+    // Only keys of the saved projects count (AP-30085 in a title is not another task when the project is DA).
+    const mentionsOther = (a, key) => keysIn(textOf(a)).some((k) => k !== key && (!projects.length || projects.includes(k.split("-")[0])));
     // An agent with no PR chip that stops working may have just opened a PR: ask its repo now and once more
     // RECHECK later (askAgain in ./prs.js).
     const working = new Set(list.filter((a) => a.status === "working").map((a) => a.address));
