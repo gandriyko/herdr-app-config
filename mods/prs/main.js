@@ -1,6 +1,7 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, TextView, InputState, Input, TextareaState, Textarea } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, theme, notify, props, openOverlay, closeOverlay, shared, setShared, run, knownAgents, layout } from "herdr";
+import * as fs from "fs/promises";
+import { spaces, panes, focused, exec, readTextFile, theme, notify, props, openOverlay, closeOverlay, shared, setShared, run, knownAgents, layout, appHome } from "herdr";
 import { migrate, modelFor, settingsFor, projectKey, projectName, languageLine, runModel, describe } from "./ai.js";
 import { ci, isCopilot, copilot, reviewed, openPrs, STALE, FORCE, copilotBadge, copilotTip, approval, copilotOverview, repoOfUrl } from "./pr-badges.js";
 
@@ -182,8 +183,23 @@ export default class Prs extends View {
     });
   }
 
+  // The session button of a row and of the popup: the jira mod's Start session dialog (where: worktree or here; how: a
+  // new session or a past one resumed), as its own session button opens it. Documented contract: jira's props().start
+  // ({ key, summary, folder, on, pr: { number, url, headRefName } }). The task key comes from the title, else the
+  // branch; without one the PR number stands in. Without the jira mod, or for a fork PR (jira's dialog fetches from
+  // origin only), the one-click worktree (startWorktree).
+  async work(pr, cx) {
+    const jira = !pr.isCrossRepository && await fs.exists(`${appHome()}/mods/jira/main.js`).catch(() => false);
+    if (!jira) return this.startWorktree(pr, cx);
+    const key = (/\b[A-Z][A-Z0-9]+-\d+/.exec(pr.title ?? "") ?? /\b[A-Z][A-Z0-9]+-\d+/.exec(pr.headRefName ?? ""))?.[0] ?? `#${pr.number}`;
+    const summary = (pr.title ?? "").replace(new RegExp(`^\\[?${key.replace("#", "#?")}\\]?[\\s:—-]*`), "").trim();
+    const { cwd, on } = pr.repo ?? {};
+    openOverlay({ mod: "jira", kind: "dialog", width: 620, height: 640,
+      props: { start: { key, summary, folder: cwd, on: on ?? null, pr: { number: pr.number, url: pr.url, headRefName: pr.headRefName } } } });
+  }
+
   // The button of a row and of the popup: spinner while starting, else the session icon.
-  worktreeTip(pr) { return `Work on #${pr.number} in a worktree (${this.agents.get(pr.repo?.on ?? "")?.name ?? "claude"})`; }
+  worktreeTip(pr) { return `Start or resume a session on #${pr.number} (asks where)`; }
 
   init(_props, cx) {
     this.starting = new Set(); // PR urls whose worktree is being made
@@ -585,7 +601,7 @@ export default class Prs extends View {
           .text_size(12).font_medium().text_color(t.background).cursor_pointer().hover((s) => s.opacity(0.85))
           .on_click(() => exec("open", [pr.url])).child("Open"))
         .child(btn("copy", "Copy link", (_e, cx) => cx.write_to_clipboard(pr.url)))
-        .child(btn("worktree", this.starting.has(pr.url) ? "Starting…" : "Work in worktree", (_e, cx) => this.startWorktree(pr, cx)))
+        .child(btn("worktree", this.starting.has(pr.url) ? "Starting…" : "Start session…",(_e, cx) => this.work(pr, cx)))
         .child(div().id("close").size(26).flex().items_center().justify_center().rounded(6).text_color(t.dim).cursor_pointer()
           .hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click(() => closeOverlay(props()?.overlay)).child("✕")))
       .child(v_flex().id("pr-body").flex_1().min_h(0).overflow_y_scrollbar().px(16).py(14).gap(14)
@@ -700,10 +716,10 @@ export default class Prs extends View {
           .text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(`Copy ${taskKey}`)
           .on_click((_e, cx) => { cx.stop_propagation(); cx.write_to_clipboard(taskKey); })
           .child(svg("mods/prs/copy.svg").size(12))))
-        // One click: a worktree on the PR's branch with an agent started there (see startWorktree).
+        // The Start session dialog (see work); without the jira mod one click starts a worktree (startWorktree).
         .child(div().id(`wt-${pr.number}`).flex_none().size(18).flex().items_center().justify_center().rounded(4)
           .text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(this.worktreeTip(pr))
-          .on_click((_e, cx) => { cx.stop_propagation(); this.startWorktree(pr, cx); })
+          .on_click((_e, cx) => { cx.stop_propagation(); this.work(pr, cx); })
           .child(this.starting.has(pr.url) ? svg("mods/prs/spinner.svg").size(12).spin(900) : svg("mods/prs/session.svg").size(12)))
         // Draft: a purple "draft pull request" icon (theme's ansi5, a colour no other mark here uses).
         .when(pr.isDraft, (e) => e.child(div().id(`draft-${pr.number}`).flex_none().size(15).flex().items_center().justify_center().tooltip("Draft: not ready for review")
