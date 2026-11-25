@@ -157,10 +157,12 @@ const withTimeout = (cx, p, ms, fallback) => Promise.race([p, new Promise((resol
 // The agent's first message. One line: a newline could send it early.
 // ponytail: the setup steps are left to the agent and the repo's own docs (which env files, certificates, deps).
 const about = (description) => (description ? ` — Task description: ${description}` : "");
-const worktreeTask = ({ key, summary, description, path, branch, base, main, fresh }) =>
+// A fresh branch: prepare, then work. An existing branch (a PR's): prepare, then read and wait (readAndWait).
+const worktreeTask = ({ key, summary, description, path, branch, base, main, fresh, pr }) =>
   `${key}: ${summary}${about(description)} — You are in ${fresh ? "a new" : "an existing"} git worktree ${path} on branch ${branch}${fresh ? `, created from origin/${base}` : ""}; the main checkout is ${main}. ` +
   `First prepare this worktree as the repo's own docs say (CLAUDE.md, AGENTS.md, .claude/, README): copy the gitignored files it needs from the main checkout ` +
-  `(env files, certificates, local config) unless they are already there, install dependencies, and list what you copied; don't change the main checkout. Then work on ${key}.`;
+  `(env files, certificates, local config) unless they are already there, install dependencies, and list what you copied; don't change the main checkout. ` +
+  (fresh ? `Then work on ${key}.` : `Then: ${readAndWait({ key, pr })}`);
 
 const lastLine = (r) => (r.stderr || r.stdout).trim().split("\n").pop();
 
@@ -226,11 +228,12 @@ async function resumeArgv(past, folder) {
 }
 
 // A new session's first message on a branch that already has work (a PR's, or one naming the issue): read and wait.
+const readAndWait = ({ key, pr }) =>
+  (pr ? `Read the issue and pull request #${pr.number} (${pr.url}): description, diff, open review threads`
+    : `Read the issue and what the branch changed so far for ${key} (git log and diff against its base)`) +
+  `, give a short summary, then wait for my instructions: don't run tests, builds or change code until I ask.`;
 const existingTask = ({ key, summary, description, branch, pr }) =>
-  `${key}: ${summary}${about(description)} — This folder is on branch ${branch}` +
-  (pr ? ` of pull request #${pr.number} (${pr.url}). Read the issue and the PR (description, diff, open review threads)`
-    : `, where work on ${key} already is. Read the issue and what the branch changed so far (git log and diff against its base)`) +
-  `, give a short summary, then wait for my instructions.`;
+  `${key}: ${summary}${about(description)} — This folder is on branch ${branch}, which already has work. ${readAndWait({ key, pr })}`;
 
 // Whether an upper-cased text names the issue key as a whole (DA-2049 is not in DA-20493).
 const mentions = (text, key) => new RegExp(`(^|[^A-Z0-9])${key}(?!\\d)`).test(text);
