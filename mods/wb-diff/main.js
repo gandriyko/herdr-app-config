@@ -519,8 +519,9 @@ export default class DiffView extends View {
       .on_click((_e, cx) => { f[flag] = !f[flag]; try { localStorage.setItem("wb-diff.find", JSON.stringify({ case: f.case, word: f.word, regex: f.regex })); } catch {} f.cur = 0; this.runFind(cx, true); }).child(label);
     const options = h_flex().flex_none().rounded(6).border_1().border_color(t.border).overflow_hidden()
       .child(opt("diff-find-case", "Aa", "Match case", "case", true)).child(opt("diff-find-word", "W", "Whole word", "word")).child(opt("diff-find-re", ".*", "Regular expression", "regex"));
-    return h_flex().flex_none().gap(6).items_center()
-      .child(div().id("diff-find").h(24).w(210).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_text()
+    // The field gives up width first (210 → 90) when the toolbar is narrow.
+    return h_flex().flex_shrink(1).min_w(0).gap(6).items_center()
+      .child(div().id("diff-find").h(24).w(210).flex_shrink(1).min_w(90).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_text()
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_key_down((e, cx) => { if (e.keystroke === "escape") { this.closeFind(cx); cx.stop_propagation(); } })
         .child(Input.new(this.findInput).flex_1().h_full().text_size(12).text_color(t.foreground)))
@@ -861,7 +862,7 @@ export default class DiffView extends View {
       })
       // Takes the keyboard on any press, so Alt+↑/↓ reach it.
       .on_mouse_down("left", () => this.handle.focus())
-      .child(h_flex().h(42).flex_none().px(14).gap(10).items_center().border_b(1).border_color(t.border)
+      .child(h_flex().h(42).flex_none().px(12).gap(6).items_center().border_b(1).border_color(t.border)
         .child(svg("mods/wb-diff/icons/diff.svg").size(14).text_color(t.muted))
         .child(div().flex_none().max_w(260).truncate().font_semibold().child((top?.path ?? r?.path)?.split("/").pop() ?? "Diff"))
         .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(nf > 1 && ci >= 0 ? `file ${ci + 1} of ${nf}` : (top?.path ?? r?.path ?? "").includes("/") ? (top?.path ?? r.path).replace(/\/[^/]*$/, "") : ""))
