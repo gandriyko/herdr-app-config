@@ -4,6 +4,7 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { AskingTracker } from "./asking.js";
 import { lastMessage } from "./last.js";
+import { dropKey, headline } from "./headline.js";
 import { PR_FILTERS, duration, glyph, icon, prColor } from "./card.js";
 import { CHECKS_WORD, RECHECK, askAgain, branchKey, jiraProjects, keysIn, namedKey, newPrState, prMap, prOf, refreshPrs } from "./prs.js";
 import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, hc, openOverlay, closeOverlay, props, window, layout, exec, notify, playSound, settings } from "herdr";
@@ -484,17 +485,23 @@ export default class Agents extends View {
         .items_start()
         .child(v_flex().flex_none().w(sz.col).gap(sz.colGap).items_center()
           .when(Boolean(o.pic), (el) => el.child(o.pic))
-          .child(div().flex_none().w(16).h(16).flex().items_center().justify_center().when(Boolean(o.glyph), (el) => el.child(o.glyph))))
+          // The glyph slot only with a glyph: a card with nothing more to show stays one line high.
+          .when(Boolean(o.glyph), (el) => el.child(div().flex_none().w(16).h(16).flex().items_center().justify_center().child(o.glyph))))
         .child(v_flex().flex_1().min_w(0).gap(sz.gap)
           .child(h_flex()
             .gap(7)
-            .items_center()
+            // Time, pin and eye stay at the top when the headline wraps to two lines.
+            .items_start()
             .when(Boolean(o.small), (el) => el.text_size(sz.title))
             .child(h_flex().flex_1().min_w(0).gap(5).items_center().children(o.title.filter(Boolean)))
-            .children(o.right.filter(Boolean)))
-          .child(h_flex().gap(4).items_start()
+            .children(o.right.filter(Boolean))
+            // No line 2: the eye sits at the end of line 1 instead of on an empty row.
+            .when(!o.report && Boolean(o.eye), (el) => el.child(o.eye)))
+          // The git branch, main included: always its own dim line under line 1.
+          .when(Boolean(o.branch), (el) => el.child(div().min_w(0).truncate().text_size(11).line_height("13px").text_color(t.dim).child(o.branch)))
+          .when(Boolean(o.report), (el) => el.child(h_flex().gap(4).items_start()
             .child(div().flex_1().min_w(0).max_h(sz.lh * 2).overflow_hidden().text_size(sz.report).line_height(`${sz.lh}px`).text_color(o.reportOn ? (blocked ? t.blocked : t.muted) : t.dim).child(o.report))
-            .when(Boolean(o.eye), (el) => el.child(o.eye)))
+            .when(Boolean(o.eye), (el) => el.child(o.eye))))
           .when(Boolean(o.box), (el) => el.child(o.box))
           .when(Boolean(o.bottom), (el) => el.child(o.bottom))));
   }
@@ -845,7 +852,10 @@ export default class Agents extends View {
           this.endSearch(cx);
           run("pane.focus", { pane: a.pane });
         });
-      const timeOrPin = this.hovered === a.address ? pin : Boolean(when) ? div().flex_none().flex().justify_end().whitespace_nowrap().overflow_hidden().text_size(11).text_color(a.status === "blocked" ? t.blocked : t.dim).child(duration(now - when)) : null;
+      // Time and pin share one fixed slot (fits "59m"), so hovering doesn't change the headline's width.
+      const timeOrPin = div().flex_none().w(26).h(17).flex().items_center().justify_end().whitespace_nowrap().overflow_hidden()
+        .text_size(11).text_color(a.status === "blocked" ? t.blocked : t.dim)
+        .child(this.hovered === a.address ? pin : when ? duration(now - when) : "");
       const picFold = (p) => div().id(`agent-fold-${a.address}`)
         .when(subs.length > 0, (el) => el.on_click((_e, cx) => {
           cx.stop_propagation();
@@ -857,16 +867,20 @@ export default class Agents extends View {
       const term = termBy.get(a.address);
       const tabInfo = tabs.get(a.tab);
       const prog = a.program?.name ?? "";
-      // Line 2: the report, else the agent's title, else the tab name; never the bare program name.
-      let report = reportText(term?.report) || reportText(a.title) || (tabInfo?.named ? (tabInfo.name ?? "").trim() : "");
-      if (report.toLowerCase() === prog.trim().toLowerCase()) report = "";
-      // Line 1 names the tab only when a person named it and it says something new.
-      const tabName = tabInfo?.named ? (tabInfo.name ?? "").trim() : "";
-      let lead = full && a.space_name ? a.space_name : null;
-      let tabTxt = tabName && tabName.toLowerCase() !== report.trim().toLowerCase() && tabName.toLowerCase() !== prog.trim().toLowerCase() ? tabName : null;
-      if (!lead) { lead = tabTxt ?? (prog || label(a)); if (tabTxt) tabTxt = null; }
       const pr = prFor(a);
       const jiraKey = jiraSite ? jiraFor(a) : null;
+      // Line 1 and line 2 by the rule shared with agents-board (headline.js).
+      const { head, report } = headline({
+        tab: tabInfo?.named ? tabInfo.name ?? "" : "",
+        text: reportText(term?.report) || reportText(a.title),
+        prog, progKey: a.program?.key, jiraKey,
+      });
+      const lead = head || prog || label(a);
+      const b = placeOf.get(a.address)?.branch;
+      const branch = b && b !== "HEAD" ? b : null;
+      // Without a space header above (priority, pinned) the space goes on the bottom row;
+      // a branch line already says where it is.
+      const space = full && a.space_name && !branch ? dropKey(a.space_name, jiraKey) || a.space_name : null;
       const g = glyph(t, a.status, "mods/agents-copy/");
       const canPeek = !a.address.includes("/"); // the screen of another machine's agent isn't read
       const eye = this.eyeBtn(t, a.address);
@@ -877,23 +891,26 @@ export default class Agents extends View {
         focused: a.focused,
         pic: pic && picFold(pic),
         glyph: g,
+        // With no line 2 the headline wraps up to two lines instead.
         title: [
-          div().min_w(0).when(Boolean(tabTxt), (el) => el.max_w(120)).truncate().text_color(t.foreground).font_semibold().child(lead),
-          tabTxt && div().min_w(0).truncate().text_color(t.dim).child(`/ ${tabTxt}`),
+          div().min_w(0).when(Boolean(report), (el) => el.truncate()).when(!report, (el) => el.max_h(36).line_height("18px").overflow_hidden())
+            .text_color(t.foreground).font_semibold().child(lead),
         ],
         right: [
           machine && div().text_size(10).text_color(t.dim).child(machine),
           subs.length > 0 && fold(a, subs),
           timeOrPin,
         ],
-        report: report || prog || label(a),
-        reportOn: Boolean(report),
+        branch,
+        report,
+        reportOn: true,
         eye: canPeek && eye,
         box: msgBox,
         // PR and Jira chips on their own row at the bottom, so the name and the report keep the width.
-        bottom: (pr || jiraKey) && h_flex().gap(5).items_center()
+        bottom: (pr || jiraKey || space) && h_flex().gap(5).items_center()
           .when(Boolean(jiraKey), (el) => el.child(jiraChip(a, jiraKey)))
-          .when(Boolean(pr), (el) => el.child(prChip(a, pr))),
+          .when(Boolean(pr), (el) => el.child(prChip(a, pr)))
+          .when(Boolean(space), (el) => el.child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child(space))),
       }).mb(5));
     };
 

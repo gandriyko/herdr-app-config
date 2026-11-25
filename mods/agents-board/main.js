@@ -4,6 +4,7 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, ScrollHandle, TextView } from "gpui-base";
 import { agents, terminals, panes, spaces, run, theme, settings, shared, setShared, closeOverlay, props, exec, hc } from "herdr";
 import { AskingTracker } from "./asking.js";
+import { dropKey, headline } from "./headline.js";
 import { isSelectMenu, parseOptions, parseQuestion, parseSuggestion, sameOptions } from "./reply.js";
 import { PR_FILTERS, duration, glyph, icon, prColor } from "./card.js";
 import { CHECKS_WORD, RECHECK, askAgain, branchKey, jiraProjects, namedKey, newPrState, prMap, prOf, refreshPrs } from "./prs.js";
@@ -631,23 +632,26 @@ export default class Board extends View {
       const sp = spaceBy.get(a.space);
       const at = a.paneless ? null : a.status === "working" ? tb?.working_since : tb?.changed_at;
       const prog = a.program?.name ?? "agent";
-      // Line 2: the report, else the agent's title, else the tab name; never the bare program name.
-      let report = clean(term?.report) || clean(a.title) || (a.paneless ? "" : tb?.named ? (tb.name ?? "").trim() : "");
-      if (report.toLowerCase() === prog.trim().toLowerCase()) report = "";
-      // The tab shows on line 1 only when a person named it and it says something new.
-      const tabName = tb?.named && !a.paneless ? (tb.name ?? "").trim() : "";
-      const tabShown = tabName && tabName.toLowerCase() !== report.toLowerCase() && tabName.toLowerCase() !== prog.trim().toLowerCase() ? tabName : null;
+      const jira = jiraFor(a);
+      // The headline and the report by the rule shared with the agents mod (headline.js).
+      // Line 1: space / headline when there is a report too; line 2: the report, else the headline.
+      const { head, report } = headline({
+        tab: tb?.named && !a.paneless ? tb.name ?? "" : "",
+        text: clean(term?.report) || clean(a.title),
+        prog, progKey: a.program?.key, jiraKey: jira,
+      });
       const par = term?.parent ? termBy.get(term.parent) : null;
       const parentAgent = term?.parent ? agentBy.get(term.parent) : null;
       return {
         a,
         at: at ?? null,
-        report,
-        tabShown,
+        report: report || head,
+        tabShown: report ? head : "",
         program: prog,
         sub: term?.parent ? (parentAgent?.tab_name ?? par?.name ?? "") : null,
         pr: prFor(a),
-        jira: jiraFor(a),
+        jira,
+        branch: [placeOf.get(a.address)?.branch].find((b) => b && b !== "HEAD") ?? null,
       };
     };
     const all = list.map(info);
@@ -692,7 +696,7 @@ export default class Board extends View {
     const matches = (r) => {
       if (flSpace && r.a.space !== flSpace) return false;
       if (fl.pr !== "any" && !(fl.pr === "with" ? r.pr : fl.pr === "failing" ? r.pr?.c === "fail" : !r.pr)) return false;
-      if (this.q && ![r.program, r.a.space_name, r.a.tab_name, r.report].join("\n").toLowerCase().includes(this.q)) return false;
+      if (this.q && ![r.program, r.a.space_name, r.a.tab_name, r.tabShown, r.report].join("\n").toLowerCase().includes(this.q)) return false;
       return true;
     };
     const shown = all.filter(matches);
@@ -1023,7 +1027,8 @@ export default class Board extends View {
             .child(
               v_flex().flex_none().w(16).gap(6).items_center()
                 .when(Boolean(pic), (el) => el.child(pic))
-                .child(div().flex_none().w(16).h(16).flex().items_center().justify_center().when(Boolean(g), (el) => el.child(g))),
+                // The glyph slot only with a glyph, so a card with nothing more to show stays low.
+                .when(Boolean(g), (el) => el.child(div().flex_none().w(16).h(16).flex().items_center().justify_center().child(g))),
             )
             .child(
               v_flex().flex_1().min_w(0).gap(4)
@@ -1031,13 +1036,15 @@ export default class Board extends View {
                   h_flex()
                     .gap(7)
                     .items_center()
-                    .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(a.paneless ? a.name : a.space_name || r.tabShown || r.program))
+                    .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(a.paneless ? a.name : (dropKey(a.space_name ?? "", r.jira) || a.space_name) || r.tabShown || r.program))
                     .when(Boolean(a.space_name && r.tabShown), (el) => el.child(div().min_w(0).truncate().text_size(12).text_color(t.dim).child(`/ ${r.tabShown}`)))
                     .when(Boolean(r.jira), (el) => el.child(jiraPill(r)))
                     .when(Boolean(r.pr), (el) => el.child(prPill(r)))
                     .child(div().flex_1())
                     .child(div().flex_none().flex().justify_end().whitespace_nowrap().overflow_hidden().text_size(11).text_color(blocked ? t.blocked : t.dim).child(timeText(r))),
                 )
+                // The git branch, main included: always its own dim line under line 1.
+                .when(Boolean(r.branch), (el) => el.child(div().min_w(0).truncate().text_size(11).line_height("13px").text_color(t.dim).child(r.branch)))
                 .when(Boolean(sub), (el) => el.child(div().truncate().text_size(11).text_color(t.dim).child(`↳ sub-agent of ${sub}`)))
                 .child(
                   h_flex()
