@@ -652,6 +652,8 @@ export default class Board extends View {
         pr: prFor(a),
         jira,
         branch: [placeOf.get(a.address)?.branch].find((b) => b && b !== "HEAD") ?? null,
+        // The repo's name (its main checkout's folder), so a worktree's space reads as its repo.
+        repo: this.pr.common.get(placeOf.get(a.address)?.cwd)?.replace(/\/\.git\/?$/, "").split("/").pop() || null,
       };
     };
     const all = list.map(info);
@@ -696,7 +698,7 @@ export default class Board extends View {
     const matches = (r) => {
       if (flSpace && r.a.space !== flSpace) return false;
       if (fl.pr !== "any" && !(fl.pr === "with" ? r.pr : fl.pr === "failing" ? r.pr?.c === "fail" : !r.pr)) return false;
-      if (this.q && ![r.program, r.a.space_name, r.a.tab_name, r.tabShown, r.report].join("\n").toLowerCase().includes(this.q)) return false;
+      if (this.q && ![r.program, r.a.space_name, r.a.tab_name, r.repo, r.tabShown, r.report].join("\n").toLowerCase().includes(this.q)) return false;
       return true;
     };
     const shown = all.filter(matches);
@@ -1036,15 +1038,13 @@ export default class Board extends View {
                   h_flex()
                     .gap(7)
                     .items_center()
-                    .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(a.paneless ? a.name : (dropKey(a.space_name ?? "", r.jira) || a.space_name) || r.tabShown || r.program))
+                    .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(t.foreground).child(a.paneless ? a.name : r.repo || (dropKey(a.space_name ?? "", r.jira) || a.space_name) || r.tabShown || r.program))
                     .when(Boolean(a.space_name && r.tabShown), (el) => el.child(div().min_w(0).truncate().text_size(12).text_color(t.dim).child(`/ ${r.tabShown}`)))
                     .when(Boolean(r.jira), (el) => el.child(jiraPill(r)))
                     .when(Boolean(r.pr), (el) => el.child(prPill(r)))
                     .child(div().flex_1())
                     .child(div().flex_none().flex().justify_end().whitespace_nowrap().overflow_hidden().text_size(11).text_color(blocked ? t.blocked : t.dim).child(timeText(r))),
                 )
-                // The git branch, main included: always its own dim line under line 1.
-                .when(Boolean(r.branch), (el) => el.child(div().min_w(0).truncate().text_size(11).line_height("13px").text_color(t.dim).child(r.branch)))
                 .when(Boolean(sub), (el) => el.child(div().truncate().text_size(11).text_color(t.dim).child(`↳ sub-agent of ${sub}`)))
                 .child(
                   h_flex()
@@ -1086,6 +1086,8 @@ export default class Board extends View {
                           .child(svg(ICONS + "reply.svg").size(16)),
                     ),
                 )
+                // The git branch, main included: always its own dim line under the report.
+                .when(Boolean(r.branch), (el) => el.child(div().min_w(0).truncate().text_size(11).line_height("13px").text_color(t.dim).child(r.branch)))
                 .when(this.reply?.address === a.address, (el) => el.child(replyArea(this.reply))),
             ),
         );
