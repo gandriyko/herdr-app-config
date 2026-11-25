@@ -1,7 +1,7 @@
 // Agents in grouped or priority views; parents take their most urgent sub-agent's place.
 
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, HoverCard } from "gpui-base";
 import { AskingTracker } from "./asking.js";
 import { lastMessage } from "./last.js";
 import { dropKey, headline } from "./headline.js";
@@ -464,7 +464,8 @@ export default class Agents extends View {
   // An agent card from its parts; `small` is the sub-agent size. Both cards share this layout:
   // icon with the status glyph under it, line 1 (title … right), line 2 (report, eye), message box, bottom row.
   card(t, o) {
-    const sz = o.small ? { pad: [5, 7], gap: 3, col: 14, colGap: 4, title: 12, report: 11.5, lh: 15 } : { pad: [8, 9], gap: 4, col: 16, colGap: 6, report: 12, lh: 17 };
+    // row: line 1's height; the icon sits centred in a slot of the same height, level with the text.
+    const sz = o.small ? { pad: [5, 7], gap: 3, col: 14, colGap: 4, title: 12, report: 11.5, lh: 15, row: 16 } : { pad: [8, 9], gap: 4, col: 16, colGap: 6, report: 12, lh: 17, row: 18 };
     const { blocked, focused } = o;
     return v_flex()
       .id(o.id)
@@ -484,21 +485,20 @@ export default class Agents extends View {
         .gap(o.small ? 6 : 7)
         .items_start()
         .child(v_flex().flex_none().w(sz.col).gap(sz.colGap).items_center()
-          .when(Boolean(o.pic), (el) => el.child(o.pic))
+          .when(Boolean(o.pic), (el) => el.child(div().h(sz.row).flex().items_center().child(o.pic)))
           // The glyph slot only with a glyph: a card with nothing more to show stays one line high.
           .when(Boolean(o.glyph), (el) => el.child(div().flex_none().w(16).h(16).flex().items_center().justify_center().child(o.glyph))))
         .child(v_flex().flex_1().min_w(0).gap(sz.gap)
           .child(h_flex()
             .gap(7)
+            .line_height(`${sz.row}px`)
             // Time, pin and eye stay at the top when the headline wraps to two lines.
             .items_start()
             .when(Boolean(o.small), (el) => el.text_size(sz.title))
-            .child(h_flex().flex_1().min_w(0).gap(5).items_center().children(o.title.filter(Boolean)))
+            .child(h_flex().flex_1().min_w(0).overflow_hidden().gap(5).items_center().children(o.title.filter(Boolean)))
             .children(o.right.filter(Boolean))
             // No line 2: the eye sits at the end of line 1 instead of on an empty row.
             .when(!o.report && Boolean(o.eye), (el) => el.child(o.eye)))
-          // The git branch, main included: always its own dim line under line 1.
-          .when(Boolean(o.branch), (el) => el.child(div().min_w(0).truncate().text_size(11).line_height("13px").text_color(t.dim).child(o.branch)))
           .when(Boolean(o.report), (el) => el.child(h_flex().gap(4).items_start()
             .child(div().flex_1().min_w(0).max_h(sz.lh * 2).overflow_hidden().text_size(sz.report).line_height(`${sz.lh}px`).text_color(o.reportOn ? (blocked ? t.blocked : t.muted) : t.dim).child(o.report))
             .when(Boolean(o.eye), (el) => el.child(o.eye))))
@@ -763,10 +763,8 @@ export default class Agents extends View {
     }
 
     const PR_COLOR = prColor(t);
-    // A small pill in line 1 (PR, Jira): tinted by color, a click runs act without reaching the card.
-    const chip = (id, color, tip, act) => h_flex()
-      .id(id)
-      .flex_none()
+    // A small pill on the chip row, tinted by color.
+    const pill = (color) => h_flex()
       .h(16)
       .px(5)
       .gap(3)
@@ -775,7 +773,11 @@ export default class Agents extends View {
       .bg(color + "26")
       .text_size(10.5)
       .font_medium()
-      .text_color(color)
+      .text_color(color);
+    // A pill (PR, Jira) whose click runs act without reaching the card.
+    const chip = (id, color, tip, act) => pill(color)
+      .id(id)
+      .flex_none()
       .cursor_pointer()
       .hover((el) => el.bg(color + "40"))
       .tooltip(tip)
@@ -853,7 +855,7 @@ export default class Agents extends View {
           run("pane.focus", { pane: a.pane });
         });
       // Time and pin share one fixed slot (fits "59m"), so hovering doesn't change the headline's width.
-      const timeOrPin = div().flex_none().w(26).h(17).flex().items_center().justify_end().whitespace_nowrap().overflow_hidden()
+      const timeOrPin = div().flex_none().w(26).h(18).flex().items_center().justify_end().whitespace_nowrap().overflow_hidden()
         .text_size(11).text_color(a.status === "blocked" ? t.blocked : t.dim)
         .child(this.hovered === a.address ? pin : when ? duration(now - when) : "");
       const picFold = (p) => div().id(`agent-fold-${a.address}`)
@@ -876,12 +878,12 @@ export default class Agents extends View {
         prog, progKey: a.program?.key, jiraKey,
       });
       const lead = head || prog || label(a);
+      // Without a space header above (priority, pinned) the space goes on the bottom row.
+      const space = full && a.space_name ? dropKey(a.space_name, jiraKey) || a.space_name : null;
+      // With no Jira or PR chip, the git branch (not a detached HEAD) as a grey pill, not clickable.
       const b = placeOf.get(a.address)?.branch;
-      const branch = b && b !== "HEAD" ? b : null;
-      // Without a space header above (priority, pinned) the space goes on the bottom row;
-      // a branch line already says where it is.
-      const space = full && a.space_name && !branch ? dropKey(a.space_name, jiraKey) || a.space_name : null;
-      const g = glyph(t, a.status, "mods/agents-copy/");
+      const branch = !pr && !jiraKey && b && b !== "HEAD" ? b : null;
+      const g =glyph(t, a.status, "mods/agents-copy/");
       const canPeek = !a.address.includes("/"); // the screen of another machine's agent isn't read
       const eye = this.eyeBtn(t, a.address);
       const msgBox = this.msgBox(t, a.address);
@@ -891,25 +893,32 @@ export default class Agents extends View {
         focused: a.focused,
         pic: pic && picFold(pic),
         glyph: g,
-        // With no line 2 the headline wraps up to two lines instead.
+        // Compact: the headline is one line, cut off. Resting on it (1.2 s, so a passing pointer
+        // shows nothing) opens a card with the headline whole and the report.
         title: [
-          div().min_w(0).when(Boolean(report), (el) => el.truncate()).when(!report, (el) => el.max_h(36).line_height("18px").overflow_hidden())
-            .text_color(t.foreground).font_semibold().child(lead),
+          // flex_1 + min_w(0) gives the hover card the row's width, so the trigger cuts off with "…".
+          HoverCard.new(`ag-title-${a.address}`).flex_1().min_w(0).overflow_hidden().open_delay(1200).close_delay(100)
+            .trigger(div().w_full().min_w(0).truncate().text_color(t.foreground).font_semibold().child(lead))
+            // HoverCard draws no surface of its own: the fill, border and shadow are ours.
+            .content(v_flex().max_w(320).gap(4).p(8).rounded(6).border(1).border_color(t.border).bg(t.popover).shadow_md()
+              .text_size(12).line_height("16px")
+              .child(div().text_color(t.foreground).font_semibold().child(lead))
+              .when(Boolean(report), (el) => el.child(div().text_color(t.muted).child(report)))),
         ],
         right: [
           machine && div().text_size(10).text_color(t.dim).child(machine),
           subs.length > 0 && fold(a, subs),
           timeOrPin,
+          canPeek && eye,
         ],
-        branch,
-        report,
-        reportOn: true,
-        eye: canPeek && eye,
         box: msgBox,
         // PR and Jira chips on their own row at the bottom, so the name and the report keep the width.
-        bottom: (pr || jiraKey || space) && h_flex().gap(5).items_center()
+        // The chip row is always there (empty too), so every card is two lines high and the
+        // status glyph under the icon has its row.
+        bottom: h_flex().h(16).gap(5).items_center()
           .when(Boolean(jiraKey), (el) => el.child(jiraChip(a, jiraKey)))
           .when(Boolean(pr), (el) => el.child(prChip(a, pr)))
+          .when(Boolean(branch), (el) => el.child(pill(t.dim).min_w(0).child(div().min_w(0).truncate().child(branch))))
           .when(Boolean(space), (el) => el.child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child(space))),
       }).mb(5));
     };
