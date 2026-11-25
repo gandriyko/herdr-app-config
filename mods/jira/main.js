@@ -1168,13 +1168,12 @@ export default class Jira extends View {
         .child(div().font_semibold().text_size(13).child("Jira"))
         .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(`${this.count} open`))
         .child(div().flex_1())
-        .when(!this.setup, (e) => e.child(h_flex().id("auto").h(24).px(5).gap(4).items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
-          .tooltip(this.auto ? "Auto-sync every 5 minutes: on" : "Auto-sync: off (default) · refresh by hand").on_click((_e, cx) => this.toggleAuto(cx))
-          .child(div().size(13).flex().items_center().justify_center().rounded(3).border_1().text_size(10).font_semibold()
-            .border_color(this.auto ? t.accent : t.border).bg(this.auto ? t.accent : t.background).text_color(t.accent_foreground).child(this.auto ? "✓" : ""))
-          .child(div().text_size(10).text_color(t.muted).child("Auto"))))
         .when(!this.setup, (e) => e.child(iconButton("settings", "mods/jira/settings.svg", "Settings", (_e, cx) => this.openSettings(cx))))
-        .child(iconButton("refresh", "mods/jira/refresh.svg", "Refresh", (_e, cx) => this.refresh(cx, true), this.loading)))
+        // Right-click switches auto-sync; the icon is in the accent colour while it is on.
+        .child(iconButton("refresh", "mods/jira/refresh.svg", this.setup ? "Refresh" : `Refresh\nRight-click: auto-sync every 5 minutes (${this.auto ? "on" : "off"})`,
+          (_e, cx) => this.refresh(cx, true), this.loading)
+          .when(!this.setup && this.auto, (s) => s.text_color(t.accent))
+          .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); if (!this.setup) this.toggleAuto(cx); })))
       .when(!form, (e) => e.child(h_flex().flex_none().px(8).pt(8).gap(6).items_center()
         .child(div().id("search").flex_1().min_w(0).h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.search).h_full().text_size(12).text_color(t.foreground)))

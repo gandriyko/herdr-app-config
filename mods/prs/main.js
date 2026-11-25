@@ -221,7 +221,7 @@ export default class Prs extends View {
     this.focusRepo = null;
     this.seen = null; // PR url -> copilot state at the last poll; null until the first one (no toast for what already was)
     // Auto-sync (the 2-minute poll while the panel is shown) can be switched off; remembered. Refresh still works by hand.
-    this.auto = (() => { try { return (localStorage.getItem("prs.auto") ?? localStorage.getItem("auto")) === "1"; } catch { return false; } })();
+    this.auto = (() => { try { return localStorage.getItem("prs.auto") === "1"; } catch { return false; } })();
     this.all = (() => { try { return localStorage.getItem("prs.all") === "1"; } catch { return false; } })();
     this.poll(cx);
     // One 2 s tick for two checks. The folder follows focus: a repo already polled is shown from memory.
@@ -754,7 +754,11 @@ export default class Prs extends View {
     const shown = !q ? this.prs : this.prs.filter((pr) => [pr.title, pr.body, pr.headRefName, pr.author?.login, `#${pr.number}`].some((s) => (s ?? "").toLowerCase().includes(q)));
     const empty = this.error || (this.loading && !this.prs.length ? "Loading…" : !this.prs.length ? "No open pull requests" : !shown.length ? "No matches" : null);
     const refresh = div().id("refresh").size(24).flex().items_center().justify_center().rounded(6).cursor_pointer()
-      .text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip("Refresh").on_click((_e, cx) => this.poll(cx, true))
+      // Right-click switches auto-sync; the icon is in the accent colour while it is on.
+      .text_color(this.auto ? t.accent : t.muted).hover((s) => s.bg(t.hover))
+      .tooltip(`Refresh\nRight-click: auto-sync every 2 minutes while shown (${this.auto ? "on" : "off"})`)
+      .on_click((_e, cx) => this.poll(cx, true))
+      .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.toggleAuto(cx); })
       .child(svg("mods/prs/refresh.svg").size(14).when(this.loading, (s) => s.spin(900)));
     return v_flex().id("prs").size_full().min_h(0).relative().rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(12)
       .child(h_flex().h(42).flex_none().px(14).gap(6).items_center().border_b(1).border_color(t.border)
@@ -766,13 +770,8 @@ export default class Prs extends View {
             div().id(`show-${id}`).h_full().px(6).flex().items_center().rounded(4).text_size(10).cursor_pointer().tooltip(tip)
               .bg(this.all === all ? t.hover : t.background).text_color(this.all === all ? t.foreground : t.muted)
               .on_click((_e, cx) => this.setAll(all, cx)).child(label))))
-        .child(h_flex().id("auto").h(24).px(5).gap(4).items_center().rounded(6).cursor_pointer().hover((s) => s.bg(t.hover))
-          .tooltip(this.auto ? "Auto-sync every 2 minutes while the panel is shown: on" : "Auto-sync: off (default) · refresh by hand").on_click((_e, cx) => this.toggleAuto(cx))
-          .child(div().size(13).flex().items_center().justify_center().rounded(3).border_1().text_size(10).font_semibold()
-            .border_color(this.auto ? t.accent : t.border).bg(this.auto ? t.accent : t.background).text_color(t.accent_foreground).child(this.auto ? "✓" : ""))
-          .child(div().text_size(10).text_color(t.muted).child("Auto")))
-        .child(div().id("new-pr").size(24).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer().bg(t.solid).text_color(t.solid_foreground)
-          .hover((s) => s.opacity(0.85)).tooltip("New pull request from this folder's branch")
+        .child(div().id("new-pr").size(24).flex_none().flex().items_center().justify_center().rounded(6).cursor_pointer()
+          .text_color(t.muted).hover((s) => s.bg(t.hover)).tooltip("New pull request from this folder's branch")
           .on_click((_e, cx) => { cx.stop_propagation(); const l = this.loc(); if (l.cwd) openOverlay({ mod: "prs", kind: "dialog", width: 660, height: 720, props: { create: l } }); })
           .child(svg("mods/prs/plus.svg").size(14)))
         .child(refresh))
