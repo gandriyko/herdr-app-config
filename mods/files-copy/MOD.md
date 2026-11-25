@@ -89,6 +89,11 @@ highlight.js's line-by-line Markdown colours (headings, `code`, **bold**, links,
 rules, so one unbalanced quote in a value (`PASS=it's`) colours only its own line, not the rest of the file
 as a multi-line grammar would; their Edit opens the editor as plain text for the same reason.
 
+Colours come from the current theme (`ansi1`–`ansi6`, `dim`, `foreground`), in the own view and in the editor. The editor
+gets every syntax key (operators, booleans, escapes, variables, punctuation too), since a key left out falls back to its
+built-in dark palette. After a theme change the own view redraws in the new colours; an open editor keeps its colours
+until the file is opened again.
+
 Every text file is drawn by the mod itself (languages the highlighter lacks in plain colours). In the view of a `.py` file (fixed row height and
 character width, own scrolling), so it knows which name is under the pointer: with ⌘ held that name is
 underlined and the pointer is a hand. ⌘-click opens its definition: in the same file, or the tab switches

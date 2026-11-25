@@ -110,14 +110,18 @@ function mdBlocks(text) {
 const mdVisible = (md) => md.replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/<[^>]+>/g, "")
   .replace(/^\s{0,3}(?:#{1,6}|>+|[-*+]|\d+[.)])\s+/gm, "").replace(/[`*~]/g, "").replace(/(^|\W)_+|_+(?=\W|$)/g, "$1");
 
-// The editor colours a few tokens its own way (read off screenshots of both views): operators and the words and/or/not/new in
-// #56b6c2, true/false in #e5c07b, null/None in the theme's ansi6, this/self plain, a Capitalised name or a member after "." plain
+// The editor's colours, all from the theme. Keys it isn't given fall back to its built-in dark palette, whatever the theme,
+// so every key is set.
+const editorSyntax = (t) => ({ keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1,
+  constant: t.ansi6, operator: t.ansi6, boolean: t.ansi3, "string.escape": t.ansi6, variable: t.foreground, punctuation: t.foreground });
+// The own view matches the editor (read off screenshots of both views): operators and the words and/or/not/new in its
+// operator colour, true/false in its boolean colour, null/None in ansi6, this/self plain, a Capitalised name or a member after "." plain
 // unless it is a built-in type or follows `class`. highlight.js can't tell those apart, so its pieces are adjusted here.
-const OP_COLOR = "#56b6c2", BOOL_COLOR = "#e5c07b";
 const BUILTIN_TYPES = new Set(["int", "str", "float", "bool", "list", "dict", "set", "tuple", "bytes", "object", "string", "number", "boolean", "void", "any"]);
 const CODE_EXT = /\.(js|jsx|mjs|cjs|ts|tsx|py|go|rs|java|c|h|cpp|hpp|cs|php|rb|kt|swift|sh|zsh|bash)$/i;
 function editorColors(pieces, t, path) {
   const code = CODE_EXT.test(path), py = /\.py$/i.test(path), typed = /\.(py|ts|tsx)$/i.test(path), out = [];
+  const { operator: OP_COLOR, boolean: BOOL_COLOR } = editorSyntax(t);
   let before = "";
   const add = (text, color) => { if (text) out.push({ text, color }); };
   for (const sp of pieces) {
@@ -609,7 +613,7 @@ export default class Files extends View {
     const language = name.startsWith(".env") ? "text" : LANG[ext] ?? ext;
     this.code = EditorState.new({ language, readonly: !this.editable, value: this.text,
       font_family: settings().font_family, font_size: FONT,
-      syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
+      syntax: editorSyntax(t) });
     this.code.on("change", (_e, cx) => {
       const dirty = this.code.value() !== this.text;
       if (dirty !== this.dirty) { this.dirty = dirty; if (dirty) this.status = null; cx.notify(); }
@@ -1249,6 +1253,10 @@ export default class Files extends View {
   render(cx) {
     setFont();
     const t = theme();
+    // Another theme: the cached coloured lines are redone in its colours. The open editor keeps its colours
+    // until the file is opened again (its syntax is fixed when it is made).
+    const themeKey = [t.foreground, t.dim, t.ansi1, t.ansi2, t.ansi3, t.ansi4, t.ansi5, t.ansi6].join();
+    if (themeKey !== this.themeKey) { this.themeKey = themeKey; this.spans = []; }
     if (props()?.unsaved) return this.saveDialog(t);
     if (this.tab) { this.pickRequest(cx); return this.renderTab(t, cx); }
     const k = key();
