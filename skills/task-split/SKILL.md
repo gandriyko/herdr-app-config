@@ -31,4 +31,6 @@ Rules:
 ## 3. Confirm
 
 Show the split as a short table and wait for a yes, unless the user already said to go ahead.
+Under the table, say which permissions the children get: the user's own settings, or a wider
+allowance you propose (`worktree-setup`, "Permissions"). A yes covers both.
 Then continue with `worktree-setup`.

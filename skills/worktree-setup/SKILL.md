@@ -89,4 +89,19 @@ hc run --bg --name da-20519-pr-1 --cwd "$wt" claude "$TASK"
 
 Check `first_message.sent` in the launch output (`agent-hc` step 1).
 
+### Permissions
+
+- By default a child runs with the user's own permission settings: start it without permission
+  flags.
+- A permission prompt (or a trust dialog) stops the child: hc reports it `blocked`. Answering it
+  is the user's decision, never yours: read its screen, tell the user which child asks to run
+  what, and ask them to answer in the child's pane or to allow you to.
+- To avoid repeated prompts, propose a wider allowance together with the split and use it only
+  after the user agrees. For Claude Code: `--permission-mode acceptEdits --allowedTools "Bash"`;
+  for other agents, their own flags (`<agent> --help`). A narrow list (`Bash(git:*)`) is not
+  enough: agents chain commands and write loops (`ls; git log; for f in …`), and in a test run
+  both children stopped on their first such command.
+- Never turn permission checks off (`--dangerously-skip-permissions`, `--yolo` and the like)
+  unless the user asks for it.
+
 Then continue with `agent-orchestration`.

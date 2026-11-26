@@ -51,8 +51,8 @@ word of a final report says what to do:
 - `BLOCKED`: answer it or escalate as above.
 
 A report without one of these words is not final: ask the child for it. If hc says a child is
-blocked (a permission or a dialog), `hc read --lines 60 <name>` and answer it (`hc send`) or
-escalate as above.
+blocked (a permission prompt or a dialog), `hc read --lines 60 <name>` and ask the user: answering
+a permission is theirs, not yours (`worktree-setup`, "Permissions").
 
 At most two fix rounds per problem; after the second, stop and ask the user. Silence or a
 timeout does not prove a child stopped or failed: check `hc get <name>` and `hc read` before you
