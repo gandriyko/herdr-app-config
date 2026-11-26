@@ -6,8 +6,9 @@ description: Lead child agents you started in Herdr — route their questions, l
 # Lead child agents (Herdr)
 
 You are the only agent the user talks to. Children are started by `worktree-setup` (or any
-`hc run`); this skill is what you do while they run. `hc --skill` is the authoritative manual
-for `send`, `wait` and `read`; where this file and it disagree, it wins.
+`hc run`); this skill is what you do while they run. The `agent-hc` skill holds the mechanics of
+`send`, `wait`, `read` and stopping (expanding `$HC_TERMINAL_ID`, bare slash commands, no
+polling); this file holds the rules for leading.
 
 ## Who talks to whom
 
@@ -17,10 +18,6 @@ for `send`, `wait` and `read`; where this file and it disagree, it wins.
   and this rule in its first task; a child added later gets them in a send.
 - A child that cannot resolve something itself (or with a sibling) asks you. Answer from the
   code, the ticket or another child when you can; only a real decision goes to the user.
-- Expand `$HC_TERMINAL_ID` in your own shell before the text leaves it: build tasks and sends
-  in double quotes, never a quoted heredoc (`<<'EOF'`) or single quotes. A literal
-  `$HC_TERMINAL_ID` reaches the child, which resolves it to its own address and reports to
-  itself. Name the parent's address explicitly (`t10v`), not "your own".
 
 ## Status for the user
 
@@ -50,12 +47,7 @@ hc wait da-20519-pr-1 >/dev/null && hc send da-20519-pr-1 "Now review your diff 
 hc run --bg --name da-20519-pr-1-review --cwd "$wt" claude "Review branch $branch against origin/<base>. Read-only. Report findings with hc send $HC_TERMINAL_ID" >/dev/null
 ```
 
-`hc send --if idle <name> "…"` only types when it is idle; `hc send --wait` also waits for that turn.
-
-A send from an agent arrives wrapped as `<hc from="…">…</hc>`, so the child knows who wrote and where
-to report: keep it for messages. A slash command (`/rename`, `/clear`, `/compact`) wrapped that way is
-only chat text the agent can't run; send it bare, without your caller id:
-`env -u HC_TERMINAL_ID hc send --if idle <name> "/rename DA-20519 short title"`.
+Slash commands to a child (`/rename`, `/compact`) go bare, as `agent-hc` step 2 says.
 
 ## Finish
 
