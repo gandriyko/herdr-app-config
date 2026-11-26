@@ -25,6 +25,14 @@ polling); this file holds the rules for leading.
   goes to the user: turn the child's options into your own question to the user, then send the
   answer to the child with a plain `hc send` (the child ended its turn, so its status is `done`
   and `--if idle` refuses). Children never open a question dialog: nobody sees it.
+- Batch questions for the user. Before you ask, let the other working children reach their own
+  `BLOCKED:` or their final report, then ask up to 4 questions in one dialog, each labelled with
+  its task (`DA-1: …`). Don't hold a question longer than that: if the others are still far from
+  a report, ask now.
+- Merge duplicates. When several children ask the same thing (both halves of one contract, or the
+  same rule in two tasks), ask the user once and send the answer to every child that asked. A
+  question another child's decision settles (the frontend waiting on the backend's choice) is
+  not for the user: answer it with that decision.
 - Children message you only to ask, report a blocker or finish, not with progress updates.
 
 ## Status for the user
