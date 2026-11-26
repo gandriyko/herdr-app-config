@@ -61,7 +61,22 @@ The task (`$TASK` below) carries every parameter the child needs:
 - branch and finish rule: commit on `$branch` when done, no push unless told;
 - no other agents;
 - the communication rules and sibling names from `agent-orchestration` ("Who talks to whom");
-- report address: `hc send <your address> "<summary or blocker>"`.
+- report address: `hc send <your address> "…"`, and the message rules below.
+
+Every task ends with these rules (in the child's words, your address filled in):
+
+```text
+Message <your address> only to ask, to report a blocker, or to finish. No progress updates unless asked.
+Never open a local question dialog (AskUserQuestion or similar): nobody sees it. Ask a sibling first,
+else send the lead a question and end your turn; the answer arrives as your next input:
+  BLOCKED: <the question in one sentence>
+  Options: A) … B) …
+  Recommend: A, because …
+  Blocks: <what stands until it is answered>
+Final report, once: start with DONE (every done criterion met), FAILED (any criterion not met; a
+failing test is FAILED) or BLOCKED (you need a decision). Then three sentences: what you did, what
+you found, what is left. Then evidence: commit, test command and its result, a file path for details.
+```
 
 Build `$TASK` in double quotes so `$HC_TERMINAL_ID` expands to your address (`agent-hc` step 2).
 For example, with Claude Code:

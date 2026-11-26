@@ -68,6 +68,8 @@ back to plain start + send.
 
 Check the launch output. `first_message.sent: false` means the task was NOT sent. Don't resend
 blindly: `hc read x`, fix readiness (a trust dialog: `hc keys x down enter`), then send.
+Answering a trust dialog is the user's decision: if your permission check blocks the `hc keys`,
+ask the user to confirm it in the child's pane (or to allow you to send the keys).
 
 Plain programs:
 
