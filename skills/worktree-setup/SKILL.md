@@ -68,7 +68,9 @@ Every task ends with these rules (in the child's words, your address filled in):
 ```text
 Message <your address> only to ask, to report a blocker, or to finish. No progress updates unless asked.
 Never open a local question dialog (AskUserQuestion or similar): nobody sees it. Ask a sibling first,
-else send the lead a question and end your turn; the answer arrives as your next input:
+else send the lead a question and end your turn; the answer arrives as your next input.
+When the task text conflicts with a rule in the repo (docs, notes, code comments), don't pick one
+yourself: ask the lead, even if you know which you would recommend. Question format:
   BLOCKED: <the question in one sentence>
   Options: A) … B) …
   Recommend: A, because …

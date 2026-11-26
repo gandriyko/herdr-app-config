@@ -14,8 +14,11 @@ polling); this file holds the rules for leading.
 
 - The user talks only to you, never to a child. Children never ask the user anything.
 - Children talk to each other directly (`hc send <sibling> "…"`), at most 3 exchanges per
-  question, and send you one summary of each agreement. Every child learns its siblings' names
-  and this rule in its first task; a child added later gets them in a send.
+  question. The child that owns the contract (named in `task-split`) sends you one summary of
+  each agreement; the other child doesn't repeat it. Every child learns its siblings' names, who
+  owns which contract, and this rule in its first task; a child added later gets them in a send.
+- A conflict between the task and a rule in the repo (docs, notes, code comments) is the user's
+  decision: the child asks you with `BLOCKED:` and doesn't pick one itself.
 - A child that cannot resolve something itself (or with a sibling) asks you with a `BLOCKED:`
   message (question, options, recommendation, what it blocks; the format is in `worktree-setup`
   step 3). Answer from the code, the ticket or another child when you can; only a real decision
