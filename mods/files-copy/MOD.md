@@ -83,6 +83,12 @@ than 200 in one document) shows as `[alt]`. Picture files (png, jpg, gif, webp, 
 picture, scaled down to the width (local only); an `.svg` opens as the picture too, with Preview/View as for
 Markdown (Preview shows it as saved).
 
+Preview draws Markdown with sizes from github-markdown-css: body text 15 px (`MD_FONT`), headings drawn by the mod
+(2 / 1.5 / 1.25 / 1 / 0.875 / 0.85 em, semibold, 24 px above and 16 below, h1 and h2 underlined), and fenced code
+blocks drawn by the mod (a shaded box, the theme's syntax colours as in View, a copy button). The rest goes to Herdr's
+`TextView`, which has no style settings. A fence inside a list item cuts the list there; the next item keeps its number.
+Files with reference links (`[id]: url`) stay one `TextView` block, without these headings and code boxes.
+
 Markdown (`.md`, `.markdown`) is drawn by the mod's own view too (the editor leaves it uncoloured), with
 highlight.js's line-by-line Markdown colours (headings, `code`, **bold**, links, fences).
 `.env*` files are drawn by the mod's own view too (below), coloured line by line with highlight.js's shell
@@ -90,7 +96,8 @@ rules, so one unbalanced quote in a value (`PASS=it's`) colours only its own lin
 as a multi-line grammar would; their Edit opens the editor as plain text for the same reason.
 
 Colours come from the current theme (`ansi1`–`ansi6`, `dim`, `foreground`), in the own view and in the editor. The editor
-gets every syntax key (operators, booleans, escapes, variables, punctuation too), since a key left out falls back to its
+gets every syntax key (operators, booleans, escapes, variables, punctuation, and the Markdown keys heading, code, strong,
+emphasis, link, quote and list in the own view's Markdown colours), since a key left out falls back to its
 built-in dark palette. After a theme change the own view redraws in the new colours; an open editor keeps its colours
 until the file is opened again.
 
@@ -117,7 +124,7 @@ double-click selects a word, triple-click a line; arrows (Shift extends), Home/E
 - find.js: the find box's query as a RegExp and its hits (case, word, regex; capped at 1000). Copy of `lib/find.js`; edit it there and run `scripts/sync-lib`.
 - chevron-down.svg, chevron-right.svg, file.svg, folder.svg: tree icons; spinner.svg: while finding; close.svg: clears the filter; options.svg: the filter options button.
 - Header icons: search.svg, undo.svg (revert), clock.svg (auto-save), columns.svg (split), save.svg, eye.svg / file-text.svg /
-  square-pen.svg (Preview / View / Edit), panel-right.svg / expand.svg (to pane / to tab).
+  square-pen.svg (Preview / View / Edit), panel-right.svg / expand.svg (to pane / to tab), copy.svg (a code block's copy button in Preview).
 - gpui-kit.d.ts, jsconfig.json: editor typings only.
 
 ## Settings and data

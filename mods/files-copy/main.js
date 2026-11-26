@@ -74,12 +74,33 @@ const MD_IMG = /\[?!\[([^\]]*)\]\(\s*<?([^)\s>]+)>?(?:\s+["'][^"']*["'])?\s*\)(?
 // (![alt](src), linked ones, <img src=… width=…>) as { imgs, md: the rest of the line when it has words }. Fenced code stays text.
 function mdBlocks(text) {
   const out = []; let buf = [], fence = null, blank = false, html = 0;
-  const flush = () => { if (buf.length) out.push({ md: buf.join("\n") }); buf = []; };
+  const flush = () => { if (buf.some(l => l.trim())) out.push({ md: buf.join("\n") }); buf = []; };
   // Plain runs are cut at a blank line followed by a paragraph or heading, so a search hit has a block to scroll to.
   // Not inside a fence or an open HTML block, not before a list item/indent/quote/table row (it would restart
   // numbering or end the list), and never when the file has reference links ([id]: url), which need the whole text.
   const split = !/^ {0,3}\[[^\]]+\]:\s*\S/m.test(text);
+  let code = null; // a fenced code block being collected: { mark, indent, lang, lines, raw }
+  const endCode = () => { out.push({ code: code.lines.join("\n"), lang: code.lang, indent: code.indent, md: code.raw.join("\n") }); code = null; };
   for (const line of text.split("\n")) {
+    // When the text may be cut, headings and fenced code become blocks of their own, drawn like GitHub (see mdView).
+    // ponytail: a fence inside a list item cuts the list there; the item after it keeps its number (CommonMark start).
+    if (code) {
+      code.raw.push(line);
+      const c = line.match(/^ *(`{3,}|~{3,})\s*$/);
+      if (c && c[1][0] === code.mark[0] && c[1].length >= code.mark.length) endCode();
+      else code.lines.push(line.replace(new RegExp(`^ {0,${code.indent}}`), ""));
+      continue;
+    }
+    if (split && html === 0) {
+      const f = line.match(/^( *)(`{3,}|~{3,})\s*([\w+#.-]*)/);
+      if (f && !(f[2][0] === "`" && line.slice(f[0].length).includes("`"))) {
+        flush(); blank = false;
+        code = { mark: f[2], indent: f[1].length, lang: f[3].toLowerCase(), lines: [], raw: [line] };
+        continue;
+      }
+      const h = line.match(/^(#{1,6})\s/);
+      if (h) { flush(); out.push({ h: h[1].length, md: line }); blank = false; continue; }
+    }
     const was = fence;
     if (split && !was && html === 0) {
       if (blank && line.trim() && !/^\s|^([-*+]|\d+[.)])\s|^>|^\|/.test(line)) flush();
@@ -101,19 +122,23 @@ function mdBlocks(text) {
     flush();
     out.push({ imgs, md: /[\p{L}\p{N}]/u.test(rest) ? rest : "" });
   }
+  if (code) endCode(); // an unclosed fence runs to the end, as in CommonMark
   flush();
   return out;
 }
 
 // ---- find in the tab (FIND_CAP, findRegex, findAll: ./find.js) ----
 // What a Markdown block shows as words: link targets, image sources, tags and markers left out, so a hit is something readable.
+const MD_FONT = 15; // body text size of rendered Markdown, the em for headings and code (GitHub: 16)
 const mdVisible = (md) => md.replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/\[([^\]]*)\]\([^)]*\)/g, "$1").replace(/<[^>]+>/g, "")
   .replace(/^\s{0,3}(?:#{1,6}|>+|[-*+]|\d+[.)])\s+/gm, "").replace(/[`*~]/g, "").replace(/(^|\W)_+|_+(?=\W|$)/g, "$1");
 
 // The editor's colours, all from the theme. Keys it isn't given fall back to its built-in dark palette, whatever the theme,
 // so every key is set.
 const editorSyntax = (t) => ({ keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1,
-  constant: t.ansi6, operator: t.ansi6, boolean: t.ansi3, "string.escape": t.ansi6, variable: t.foreground, punctuation: t.foreground });
+  constant: t.ansi6, operator: t.ansi6, boolean: t.ansi3, "string.escape": t.ansi6, variable: t.foreground, punctuation: t.foreground,
+  // Markdown keys, in the own view's colours (mdLine in lib/highlight.js)
+  heading: t.ansi4, code: t.ansi2, strong: t.ansi5, emphasis: t.ansi5, link: t.ansi4, quote: t.dim, list: t.ansi6 });
 // The own view matches the editor (read off screenshots of both views): operators and the words and/or/not/new in its
 // operator colour, true/false in its boolean colour, null/None in ansi6, this/self plain, a Capitalised name or a member after "." plain
 // unless it is a built-in type or follows `class`. highlight.js can't tell those apart, so its pieces are adjusted here.
@@ -893,7 +918,9 @@ export default class Files extends View {
     this.pending = false; // set by picture() while a picture is still being fetched
     const marks = Boolean(this.find.q) && this.find.mode === "md", cur = this.find.list[this.find.cur]?.block;
     return blocks.map((b, i) => {
-      const el = b.imgs
+      const el = b.h ? this.mdHeading(b, i, t)
+        : b.code !== undefined ? this.mdCode(b, i, t, cx)
+        : b.imgs
         ? h_flex().flex_wrap().items_center().gap(8).py(4)
           .children(b.imgs.map(im => this.picture(this.imgSource(im.src), im.alt, im.width, t, cx)))
           .when(Boolean(b.md), el => el.child(div().flex_1().min_w(0).child(TextView.markdown(`${id}-${i}`, b.md).selectable(true))))
@@ -902,6 +929,30 @@ export default class Files extends View {
       return marks ? div().pl(10).border_l(2).border_color(i === cur ? t.accent : this.mdHits.has(i) ? t.accent + "55" : t.background)
         .when(i === cur, e => e.bg(t.accent + "18")).child(el) : el;
     });
+  }
+  // A heading as github-markdown-css draws it: 2 / 1.5 / 1.25 / 1 / 0.875 / 0.85 em of the body text, semibold,
+  // 24 px above and 16 below, h1 and h2 underlined, h6 dimmed. Inline markup shows as plain words.
+  mdHeading(b, i, t) {
+    const size = MD_FONT * [2, 1.5, 1.25, 1, 0.875, 0.85][b.h - 1];
+    return div().text_size(size).font_semibold().line_height(1.25).mt(i ? 24 : 0).mb(16)
+      .text_color(b.h === 6 ? t.dim : t.foreground)
+      .when(b.h <= 2, e => e.pb(size * 0.3).border_b(1).border_color(t.border))
+      .child(mdVisible(b.md.replace(/\s+#+\s*$/, "")).trim());
+  }
+  // A fenced code block like GitHub's: a shaded box, the theme's syntax colours (as in View), a copy button.
+  mdCode(b, i, t, cx) {
+    const lang = b.lang && languageFor(`x.${b.lang}`), path = `x.${b.lang}`;
+    const rows = b.code.split("\n").map(line => h_flex().whitespace_nowrap().min_h(MD_FONT * 0.85 * 1.45)
+      .children((lang ? editorColors(highlight(line, lang, { ...t, ansi3: t.ansi1, ansi6: t.ansi3 }), t, path) : [{ text: line }])
+        .map(sp => div().when(Boolean(sp.color), e => e.text_color(sp.color)).child(sp.text || " "))));
+    const copied = this.mdCopied === i;
+    return div().relative().mb(16).ml(b.indent ? 24 : 0).rounded(6).bg(mixHex(t.foreground, t.background, 0.05))
+      .child(div().id(`files-md-code-${i}`).overflow_x_scrollbar().p(16)
+        .font_family(settings().font_family ?? "JetBrains Mono").text_size(MD_FONT * 0.85).children(rows))
+      .child(div().id(`files-md-copy-${i}`).absolute().top(8).right(8).size(26).flex().items_center().justify_center().rounded(6)
+        .cursor_pointer().text_color(copied ? t.ansi2 : t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
+        .tooltip(copied ? "Copied" : "Copy").on_click((_e, cx) => { cx.write_to_clipboard(b.code); this.mdCopied = i; cx.notify(); })
+        .child(svg("mods/files-copy/copy.svg").size(14)));
   }
   // The rendered view with a cover over it until it is complete: the first frame lays everything out under the
   // cover, so the text and pictures are already in place when it lifts (one redraw, not one per picture).
@@ -913,7 +964,7 @@ export default class Files extends View {
       if (!this.pending && !this.holdTimer) { this.holdTimer = true; cx.timer.after(150, acx => { this.holdTimer = false; if (this.req === req && this.hold && !this.pending) { this.hold = false; acx.notify(); } }); }
     }
     return v_flex().flex_1().min_w(0).min_h(0).relative()
-      .child(div().id("files-md").flex_1().min_h(0).overflow_y_scrollbar().track_scroll(this.mdScroll).px(24).py(16).children(blocks))
+      .child(div().id("files-md").flex_1().min_h(0).overflow_y_scrollbar().track_scroll(this.mdScroll).px(24).py(16).text_size(MD_FONT).children(blocks))
       .when(hold, el => el.child(div().absolute().inset_0().flex().items_center().justify_center().bg(t.background).text_color(t.dim).child("Loading…")));
   }
   // A picture file, scaled down to the view's width (the view scrolls when it's taller).
