@@ -29,40 +29,10 @@ polling); this file holds the rules for leading.
 
 ## Status for the user
 
-The user sees each child's raw `<hc from=…>` message, which is hard to read. After every event
-(a report, a question, an agreement summary, a permission prompt) show a status board in the
-user's language, so the user reads the board, not the raw text:
-
-1. A Markdown table with one row per child, every child every time, the same columns:
-   child, part, state, now / result, waiting on (or evidence once done).
-2. **Changed:** 1–2 plain sentences about this event.
-3. **From you:** what the user must decide or allow, or "nothing". A decision then goes to the
-   user as a question with the child's options.
-
-State marks:
-
-| Mark | State |
-| --- | --- |
-| ⏳ | working |
-| ❓ | waiting for a decision |
-| 🔒 | waiting for a permission |
-| ☑️ | done by its report, not yet verified by you |
-| ✅ | done and verified by you |
-| ❌ | failed |
-
-Example, after a question from the backend child:
-
-| Child | Part | State | Now | Waiting on |
-| --- | --- | --- | --- | --- |
-| da-20519-pr-1 | backend | ❓ | stopped at the delete rule | you |
-| da-20519-pr-2 | frontend | ⏳ | writing the table | — |
-
-**Changed:** the backend found a conflict: the ticket says delete, the repo notes forbid it.
-**From you:** the choice in the question below.
-
-No paths, terminal IDs, JSON or code in the board, except the evidence column once a child is
-done (commit, test result). Keep `hc` commands quiet: pipe their JSON to `>/dev/null` or a short
-`jq` filter, so the user's screen does not fill with technical output.
+After each child report, a sibling agreement or an escalation, tell the user in 1–3 plain
+sentences: who finished what, what is next, and any question waiting for them. No paths,
+terminal IDs, JSON or code unless the user asks. Keep `hc` commands quiet: pipe their JSON to
+`>/dev/null` or a short `jq` filter, so the user's screen does not fill with technical output.
 
 ## Wait, don't poll
 
