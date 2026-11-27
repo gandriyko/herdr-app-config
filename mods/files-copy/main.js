@@ -7,6 +7,7 @@ import { spaces, panes, focused, exec, readTextFile, writeTextFile, watchFolder,
 import { highlight, languageFor } from "./highlight.js";
 import { FIND_CAP, findAll, findRegex } from "./find.js";
 import { REQUEST, PLACE, openFile } from "./open.js";
+import { SearchView } from "./search.js";
 
 const PY = languageFor("x.py");
 // ponytail: CHAR_W assumes a monospace font at 0.6 em (JetBrains Mono, Menlo, SF Mono); another font puts the underline off.
@@ -266,6 +267,10 @@ export default class Files extends View {
     this.masksInput.on("change", () => setShared(EXCLUDE, this.masksInput.value().split(/[,\s]+/).filter(Boolean)));
     // Filter: every word must be in the file's path; the tree then shows only matches and their folders.
     this.query = ""; this.all = null; this.filtered = null;
+    // Search in files (search.js): the panel shows it instead of the tree while `searching` (per place, see refresh).
+    // ponytail: each place's last answer (≤ 1,000 hits) stays in `saved` while the panel lives; cap it if places pile up.
+    this.finder = new SearchView(cx);
+    this.searching = false; this.finderPlace = null;
     this.search = InputState.new({ placeholder: "Filter files" });
     // ↑/↓ in the filter move `cursor` over the matching files (in the order shown), Enter opens it.
     this.cursor = null; this.order = []; this.filterScroll = ScrollHandle.new();
@@ -315,7 +320,9 @@ export default class Files extends View {
     const { cwd, on } = loc, next = key();
     if (next !== this.context?.key) {
       // Each place (space + folder) keeps its own open folders, file and filter text.
-      if (this.context) this.saved.set(this.context.key, { folders: this.folders, file: this.file, query: this.search.value() });
+      // The search's state is the place's only once restored there (a quick switch may come before the timer below).
+      if (this.context) this.saved.set(this.context.key, { folders: this.folders, file: this.file, query: this.search.value(), searching: this.searching,
+        search: this.finderPlace === this.context.key ? this.finder.state() : this.saved.get(this.context.key)?.search });
       const saved = this.saved.get(next);
       this.context = { key: next, cwd, on }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
       this.pending = new Set(); this.marks = {}; this.ignored = null; this.file = saved?.file ?? null; this.watched = null; this.error = null; this.limited = false;
@@ -324,6 +331,14 @@ export default class Files extends View {
       this.query = query.trim().toLowerCase();
       // The input is set outside render (refresh also runs from render).
       if (this.search.value() !== query) cx.timer.after(0, () => { if (this.context?.key === next) this.search.set_value(query); });
+      // Each place has its own search (query, globs, answer) and its own Files | Search mode; a new place starts on the tree.
+      this.searching = saved?.searching ?? false;
+      cx.timer.after(0, acx => {
+        if (this.context?.key !== next) return;
+        this.finder.restore(saved?.search); this.finderPlace = next;
+        if (this.searching && cwd) this.finder.show(cwd, on, acx, false); // without taking the keyboard from the terminal
+        acx.notify();
+      });
     }
     // A filter in use follows the folder: its file list is asked again with every refresh (watch, 10 s timer).
     if (cwd && this.query && !this.listing) this.loadAll(this.context, cx);
@@ -528,6 +543,8 @@ export default class Files extends View {
     // Markdown stays covered until its pictures are in and the text has settled, so nothing pops in (see mdPane).
     this.hold = this.preview && /\.(md|markdown)$/i.test(req.path); this.holdCap = false; this.holdTimer = false; this.pending = false;
     this.find.list = []; this.fmap = null; this.mdHits = new Set(); this.find.cur = 0; this.confirmRevert = false; this.split = false; this.diskChanged = null;
+    // A hit from the panel's search in files: the find row opens with its query and options (not remembered).
+    if (req.find?.q) { Object.assign(this.find, { q: req.find.q, open: true, case: Boolean(req.find.case), word: Boolean(req.find.word), regex: Boolean(req.find.regex) }); this.findInput.set_value(req.find.q); }
     // A picture is shown, not read as text (local files only: the app draws from its own folder).
     this.raster = RASTER.test(req.path);
     if (this.raster) { if (req.on) this.fileError = "Images on another machine can't be shown"; cx.notify(); return; }
@@ -549,7 +566,14 @@ export default class Files extends View {
         this.handle.focus();
         if (req.edit && this.editable) this.editFile(cx); // props.edit: open straight in the editor
       } catch { if (this.req === req) this.fileError = "Cannot preview this file (binary, too large, or unreadable)"; }
-      finally { if (this.req === req && this.find.open) this.runFind(cx, false); cx.notify(); }
+      finally {
+        if (this.req === req && this.find.open) {
+          this.runFind(cx, false);
+          // The clicked hit is the current one (its line is already centred).
+          if (req.find && at && "line" in at) { const k = this.find.list.findIndex(m => m.line === at.line); if (k >= 0) this.find.cur = k; }
+        }
+        cx.notify();
+      }
     });
   }
 
@@ -699,6 +723,7 @@ export default class Files extends View {
   // edits in its props and asks whether to write them. Switching files in the tab still saves without asking.
   // ponytail: on app quit the dialog can't show and the edits are lost; save on quit if that matters.
   close() {
+    this.finder?.hide();
     if (!this.tab || !this.dirty || !this.code) return;
     openOverlay({ mod: "files-copy", kind: "dialog", width: 440, height: 150,
       props: { unsaved: { path: this.full(this.req.path), text: this.code.value(), expected: this.text } } });
@@ -815,7 +840,9 @@ export default class Files extends View {
         const a = edges[k], b = edges[k + 1], hov = inside(this.hover, a, b);
         out.push(div().flex_none().text_color(hov ? t.accent : s.color ?? t.foreground)
           .when(hov, el => el.underline()).when(inside(this.mark, a, b), el => el.bg(t.accent + "44").rounded(2))
-          .when(Boolean(ms.length) && ms.some(m => a >= m.start && b <= m.end), el => el.bg(ms.find(m => a >= m.start && b <= m.end).k === this.find.cur ? t.ansi3 + "cc" : t.ansi3 + "55").rounded(2))
+          // The current hit: solid yellow with the background colour as text (syntax colours, often yellow strings, vanish on it).
+          .when(Boolean(ms.length) && ms.some(m => a >= m.start && b <= m.end), el => ms.find(m => a >= m.start && b <= m.end).k === this.find.cur
+            ? el.bg(t.ansi3).text_color(t.background).rounded(2) : el.bg(t.ansi3 + "55").rounded(2))
           .when(inside(sr, a, b), el => el.bg(t.selection))
           .child(s.text.slice(a - pos, b - pos)));
       }
@@ -1153,15 +1180,17 @@ export default class Files extends View {
       .child(div().id("files-find").h(24).flex_1().min_w(80).max_w(360).px(8).flex().items_center().rounded(6).border_1().border_color(t.border).cursor_text()
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_key_down((e, cx) => { if (e.keystroke === "escape") { this.closeFind(cx); cx.stop_propagation(); } })
-        .child(Input.new(this.findInput).flex_1().h_full().text_size(12).text_color(t.foreground)))
+        .child(Input.new(this.findInput).flex_1().h_full().text_size(12).text_color(t.foreground))
+        // Closes the find row: inside the field (as the panel's filter clear), so it isn't read as a second tab close.
+        .child(div().id("files-find-close").size(18).flex_none().flex().items_center().justify_center().rounded(4).cursor_pointer()
+          .text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground)).tooltip("Close find (Esc)")
+          .on_click((_e, cx) => this.closeFind(cx)).child(svg("mods/files-copy/close.svg").size(10))))
       .child(options)
       .child(div().flex_none().text_size(11).text_color(f.bad ? t.ansi1 : t.dim).child(f.bad ? "Invalid regex" : f.q ? (n ? `${f.cur + 1}/${n}${f.capped ? "+" : ""}` : "No results") : ""))
       .child(btn("files-find-prev", "↑", "Previous (⇧Enter)", cx => this.stepFind(-1, cx)))
       .child(btn("files-find-next", "↓", "Next (Enter)", cx => this.stepFind(1, cx)))
       .when(f.mode === "editor" && this.editable, el => el.child(btn("files-replace-toggle", "⇄", "Replace (shows the replace row)", cx => { this.replaceOpen = !this.replaceOpen; cx.notify(); })
-        .when(this.replaceOpen, e => e.bg(t.selected).text_color(t.foreground))))
-      .child(div().flex_1())
-      .child(btn("files-find-close", svg("mods/files-copy/close.svg").size(10), "Close (Esc)", cx => this.closeFind(cx)));
+        .when(this.replaceOpen, e => e.bg(t.selected).text_color(t.foreground))));
   }
   // The tab on screen if it is a file tab of this mod (else null), asked at the moment of use.
   shownTab() {
@@ -1314,9 +1343,17 @@ export default class Files extends View {
     if (k !== null && k !== this.context?.key) this.refresh(cx);
     return v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
-        .child(div().font_semibold().child("Files"))
+        // Files | Search: a segmented switch between the tree and the search in files (search.js).
+        .child(h_flex().flex_none().gap(2).ml(-8)
+          .children([["files", "folder", "Files", "The file tree", false], ["search", "search", "Search", "Search in files: text in every file under this folder (match case, whole word, regex, Include / Exclude)", true]]
+            .map(([id, icon, label, tip, on]) => h_flex().id(`files-mode-${id}`).h(24).px(8).gap(6).items_center().rounded(6).text_size(12)
+              .tooltip(tip).when(this.searching === on, el => el.bg(t.selected).text_color(t.foreground).font_semibold())
+              .when(this.searching !== on, el => el.cursor_pointer().text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
+                .on_click((_e, cx) => this.toggleSearch(on, cx)))
+              .child(svg(`mods/files-copy/${icon}.svg`).size(13).flex_none()).child(label))))
         .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.root?.split(/[\\/]/).pop() ?? "")))
-      .child(h_flex().px(8).pt(8).gap(6).flex_none().items_center().child(div().id("files-search").flex_1().min_w(0).h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
+      .when(this.searching, el => el.child(this.finder.render(cx, cx => this.toggleSearch(false, cx))))
+      .when(!this.searching, el => el.child(h_flex().px(8).pt(8).gap(6).flex_none().items_center().child(div().id("files-search").flex_1().min_w(0).h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_key_down((e, cx) => {
           if (e.keystroke === "escape") return this.clearFilter(cx);
@@ -1336,9 +1373,9 @@ export default class Files extends View {
           .text_color(this.masksOpen || this.hidden || this.masks().length ? t.foreground : t.dim).when(this.masksOpen, el => el.bg(t.hover))
           .tooltip("Filter options")
           .on_click((_e, cx) => { this.masksOpen = !this.masksOpen; if (this.masksOpen) this.masksInput.set_value(this.masks().join(", ")); cx.notify(); })
-          .child(svg("mods/files-copy/options.svg").size(14))))
+          .child(svg("mods/files-copy/options.svg").size(14)))))
       // A raised card, so the options don't read as tree rows.
-      .when(this.masksOpen, el => el.child(div().px(8).pt(6).flex_none().child(v_flex().p(6).gap(6).rounded(8).border_1().border_color(t.border).bg(t.raised)
+      .when(this.masksOpen && !this.searching, el => el.child(div().px(8).pt(6).flex_none().child(v_flex().p(6).gap(6).rounded(8).border_1().border_color(t.border).bg(t.raised)
         .child(div().id("files-masks-field").h(28).px(8).flex().items_center().gap(6).rounded(7).border_1().border_color(t.border).bg(t.background).cursor_text()
           .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
           .on_key_down((e, cx) => { if (e.keystroke === "escape") { this.masksOpen = false; cx.notify(); cx.stop_propagation(); } })
@@ -1349,12 +1386,18 @@ export default class Files extends View {
           .child(div().size(14).flex_none().flex().items_center().justify_center().rounded(3).border_1().text_size(10)
             .border_color(this.hidden ? t.accent : t.input).when(this.hidden, d => d.bg(t.accent).text_color(t.accent_foreground)).child(this.hidden ? "✓" : ""))
           .child("Show hidden files")))))
-      .child(this.query ? this.filterView(t) : v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
+      .when(!this.searching, el => el.child(this.query ? this.filterView(t) : v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
-        .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total"))));
+        .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))));
   }
 
   clearFilter(cx) { this.search.set_value(""); this.query = ""; this.cursor = null; cx.notify(); }
+  // The panel's body: the tree (and its filter) or the search in files, for the panel's folder.
+  toggleSearch(on, cx) {
+    this.searching = on;
+    if (on && this.root) this.finder.show(this.root, this.on, cx); else this.finder.hide();
+    cx.notify();
+  }
 
   filterView(t) {
     const note = (text) => div().p(8).text_size(11).text_color(t.dim).child(text);

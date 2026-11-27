@@ -4,7 +4,7 @@ summary: File tree (clone of files) that opens a file in its own tab to view or 
 source: https://github.com/gandriyko/herdr-app-config/tree/main/mods/files-copy
 install: copy the folder mods/files-copy into ~/.config/herdr-app/mods/files-copy
 place: none
-needs: [sh, git, find (filter outside git), uv (uvx fetches jedi on first use; Python go-to-definition only), curl (web images in Markdown)]
+needs: [sh, git, find (filter outside git), rg (content search; grep without it), uv (uvx fetches jedi on first use; Python go-to-definition only), curl (web images in Markdown)]
 shared_keys: [files-copy.open, files-copy.exclude, files-copy.place]
 reads_keys: [wb.diff.request (root of the focused diff tab; optional)]
 commands: [tab.new (files-copy with props), tab.select, tab.rename, tab.close, pane.split, pane.close]
@@ -26,7 +26,24 @@ from `git ls-files -co --exclude-standard` (tracked and untracked) plus ignored 
 (skips node_modules), at most 20,000 files; it is asked again on each refresh while a filter is typed.
 ↑/↓ in the input move a highlight over the matching files (wrapping, the list scrolls to it); Enter opens
 the highlighted file, or the first match when none is.
-Esc or the × in the input clears the filter and brings back the normal tree. Each place (space and
+Esc or the × in the input clears the filter and brings back the normal tree.
+
+Search in files: the `Files | Search` switch in the panel's header (in place of its title) shows the tree or the search
+(search.js) (Esc in a search field goes back to the tree). Each place (space and folder) keeps its own mode, query,
+Include / Exclude, last answer and picked hit while the panel lives (a new place starts on the tree with an empty
+search); switching back shows its last answer at once and searches again. It has the query, `Aa` match case, `W` whole
+word, `.*` regular expression (shared by all places, remembered), and Include / Exclude fields under it
+(comma-separated globs: `*.py, src/**`; `tests, *.min.js`). It runs `rg` (else `grep -r`, where Include matches file names only)
+300 ms after the last change, one search at a time, in every file under the folder: git-ignored files and dot files
+included (`.env`, `tmp/`), except inside `node_modules`, `.git`, `__pycache__`, `venv*`, `.venv*`, `.mypy_cache`,
+`.pytest_cache`, `.ruff_cache`, `.tox`, `.next`, the Exclude field and the panel's Exclude masks; binary files and files
+over 1 MB (rg) are skipped. Results: a row per file (name, folder, count) with its hits under it (line number, the line
+with the hit tinted), at most 50 per file and 1,000 in all (said under the list), in a virtual list. ↑/↓ in a field move
+over the hits; Enter in the query or a click opens the file in the space's one file viewer (tab or pane, replacing the file
+shown there, so tabs don't pile up), centred on the hit's line, with
+its find row set to the same query and options and that hit current. The last answer stays on screen while a new search
+runs ("Searching…" under it); while shown, it searches again when files change under the folder (watch, local only;
+changes only in the skipped folders are ignored), not on a timer (10 s timeout, the error shows under the list). Each place (space and
 folder) keeps its own filter text, open folders and last file while the panel lives; switching spaces
 swaps them.
 
@@ -51,7 +68,7 @@ clicks select its tab, and a tab with terminals keeps its name. A click on the p
 Header buttons are icons with tooltips: search, revert, auto-save, Markdown split, save, the mode group
 (eye = Preview, page = View, pen = Edit), pane/tab move, close. Find in file: the search icon (or ⌘F) shows a find row
 under the header (field, options, counter and ↑/↓) for a searchable file (case-insensitive, Enter next, ⇧Enter
-previous, Esc or its × hides the row and its hits, keeping the query; counter `3/12`, first 1,000 hits, then `+`). It searches whatever the tab shows:
+previous, Esc or the × inside the field hides the row and its hits, keeping the query; counter `3/12`, first 1,000 hits, then `+`). It searches whatever the tab shows:
 the line view (Python, `.env`, Markdown source) tints every hit and centres the current one; the editor
 selects the current hit; rendered Markdown matches the visible words only (link targets, image sources and
 markup excluded) and marks the block that holds the hit with an accent edge and scrolls to it, because the text
@@ -62,7 +79,7 @@ While a file is edited in the editor, the ⇄ button after the find field shows 
 
 While a search has hits in the editor, a thin strip beside it shows a tick for each hit at its line position (the current one stronger and wider); a click on the strip goes to the nearest hit, and the current hit is selected in the editor.
 
-Search hits in the view (every hit tinted yellow, the current one stronger; the line numbers of lines with hits yellow and bold) are the normal case, since the view is the default. Press Edit and the editor takes over (it can't mark text); the find field keeps working there, with the strip beside the editor and the replace row.
+Search hits in the view (every hit tinted yellow, the current one solid yellow with dark text; the line numbers of lines with hits yellow and bold) are the normal case, since the view is the default. Press Edit and the editor takes over (it can't mark text); the find field keeps working there, with the strip beside the editor and the replace row.
 
 Find options (remembered): `Aa` match case, `W` whole word, `.*` regular expression (an invalid one says so; Replace may use `$1`, `$&`). Ctrl-F (⌘F is the app's terminal search) focuses the field, also in the editor, where the binding is made in the editor's context so other mods' editors lose their own Ctrl-F and takes a one-line selection as the query. ⌘G / F3 step to the next hit, with Shift the previous. Replace all is one edit.
 
@@ -118,7 +135,8 @@ double-click selects a word, triple-click a line; arrows (Shift extends), Home/E
 ## Files
 - main.js: the panel (tree), the file tab (same class, opened with props) and go-to-definition (the jedi
   script is the `GOTO` string, so it also runs on remote machines).
-- open.js: `openFile(req)`, the one-tab-per-space opening shared by the panel and link.js.
+- open.js: `openFile(req)`, the one-tab-per-space opening shared by the panel, its search and link.js.
+- search.js: the panel's search in files (`SearchView`: show/hide/render called by main.js) and its rg/grep output parser.
 - link.js: the terminal link handler (`handleLink`); mod.json's `link_handlers` rule picks the paths it gets.
 - highlight.js: per-line syntax highlighter for the Python view (copy of `lib/highlight.js`; edit it there and run `scripts/sync-lib`).
 - find.js: the find box's query as a RegExp and its hits (case, word, regex; capped at 1000). Copy of `lib/find.js`; edit it there and run `scripts/sync-lib`.
@@ -128,9 +146,10 @@ double-click selects a word, triple-click a line; arrows (Shift extends), Home/E
 - gpui-kit.d.ts, jsconfig.json: editor typings only.
 
 ## Settings and data
-- Shared state `files-copy.open` ({ space, root, on, path, line?, col?, ts }; line and col 1-based): written by the panel on a click, by link.js (and by
+- Shared state `files-copy.open` ({ space, root, on, path, line?, col?, find?, ts }; line and col 1-based; find: { q, case, word, regex } the find row opens with): written by the panel on a click, by link.js (and by
   wb-diff's Open in Files button: a documented contract, keep the shape), read by that space's file tab.
 - `localStorage` `files-copy.hidden`: "1" when dot files are shown.
+- `localStorage` `files-copy.search`: the search's { case, word, regex }.
 - Exclude masks: globs on a file or folder name (`*`, `?`), e.g. `__pycache__, *.pyc`; matching files and folders
   (with everything inside) are hidden in the tree and the filter. Typed in the filter options' Exclude field:
   comma- or space-separated masks, applied as typed; Esc closes the section. Kept in shared state

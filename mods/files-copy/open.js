@@ -1,7 +1,7 @@
-// Opening a file in the space's file tab, shared by the panel (main.js pick) and the terminal link handler (link.js).
+// Opening a file in the space's file tab, shared by the panel (main.js pick, search.js) and the terminal link handler (link.js).
 import { spaces, panes, run, shared, setShared } from "herdr";
 
-export const REQUEST = "files-copy.open"; // { space, root, on, path, line?, col?, ts, from }: written here, read by the tab
+export const REQUEST = "files-copy.open"; // { space, root, on, path, line?, col?, find?, ts, from }: written here, read by the tab
 export const PLACE = "files-copy.place"; // "tab" | "pane": the viewer's last tab ⇄ pane move, used for the next new viewer
 
 // One file tab per space: an existing one gets the request through shared state, else a new tab (or a pane beside
