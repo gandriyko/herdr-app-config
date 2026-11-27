@@ -774,14 +774,17 @@ export default class Agents extends View {
       .text_size(10.5)
       .font_medium()
       .text_color(color);
-    // A pill (PR, Jira) whose click runs act without reaching the card.
+    // A pill (PR, Jira): ⌘-click runs act without reaching the card; a plain click goes to the card
+    // (switches the agent), so a missed click doesn't open the browser. With ⌘ held the pills get a border.
+    const cmd = Boolean(this.cmd);
     const chip = (id, color, tip, act) => pill(color)
       .id(id)
       .flex_none()
-      .cursor_pointer()
-      .hover((el) => el.bg(color + "40"))
-      .tooltip(tip)
-      .on_click((_e, cx) => { cx.stop_propagation(); act(); });
+      .border_1()
+      .border_color(cmd ? color : color + "00")
+      .when(cmd, (el) => el.cursor_pointer().hover((s) => s.bg(color + "40")))
+      .tooltip(`${tip} (⌘-click)`)
+      .on_click((e, cx) => { if (!e.modifiers.platform) return; cx.stop_propagation(); act(); });
     const prChip = (a, pr) => {
       const cwd = placeOf.get(a.address)?.cwd;
       return chip(`pr-${a.address}`, PR_COLOR[pr.c], `PR #${pr.n} \u00b7 checks ${CHECKS_WORD[pr.c]}`,
@@ -965,7 +968,13 @@ export default class Agents extends View {
       ? list.flatMap(withKids)
       : groups.flatMap((g) => [header(g), ...(this.folded.has(g.id) ? [] : g.members.flatMap(withKids))]);
 
+    // ⌘ held over the panel lights up the PR and Jira pills. The sidebar rarely has key focus, so the
+    // pointer's moves report it too; leaving the panel turns it off.
+    const trackCmd = (on, cx) => { if (on !== Boolean(this.cmd)) { this.cmd = on; cx.notify(); } };
     return v_flex()
+      .on_mouse_move((e, cx) => trackCmd(e.modifiers.platform, cx))
+      .on_modifiers_changed((e, cx) => trackCmd(e.modifiers.platform, cx))
+      .on_hover((on, cx) => { if (!on) trackCmd(false, cx); })
       .size_full()
       .min_h(0)
       .bg(t.chrome)
