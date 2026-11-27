@@ -11,7 +11,7 @@ commands: [tab.rename, tab.move, tab.select, tab.close, tab.new, tab.prev, tab.n
 ---
 
 ## What it does
-Draws the tab bar of the active space: program icon, agent topic as name, status spinner or dot, close button on the active tab. Click selects, double click renames, drag-drop reorders, right click opens the tab menu, wheel switches tabs. At the right it shows one button per child of the layout stack `panel-body` (Files, Changes, Jira, PR, History...) that toggles the side panel, then window buttons. It remembers the open side panel per space. Closing a space's last tab (close button, `tabs-copy.close`, `tabs-copy.close-pane` on a one-pane tab) opens a `start-tab` tab first, so the space stays; without that mod a plain terminal tab takes its place. Closing the start tab closes the space. Cloned from the stock `tabs` mod 0.1.14.
+Draws the tab bar of the active space: program icon, agent topic as name, status spinner or dot, close button on the active tab. Click selects, double click renames, drag-drop reorders, right click opens the tab menu; the wheel scrolls the tab strip and does not switch tabs. At the right it shows one button per child of the layout stack `panel-body` (Files, Changes, Jira, PR, History...) that toggles the side panel, then window buttons. It remembers the open side panel per space. Closing a space's last tab (close button, `tabs-copy.close`, `tabs-copy.close-pane` on a one-pane tab) opens a `start-tab` tab first, so the space stays; without that mod a plain terminal tab takes its place. Closing the start tab closes the space. Cloned from the stock `tabs` mod 0.1.14.
 
 ## Files
 - main.js: the whole view (tabs, panel buttons, per-space panel memory, key command listener via nextCommand).
