@@ -157,12 +157,16 @@ const withTimeout = (cx, p, ms, fallback) => Promise.race([p, new Promise((resol
 // The agent's first message. One line: a newline could send it early.
 // ponytail: the setup steps are left to the agent and the repo's own docs (which env files, certificates, deps).
 const about = (description) => (description ? ` — Task description: ${description}` : "");
-// A fresh branch: prepare, then work. An existing branch (a PR's): prepare, then read and wait (readAndWait).
-const worktreeTask = ({ key, summary, description, path, branch, base, main, fresh, pr }) =>
+// A new branch's work: in a repo with OpenSpec (an openspec/ folder) a change proposal first, then a stop for review.
+const workOn = (key, openspec) => openspec
+  ? `Propose an OpenSpec change for ${key} first (the repo's openspec-propose skill or /opsx:propose), then wait for my review: don't write code until I approve it.`
+  : `Work on ${key}.`;
+// A fresh branch: prepare, then work (workOn). An existing branch (a PR's): prepare, then read and wait (readAndWait).
+const worktreeTask = ({ key, summary, description, path, branch, base, main, fresh, pr, openspec }) =>
   `${key}: ${summary}${about(description)} — You are in ${fresh ? "a new" : "an existing"} git worktree ${path} on branch ${branch}${fresh ? `, created from origin/${base}` : ""}; the main checkout is ${main}. ` +
   `First prepare this worktree as the repo's own docs say (CLAUDE.md, AGENTS.md, .claude/, README): copy the gitignored files it needs from the main checkout ` +
   `(env files, certificates, local config) unless they are already there, install dependencies, and list what you copied; don't change the main checkout. ` +
-  (fresh ? `Then work on ${key}.` : `Then: ${readAndWait({ key, pr })}`);
+  `Then: ${fresh ? workOn(key, openspec) : readAndWait({ key, pr })}`;
 
 const lastLine = (r) => (r.stderr || r.stdout).trim().split("\n").pop();
 
@@ -885,14 +889,16 @@ export default class Jira extends View {
           notify({ title: `Resumed ${st.key}`, body: past.title || past.session_id, level: "info" });
         }
         if (!launch) {
-          const [argv, description] = await Promise.all([
+          const [argv, description, spec] = await Promise.all([
             agentArgv(this.settings().agent ?? "claude", st.on),
             withTimeout(cx, describeIssue(this.settings(), st.key), 15000, ""),
+            fresh ? exec("test", ["-d", `${folder}/openspec`], { on: st.on, timeout: 15000 }).catch(() => null) : null,
           ]);
-          const facts = { key: st.key, summary: st.summary, description, branch, base, pr: st.pr };
+          const openspec = spec?.code === 0;
+          const facts = { key: st.key, summary: st.summary, description, branch, base, pr: st.pr, openspec };
           const task = !g ? `${st.key}: ${st.summary}${about(description)}`
             : st.mode === "worktree" && (fresh || !elsewhere) ? worktreeTask({ ...facts, path: folder, main: g.main, fresh })
-            : fresh ? `${st.key}: ${st.summary}${about(description)} — You are on the new branch ${branch}, created from origin/${base}. Work on ${st.key}.`
+            : fresh ? `${st.key}: ${st.summary}${about(description)} — You are on the new branch ${branch}, created from origin/${base}. ${workOn(st.key, openspec)}`
             : existingTask(facts);
           launch = { name, argv, task };
         }
