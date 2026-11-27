@@ -7,7 +7,7 @@ place: none
 needs: [start-tab (optional)]
 shared_keys: []
 reads_keys: []
-commands: [tab.rename, tab.move, tab.select, tab.close, tab.new, tab.prev, tab.next, layout.select, layout.show, layout.hide, window.minimize, window.maximize, window.close, overlay mod menu (tab context menu), overlay mod new-menu (+ popup)]
+commands: [tab.rename, tab.move, tab.select, tab.close, tab.new, layout.select, layout.show, layout.hide, window.minimize, window.maximize, window.close, overlay mod menu (tab context menu), overlay mod new-menu (+ popup)]
 ---
 
 ## What it does
