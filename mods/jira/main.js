@@ -1,6 +1,6 @@
 import { View, div, svg, image } from "gpui-kit";
 import * as fs from "fs/promises";
-import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
+import { v_flex, h_flex, Scrollbar, InputState, Input, Popup } from "gpui-base";
 import { exec, theme, shared, setShared, spaces, panes, agents, focused, run, knownAgents, props, openOverlay, closeOverlay, appHome, notify } from "herdr";
 import { Buffer } from "buffer";
 import { Voice, asQuery } from "./voice.js";
@@ -190,10 +190,9 @@ const HH = 'HH_CWD="$PWD" PATH="$PATH:$HOME/.cargo/bin" exec human-history "$@"'
 // The latest past session on the issue in the folder's repo (all its worktrees), or null: one whose title or branch
 // names the key first, else one whose own prompt does (jira's sessions start with "<key>: …"). Local folders only.
 // ponytail: an assistant's passing mention doesn't count; without human-history (or on failure) none is found.
-// `scope` "all": every project (to find which repo the issue was worked in), from `folder` (any, e.g. home).
-// pastSessions: the ranked list (at most `max`); pastSession: the best one. `byDate`: newest day first (the day the
-// card shows, "today" / "3d ago"), the rank only within a day.
-async function pastSession(key, folder, scope = "repository") { return (await pastSessions(key, folder, scope, 1))[0] ?? null; }
+// `scope` "all": every project, from `folder` (any, e.g. home).
+// The ranked list (at most `max`). `byDate`: newest day first (the day the card shows, "today" / "3d ago"), the rank
+// only within a day.
 async function pastSessions(key, folder, scope = "repository", max = 5, byDate = false) {
   const r = await exec("/bin/sh", ["-c", HH, "sh", "search", key, "--json", "-f", scope, "--limit", "20"],
     { cwd: folder, timeout: 30000 }).catch(() => null);
@@ -741,35 +740,10 @@ export default class Jira extends View {
     return this.openStartDialog(key, pr);
   }
 
-  // The folder the dialog works from, so it lands in the issue's repo whichever space is active:
-  // 1. a terminal already on the issue's branch (the PR's, else one naming the key);
-  // 2. a PR: the focused folder when it is in the PR's repo, else the folder the PR was loaded from;
-  // 3. the issue's latest past session in any project (human-history, this machine): its worktree when it still
-  //    exists, else its repo's main checkout (that session comes along as `past`);
-  // 4. the focused folder.
-  async startFolder(key, pr) {
-    const terms = [...this.branchPanes().values()].flat().filter((p) => p.cwd);
-    const on = (t) => (t.space.machine ?? null);
-    const onBranch = pr ? terms.find((t) => t.branch === pr.headRefName) : terms.find((t) => mentions(t.branch.toUpperCase(), key));
-    if (onBranch) return { folder: onBranch.cwd, on: on(onBranch) };
-    const place = this.startPlace();
-    if (pr) {
-      const { cwd, on: prOn } = pr.repo ?? {};
-      const same = place.folder && (place.on ?? null) === (prOn ?? null)
-        && (await this.repoOf(place.folder, prOn))?.key === (await this.repoOf(cwd, prOn))?.key;
-      return same ? place : { folder: cwd, on: prOn ?? null };
-    }
-    this.home ??= (await exec("sh", ["-c", 'printf %s "$HOME"']).catch(() => null))?.stdout.trim() || null;
-    const past = this.home ? await pastSession(key, this.home, "all") : null;
-    for (const dir of [past?.worktree, past?.cwd, past?.repo?.replace(/\/\.git\/?$/, "")].filter(Boolean)) {
-      if ((await exec("test", ["-d", dir]).catch(() => null))?.code === 0) return { folder: dir, on: null };
-    }
-    return place;
-  }
-
   // Opens the Start session dialog (its own past sessions list replaces the history mod's panel it used to hold).
-  async openStartDialog(key, pr = null) {
-    const place = await this.startFolder(key, pr);
+  // It starts in the active space's folder (startPlace); its repo dropdown picks another repo.
+  openStartDialog(key, pr = null) {
+    const place = this.startPlace();
     const start = { key, summary: this.summaryOf(key), ...place, pr: pr ? { number: pr.number, url: pr.url, headRefName: pr.headRefName } : null };
     openOverlay({ mod: "jira", kind: "dialog", width: 620, height: 640, props: { start } });
   }
@@ -786,9 +760,39 @@ export default class Jira extends View {
     this.stBase = InputState.new({ value: "", placeholder: "base branch, e.g. master" });
     for (const i of [this.stBranch, this.stBase]) i.on("submit", (_e, cx) => this.start(cx));
     this.stBranch.on("change", (_e, cx) => cx.notify());
+    // The repo picker: one entry per repo of every space's terminals (plus the dialog's own folder), keyed by origin.
+    // The dialog's folder stands for its repo; another repo starts from the first terminal folder in it.
+    this.remotes = new Map(); this.stRepos = []; this.stGen = 0;
+    cx.spawn(async (cx) => {
+      const seen = new Map();
+      for (const p of [{ folder: s.folder, on: s.on }, ...this.places()].filter((p) => p.folder)) {
+        const r = await this.repoOf(p.folder, p.on);
+        if (r && !seen.has(r.key)) seen.set(r.key, { ...p, key: r.key, label: r.name.split("/").pop() });
+      }
+      this.stRepos = [...seen.values()];
+      // Outside a repo nothing is picked until the user picks one.
+      if (!this.st.repo) this.st.repo = s.folder ? (await this.repoOf(s.folder, s.on))?.key ?? null : null;
+      if (this.stRepos.length > 1) cx.notify();
+    });
+    this.loadStart(cx);
+  }
+
+  // Another repo picked: the dialog reads that repo's facts again; a new session is picked.
+  pickRepo(r, cx) {
+    const st = this.st;
+    if (st.repo === r.key || st.busy) return;
+    Object.assign(st, { repo: r.key, folder: r.folder, on: r.on, mode: "worktree", git: null, sessions: undefined, pick: -1, error: null });
+    if (!st.pr) this.stBranch.set_value(branchFor(st.key, st.summary));
+    this.loadStart(cx);
+  }
+
+  // Reads the facts of the dialog's folder (see initStart). A newer load (another repo picked) drops an older one.
+  loadStart(cx) {
+    const s = this.st, gen = ++this.stGen, live = () => gen === this.stGen;
     cx.spawn(async (cx) => {
       const git = (args) => exec("git", args, { cwd: s.folder, on: s.on, timeout: 15000 }).catch(() => null);
       const info = s.folder ? await gitInfo(s.folder, s.on) : null;
+      if (!live()) return;
       if (!info) { this.st.git = false; this.st.sessions = []; cx.notify(); return; }
       const [home, wts, refs, cur, status] = await Promise.all([
         exec("sh", ["-c", 'printf %s "$HOME"'], { on: s.on }).catch(() => null),
@@ -797,6 +801,7 @@ export default class Jira extends View {
         git(["rev-parse", "--abbrev-ref", "HEAD"]),
         git(["status", "--porcelain", "-uno"]),
       ]);
+      if (!live()) return;
       const names = (refs?.stdout ?? "").split("\n").filter(Boolean);
       const local = new Set(names.filter((n) => !n.startsWith("origin/")));
       const remote = new Set(names.filter((n) => n.startsWith("origin/") && n !== "origin/HEAD").map((n) => n.slice(7)));
@@ -810,7 +815,9 @@ export default class Jira extends View {
       if (this.st.git.cur === this.stBranch.value().trim()) this.st.mode = "here";
       cx.notify();
       // The issue's past sessions in this repo (all worktrees), best first; a new session stays picked.
-      this.st.sessions = s.on ? [] : await pastSessions(s.key, info.main, "repository", 5, true);
+      const sessions = s.on ? [] : await pastSessions(s.key, info.main, "repository", 5, true);
+      if (!live()) return;
+      this.st.sessions = sessions;
       cx.notify();
     });
   }
@@ -902,6 +909,32 @@ export default class Jira extends View {
     });
   }
 
+  // The Start dialog's repo dropdown: the picked repo and its folder; the list opens under it (Popup, above the dialog).
+  repoDropdown(t, tilde) {
+    const st = this.st, cur = this.stRepos.find((r) => r.key === st.repo);
+    const close = (cx) => { this.stRepoOpen = false; this.stRepoClosedAt = Date.now(); cx.notify(); };
+    const line = (r) => h_flex().flex_1().min_w(0).gap(8).items_center()
+      .child(div().flex_none().text_size(12).child(r?.label ?? "Pick a repository"))
+      .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(r ? tilde(r.folder) : ""));
+    const trigger = h_flex().id("st-repo").w_full().h(30).px(10).gap(8).items_center().rounded(7).border_1().cursor_pointer()
+      .border_color(this.stRepoOpen ? t.accent : t.border).bg(t.background).hover((s) => s.border_color(t.accent))
+      .on_click((_e, cx) => {
+        // A press on the trigger while open first closes the list (mouse-down-out); don't reopen it at once.
+        if (Date.now() - (this.stRepoClosedAt ?? 0) < 300) return;
+        this.stRepoOpen = true; cx.notify();
+      })
+      .child(line(cur))
+      .child(svg("mods/jira/chevron-down.svg").flex_none().size(11).text_color(t.dim));
+    return Popup.new("st-repo-list", trigger).anchor("top_left").when(Boolean(this.stRepoOpen), (el) => el.content(
+      v_flex().id("st-repo-menu").w(588).max_h(260).overflow_y_scroll().mt(4).p(4).gap(1)
+        .rounded(8).border_1().border_color(t.border).bg(t.popover).shadow_lg()
+        .on_mouse_down_out((_e, cx) => close(cx))
+        .children(this.stRepos.map((r, i) => h_flex().id(`st-repo-${i}`).px(8).py(5).rounded(5).cursor_pointer()
+          .bg(r.key === st.repo ? t.selected : t.popover).hover((s) => s.bg(t.hover))
+          .on_click((_e, cx) => { close(cx); this.pickRepo(r, cx); })
+          .child(line(r))))));
+  }
+
   startView(t) {
     const st = this.st, g = st.git, agentName = this.settings().agentName ?? "Claude Code";
     const branch = this.stBranch.value().trim();
@@ -925,6 +958,10 @@ export default class Jira extends View {
           .child(div().flex_none().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(st.key))
           .child(div().flex_1().min_w(0).truncate().text_color(t.muted).child(st.summary))))
       .child(v_flex().id("start-body").flex_1().min_h(0).overflow_y_scroll().px(16).py(12).gap(12)
+        // The repo picker, a dropdown: shown when the spaces have more than one repo.
+        .when(this.stRepos.length > 1, (e) => e.child(v_flex().gap(6)
+          .child(section("Repository"))
+          .child(this.repoDropdown(t, tilde))))
         .child(g === null ? div().text_color(t.dim).child("Checking the folder…")
           : g === false ? div().text_color(t.dim).child(`${tilde(st.folder) ?? "No folder"} is not a git repository: the agent starts there.`)
           : v_flex().gap(12)
