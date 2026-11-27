@@ -585,10 +585,12 @@ export default class Board extends View {
     // Keys in the agent's texts count only for the saved projects; any when none is saved.
     const projects = jiraProjects(jiraSet);
     // The Jira key the agent names (title, tab, report), or null: its own task, even on a branch another agent made.
-    // The branch's key when the agent mentions it anywhere (namedKey).
+    // The branch's key when the agent mentions it anywhere (namedKey). The space name counts too, last:
+    // the jira mod names the space after its task, which beats a stale session title (DA-20408 on DA-20571-…).
     const textKey = (a, branch) => {
       const term = termBy.get(a.address), tb = tabBy.get(a.tab);
-      return namedKey([term?.title, a.title, tb?.named ? tb.name : null, a.name, term?.report].filter(Boolean).join("\n").toUpperCase(), projects, branch);
+      const texts = [term?.title, a.title, tb?.named ? tb.name : null, a.name, term?.report, spaceBy.get(a.space)?.name];
+      return namedKey(texts.filter(Boolean).join("\n").toUpperCase(), projects, branch);
     };
 
     // Where each agent is, for PRs; a remote one has no local gh. `key`: the Jira key it names, whose PR it gets.

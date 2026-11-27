@@ -600,8 +600,10 @@ export default class Agents extends View {
     // Keys in the agent's texts count only for the saved projects; any when none is saved.
     const projects = jiraProjects(jiraSet);
     // The Jira key the agent names (its own task, even on a branch another agent made), or null;
-    // the branch's key when the agent mentions it anywhere (namedKey).
-    const textKey = (a, branch) => namedKey(textOf(a), projects, branch);
+    // the branch's key when the agent mentions it anywhere (namedKey). The space name counts too, last:
+    // the jira mod names the space after its task, which beats a stale session title (DA-20408 on DA-20571-…).
+    const textKey = (a, branch) =>
+      namedKey(`${textOf(a)}\n${(spaceBy.get(a.space)?.name ?? "").toUpperCase()}`, projects, branch);
     const placeOf = new Map();
     for (const a of list) {
       if (a.address.includes("/")) continue; // another machine: no local gh
