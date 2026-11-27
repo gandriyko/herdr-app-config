@@ -375,7 +375,8 @@ export default class History extends View {
   }
 
   show(session, cx) {
-    this.open = { session, messages: [], shown: PAGE, loading: true };
+    // at: when it opened; a double-click's second press right after lands on this view.
+    this.open = { session, messages: [], shown: PAGE, loading: true, at: Date.now() };
     cx.notify();
     cx.spawn(async (cx) => {
       const open = this.open;
@@ -447,14 +448,31 @@ export default class History extends View {
     const { session: s, messages: list, shown } = this.open;
     const message = (m, i) => {
       const user = m.role === "user";
+      const text = m.text.trim();
+      // While ⌘ is held, each link gets an accent fill: it opens now. Ranges are in the Markdown source
+      // (UTF-16, as JS strings index): [label](url), <url> and bare URLs.
+      const links = this.cmd ? [...text.matchAll(/\[[^\]]*\]\([^)\s]+\)|<https?:\/\/[^>\s]+>|https?:\/\/[^\s<>)\]]+/g)] : [];
       return v_flex().flex_none().gap(4).p(8).rounded(8)
         .bg(user ? t.raised : t.background).border_1().border_color(t.border)
         .child(h_flex().gap(6).text_size(10)
           .child(div().font_semibold().text_color(user ? t.accent : t.muted).child(user ? "USER" : s.agent.toUpperCase()))
           .when(Boolean(m.ts), (e) => e.child(div().text_color(t.dim).child(day(m.ts, true)))))
-        .child(TextView.markdown(`msg-${s.key}-${i}`, m.text.trim()).selectable(true));
+        .child(links.reduce((v, l) => v.highlight_range(l.index, l.index + l[0].length, t.accent + "40"),
+          TextView.markdown(`msg-${s.key}-${i}`, text).selectable(true))
+          // Only ⌘-click opens a link: the first message sits where the clicked row was, and a missed click
+          // on it should not open the browser. The handler gets no modifiers, so this.cmd is the last seen state.
+          .on_link_click((url) => { if (this.cmd) exec("open", [url]); }));
     };
+    const trackCmd = (on, cx) => { if (on !== Boolean(this.cmd)) { this.cmd = on; cx.notify(); } };
     return v_flex().gap(6)
+      .on_mouse_move((e, cx) => trackCmd(e.modifiers.platform, cx))
+      .on_modifiers_changed((e, cx) => trackCmd(e.modifiers.platform, cx))
+      .on_hover((on, cx) => { if (!on) trackCmd(false, cx); })
+      .on_mouse_down("left", (e, cx) => {
+        trackCmd(e.modifiers.platform, cx);
+        // Double-click on a row: its second press lands here, so it resumes the session.
+        if (e.click_count === 2 && this.justOpened()) this.resumeOpen(cx);
+      })
       .child(v_flex().gap(2).px(2)
         .child(h_flex().gap(4).items_center()
           .child(this.star(s, t, "star-open"))
@@ -467,6 +485,20 @@ export default class History extends View {
         .bg(t.raised).hover((st) => st.bg(t.hover)).text_size(12)
         .on_click((_e, cx) => { this.open.shown += PAGE; cx.notify(); })
         .child(`Show more (${list.length - shown} left)`)));
+  }
+
+  // ponytail: 600 ms covers a double-click; a slower second click is a real one.
+  justOpened() { return Boolean(this.open) && Date.now() - this.open.at < 600; }
+
+  async resumeOpen(cx) {
+    const open = this.open;
+    if (!open || !RESUME[open.session.agent] || this.resuming) return;
+    this.resuming = true;
+    try {
+      if (!(await resume(open.session))) return;
+      // Resumed: back to the plain list, search cleared (set_value fires "change", which asks again).
+      this.open = null; this.search.set_value(""); this.find(cx); cx.notify();
+    } finally { this.resuming = false; }
   }
 
   button(t, id, label, primary, onClick) {
@@ -519,11 +551,7 @@ export default class History extends View {
           .when(Boolean(RESUME[open.session.agent]), (e) => e.child(div().id("resume").h(24).px(10).flex().items_center().rounded(6).cursor_pointer()
             .bg(t.solid).text_color(t.solid_foreground).hover((s) => s.opacity(0.9))
             .tooltip(`Resume in a new tab: ${RESUME[open.session.agent](open.session.session_id).join(" ")}`)
-            .on_click(async (_e, cx) => {
-              // Resumed: back to the plain list, search cleared (set_value fires "change", which asks again).
-              if (!(await resume(open.session))) return;
-              this.open = null; this.search.set_value(""); this.find(cx); cx.notify();
-            }).child("Resume"))))
+            .on_click((_e, cx) => this.resumeOpen(cx)).child("Resume"))))
         .when(!open, (e) => e.child(iconButton("refresh", "refresh", "Re-index and search again", (_e, cx) => this.reindex(cx), this.loading))))
       .when(!open, (e) => e.child(h_flex().flex_none().px(8).pt(8).gap(6).items_center()
         .child(div().id("search").flex_1().min_w(0).h(28).px(8).flex().items_center().rounded(7).border_1().border_color(t.border).cursor_text()
